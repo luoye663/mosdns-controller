@@ -15,6 +15,7 @@ import (
 	"github.com/managed-dns/controller/internal/app"
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
+	"github.com/managed-dns/controller/internal/mosdnsclient"
 	"github.com/managed-dns/controller/internal/storage"
 	"github.com/managed-dns/controller/internal/version"
 )
@@ -61,26 +62,54 @@ func main() {
 		}
 		return
 	case "serve":
-		serve(cfg, store)
+		token, err := mosdnsclient.ReadToken(cfg.Mosdns.TokenFile)
+		if err != nil {
+			fatal(err)
+		}
+		serve(cfg, store, mosdnsclient.New(cfg.Mosdns.BaseURL, token, 5*time.Second))
 	default:
 		fatal(fmt.Errorf("unknown command %q", command))
 	}
 }
 
-func serve(cfg config.Config, store *storage.Store) {
+func serve(cfg config.Config, store *storage.Store, client mosdnsclient.Client) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	application := app.New(logger, cfg, store)
+	application := app.New(logger, cfg, store, client)
+	// 对账失败不阻止服务启动：DNS 数据面会继续使用自己的最近快照。
+	if state, err := application.Reconcile(context.Background()); err != nil {
+		logger.Warn("startup reconcile failed", "error", err)
+	} else {
+		logger.Info("startup reconcile completed", "state", state)
+	}
 	publicServer := &http.Server{Addr: cfg.Server.PublicListen, Handler: application.PublicHandler(), ReadHeaderTimeout: 5 * time.Second}
 	internalServer := &http.Server{Addr: cfg.Server.InternalListen, Handler: application.InternalHandler(), ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 2)
 	go serveHTTP(logger, "public", publicServer, errCh)
 	go serveHTTP(logger, "internal", internalServer, errCh)
+	shutdownSignal := signalContext()
+	go reconcilePeriodically(shutdownSignal, application, logger)
 	select {
 	case err := <-errCh:
 		logger.Error("controller stopped unexpectedly", "error", err)
 		os.Exit(1)
-	case <-signalContext().Done():
+	case <-shutdownSignal.Done():
 		shutdown(publicServer, internalServer, logger)
+	}
+}
+func reconcilePeriodically(ctx context.Context, application *app.App, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if state, err := application.Reconcile(ctx); err != nil {
+				logger.Warn("periodic reconcile failed", "error", err)
+			} else {
+				logger.Info("periodic reconcile completed", "state", state)
+			}
+		}
 	}
 }
 func serveHTTP(logger *slog.Logger, name string, server *http.Server, errCh chan<- error) {

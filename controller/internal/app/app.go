@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,12 +11,15 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
+	"github.com/managed-dns/controller/internal/mosdnsclient"
+	"github.com/managed-dns/controller/internal/rules"
 	"github.com/managed-dns/controller/internal/storage"
 	"github.com/managed-dns/controller/internal/version"
 	"github.com/managed-dns/controller/internal/web"
@@ -28,16 +32,17 @@ type App struct {
 	store   *storage.Store
 	auth    *auth.Service
 	limiter *auth.LoginLimiter
+	rules   *rules.Service
 }
 type contextKey string
 
 const requestIDKey contextKey = "request_id"
 const adminKey contextKey = "admin"
 
-func New(logger *slog.Logger, cfg config.Config, store *storage.Store) *App {
+func New(logger *slog.Logger, cfg config.Config, store *storage.Store, client mosdnsclient.Client) *App {
 	service := auth.New(store, cfg.Web.SessionTTL)
 	limiter := auth.NewLoginLimiter()
-	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter}
+	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client)}
 }
 
 func (a *App) PublicHandler() http.Handler {
@@ -54,6 +59,19 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Get("/auth/me", a.me)
 			protected.Post("/auth/logout", a.requireCSRF(a.logout))
 			protected.Post("/auth/change-password", a.requireCSRF(a.changePassword))
+			protected.Get("/rules", a.listRules)
+			protected.Post("/rules", a.requireCSRF(a.createRule))
+			protected.Patch("/rules/{id}", a.requireCSRF(a.updateRule))
+			protected.Delete("/rules/{id}", a.requireCSRF(a.deleteRule))
+			protected.Post("/rules/batch", a.requireCSRF(a.batchRules))
+			protected.Post("/rules/import/preview", a.previewImport)
+			protected.Post("/rules/import/apply", a.requireCSRF(a.importRules))
+			protected.Get("/rules/export", a.exportRules)
+			protected.Post("/rules/test", a.testRule)
+			protected.Get("/rule-versions", a.listVersions)
+			protected.Get("/rule-versions/{version}", a.versionDetail)
+			protected.Post("/rule-versions/{version}/rollback", a.requireCSRF(a.rollback))
+			protected.Post("/rule-versions/reconcile", a.requireCSRF(a.reconcile))
 		})
 	})
 	r.Handle("/*", web.Handler())
@@ -65,6 +83,7 @@ func (a *App) InternalHandler() http.Handler {
 	r.Get("/health/ready", a.ready)
 	return r
 }
+func (a *App) Reconcile(ctx context.Context) (string, error) { return a.rules.Reconcile(ctx) }
 
 func (a *App) ready(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.DB().PingContext(r.Context()); err != nil {
@@ -122,6 +141,165 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, http.StatusOK, map[string]bool{"changed": true})
+}
+func (a *App) listRules(w http.ResponseWriter, r *http.Request) {
+	values, err := a.rules.List(r.Context())
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "list rules failed")
+		return
+	}
+	writeData(w, r, 200, map[string]any{"items": values})
+}
+func (a *App) exportRules(w http.ResponseWriter, r *http.Request) { a.listRules(w, r) }
+func (a *App) createRule(w http.ResponseWriter, r *http.Request) {
+	var value rules.Rule
+	if !decodeJSON(w, r, &value) {
+		return
+	}
+	a.publishRule(w, r, func(admin auth.Admin) (rules.Version, error) {
+		return a.rules.Create(r.Context(), value, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) updateRule(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var value rules.Rule
+	if !decodeJSON(w, r, &value) {
+		return
+	}
+	a.publishRule(w, r, func(admin auth.Admin) (rules.Version, error) {
+		return a.rules.Update(r.Context(), id, value, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) deleteRule(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	a.publishRule(w, r, func(admin auth.Admin) (rules.Version, error) {
+		return a.rules.Delete(r.Context(), id, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) batchRules(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Operation string  `json:"operation"`
+		IDs       []int64 `json:"ids"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	a.publishRule(w, r, func(admin auth.Admin) (rules.Version, error) {
+		return a.rules.Batch(r.Context(), input.Operation, input.IDs, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) previewImport(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Rules []rules.Rule `json:"rules"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if len(input.Rules) > 200000 {
+		writeError(w, r, 413, "LIMIT_EXCEEDED", "rule limit exceeded")
+		return
+	}
+	writeData(w, r, 200, map[string]any{"rules": input.Rules, "count": len(input.Rules)})
+}
+func (a *App) importRules(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Rules []rules.Rule `json:"rules"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	a.publishRule(w, r, func(admin auth.Admin) (rules.Version, error) {
+		return a.rules.Import(r.Context(), input.Rules, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) rollback(w http.ResponseWriter, r *http.Request) {
+	version, ok := pathID(w, r, "version")
+	if !ok {
+		return
+	}
+	a.publishRule(w, r, func(admin auth.Admin) (rules.Version, error) {
+		return a.rules.Rollback(r.Context(), uint64(version), admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) listVersions(w http.ResponseWriter, r *http.Request) {
+	values, err := a.rules.Versions(r.Context())
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "list versions failed")
+		return
+	}
+	writeData(w, r, 200, map[string]any{"items": values})
+}
+func (a *App) versionDetail(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "version")
+	if !ok {
+		return
+	}
+	value, err := a.rules.Version(r.Context(), uint64(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, 404, "NOT_FOUND", "version not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "read version failed")
+		return
+	}
+	writeData(w, r, 200, value)
+}
+func (a *App) reconcile(w http.ResponseWriter, r *http.Request) {
+	state, err := a.rules.Reconcile(r.Context())
+	if err != nil {
+		writeError(w, r, 503, "MOSDNS_UNAVAILABLE", err.Error())
+		return
+	}
+	writeData(w, r, 200, map[string]string{"state": state})
+}
+func (a *App) testRule(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		QName string `json:"qname"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	result, err := a.rules.Test(r.Context(), input.QName)
+	if err != nil {
+		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", err.Error())
+		return
+	}
+	writeData(w, r, 200, result)
+}
+func (a *App) publishRule(w http.ResponseWriter, r *http.Request, operation func(auth.Admin) (rules.Version, error)) {
+	value, err := operation(r.Context().Value(adminKey).(auth.Admin))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, value)
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, 404, "NOT_FOUND", "rule or version not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	writeData(w, r, 200, value)
+}
+func pathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	value, err := strconv.ParseInt(chi.URLParam(r, name), 10, 64)
+	if err != nil || value <= 0 {
+		writeError(w, r, 400, "VALIDATION_ERROR", "invalid identifier")
+		return 0, false
+	}
+	return value, true
+}
+func requestID(r *http.Request) string {
+	value, _ := r.Context().Value(requestIDKey).(string)
+	return value
 }
 
 func (a *App) requireSession(next http.Handler) http.Handler {

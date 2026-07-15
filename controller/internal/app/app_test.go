@@ -13,6 +13,7 @@ import (
 
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
+	"github.com/managed-dns/controller/internal/mosdnsclient"
 	"github.com/managed-dns/controller/internal/storage"
 )
 
@@ -30,7 +31,7 @@ func testApp(t *testing.T) *App {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return New(slog.Default(), cfg, store)
+	return New(slog.Default(), cfg, store, mosdnsclient.New("http://127.0.0.1", "test", time.Second))
 }
 func TestHealthEndpoints(t *testing.T) {
 	application := testApp(t)
