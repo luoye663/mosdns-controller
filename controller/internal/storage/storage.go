@@ -43,3 +43,23 @@ func (s *Store) configure(ctx context.Context) error {
 }
 func (s *Store) DB() *sql.DB  { return s.db }
 func (s *Store) Close() error { return s.db.Close() }
+
+// Backup 使用 SQLite 的 VACUUM INTO 生成一致性副本，不复制正在变化的 WAL 文件。
+// 调用方必须把输出放在持久化卷或已挂载的备份目录中。
+func (s *Store) Backup(ctx context.Context, output string) error {
+	if output == "" {
+		return fmt.Errorf("backup output is required")
+	}
+	if _, err := os.Stat(output); err == nil {
+		return fmt.Errorf("backup output already exists: %s", output)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat backup output: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(output), 0o750); err != nil {
+		return fmt.Errorf("create backup directory: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, output); err != nil {
+		return fmt.Errorf("create sqlite backup: %w", err)
+	}
+	return nil
+}

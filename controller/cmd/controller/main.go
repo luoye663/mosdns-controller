@@ -34,6 +34,7 @@ func main() {
 	configPath := flags.String("config", "", "controller YAML config path")
 	username := flags.String("username", "", "administrator username")
 	password := flags.String("password", "", "administrator password")
+	backupOutput := flags.String("output", "", "backup output path")
 	_ = flags.Parse(os.Args[1:])
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -58,6 +59,11 @@ func main() {
 		return
 	case "healthcheck":
 		if err := store.DB().PingContext(ctx); err != nil {
+			fatal(err)
+		}
+		return
+	case "backup":
+		if err := store.Backup(ctx, *backupOutput); err != nil {
 			fatal(err)
 		}
 		return
