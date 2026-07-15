@@ -29,14 +29,17 @@ type Client interface {
 type UpstreamSnapshot struct {
 	Version                uint64     `json:"version"`
 	ExpectedCurrentVersion uint64     `json:"expected_current_version"`
+	Mode                   string     `json:"mode"`
 	Concurrent             int        `json:"concurrent"`
 	Socks5                 string     `json:"socks5,omitempty"`
 	Upstreams              []Upstream `json:"upstreams"`
 	Checksum               string     `json:"checksum,omitempty"`
 }
 type Upstream struct {
-	Tag  string `json:"tag"`
-	Addr string `json:"addr"`
+	Tag      string `json:"tag"`
+	Addr     string `json:"addr"`
+	Priority int    `json:"priority"`
+	Weight   int    `json:"weight"`
 }
 type Status struct {
 	State           string `json:"state"`

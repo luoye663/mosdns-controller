@@ -6,8 +6,8 @@ export interface Version { version: number; checksum: string; status: string; ru
 export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; qname: string; qtype: number; rcode: number; route: string; route_source: string; cache_hit: boolean; latency_us: number; access_rule_id: number; route_rule_id: number }
 export interface Device { id: number; ip: string; mac: string; hostname: string; display_name: string; note: string; source: string; first_seen_at_ms: number; last_seen_at_ms: number; query_count_24h: number }
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
-export interface Upstream { tag: string; addr: string }
-export interface UpstreamSnapshot { version: number; expected_current_version: number; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
+export interface Upstream { tag: string; addr: string; priority: number; weight: number }
+export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
 
 // CSRF token 只保留在当前浏览器会话，刷新后仍可继续操作已有服务端 session。
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
