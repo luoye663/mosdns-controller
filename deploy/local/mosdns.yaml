@@ -1,0 +1,131 @@
+# 本地开发配置：DNS、controller 和 mosdns API 都只监听 127.0.0.1。
+# 运行前执行 make local-init，以生成 .local/mosdns_control_token 和数据目录。
+log:
+  level: info
+
+api:
+  http: "127.0.0.1:19091"
+
+plugins:
+  - tag: geosite_cn
+    type: domain_set
+    args:
+      exps: []
+
+  - tag: dynamic_rules
+    type: dynamic_rule_engine
+    args:
+      snapshot_file: "../.local/mosdns/dynamic-rules.json"
+      backup_file: "../.local/mosdns/dynamic-rules.json.bak"
+      auth_token_file: "../.local/mosdns_control_token"
+      fail_open_on_snapshot_error: true
+
+  - tag: query_audit
+    type: query_audit
+    args:
+      endpoint: "http://127.0.0.1:18081/internal/v1/query-events/batch"
+      auth_token_file: "../.local/mosdns_control_token"
+      queue_size: 1024
+      batch_size: 32
+      flush_interval: "250ms"
+      request_timeout: "2s"
+      max_retries: 1
+      include_answers: false
+      include_error_text: true
+      max_error_text_bytes: 256
+
+  # local 与 remote 使用独立 cache，保证路由切换不会复用另一组的结果。
+  - tag: cache_local
+    type: cache
+    args:
+      size: 256
+      lazy_cache_ttl: 0
+      dump_file: "../.local/mosdns/cache-local.dump"
+      dump_interval: 600
+      auth_token_file: "../.local/mosdns_control_token"
+
+  - tag: cache_remote
+    type: cache
+    args:
+      size: 256
+      lazy_cache_ttl: 0
+      dump_file: "../.local/mosdns/cache-remote.dump"
+      dump_interval: 600
+      auth_token_file: "../.local/mosdns_control_token"
+
+  # 公开 DoH 仅用于本地功能验证。生产请使用 deploy/mosdns/config.yaml。
+  # 若本机需经 SOCKS5 联网，可为两个 forward args 增加 socks5: "host:port"。
+  - tag: local_dns
+    type: forward
+    args:
+      concurrent: 1
+      upstreams:
+        - tag: local-google
+          addr: "https://dns.google/dns-query"
+
+  - tag: remote_dns
+    type: forward
+    args:
+      concurrent: 1
+      upstreams:
+        - tag: remote-cloudflare
+          addr: "https://cloudflare-dns.com/dns-query"
+
+  - tag: route_local
+    type: sequence
+    args:
+      - exec: mark 1101
+      - exec: $cache_local
+      - matches:
+          - has_resp
+        exec: mark 2101
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $local_dns
+      - exec: accept
+
+  - tag: route_remote
+    type: sequence
+    args:
+      - exec: mark 1102
+      - exec: $cache_remote
+      - matches:
+          - has_resp
+        exec: mark 2101
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $remote_dns
+      - exec: accept
+
+  - tag: main
+    type: sequence
+    args:
+      - exec: $query_audit
+      - exec: $dynamic_rules
+      - matches:
+          - mark 1001
+        exec: reject 3
+      - matches:
+          - mark 1101
+        exec: goto route_local
+      - matches:
+          - mark 1102
+        exec: goto route_remote
+      - matches:
+          - qname $geosite_cn
+        exec: goto route_local
+      - exec: goto route_remote
+
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: main
+      listen: "127.0.0.1:5353"
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: main
+      listen: "127.0.0.1:5353"

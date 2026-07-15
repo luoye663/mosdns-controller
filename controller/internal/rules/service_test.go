@@ -65,6 +65,22 @@ func blockRule(pattern string) Rule {
 func routeRule() Rule {
 	return Rule{Category: "route", Action: "remote", MatchType: "domain", Pattern: "route.example", Priority: 100, Enabled: true}
 }
+
+func TestEmptyListsReturnArrays(t *testing.T) {
+	service, _ := testService(t)
+	rules, err := service.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions, err := service.Versions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules == nil || versions == nil || len(rules) != 0 || len(versions) != 0 {
+		t.Fatalf("empty lists must be non-nil arrays: rules=%#v versions=%#v", rules, versions)
+	}
+}
+
 func TestPublishAndRouteCacheFlush(t *testing.T) {
 	service, fake := testService(t)
 	version, err := service.Create(context.Background(), blockRule("blocked.example"), 1, "r1", "127.0.0.1")

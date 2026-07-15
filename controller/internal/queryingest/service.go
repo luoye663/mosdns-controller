@@ -403,7 +403,8 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 		return Page{}, err
 	}
 	defer rows.Close()
-	page := Page{}
+	// Items 始终是数组，前端可直接使用 length 和 v-for 呈现空状态。
+	page := Page{Items: make([]StoredEvent, 0)}
 	for rows.Next() {
 		var e StoredEvent
 		var hit int

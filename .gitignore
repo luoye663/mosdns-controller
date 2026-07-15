@@ -12,4 +12,5 @@ controller/controller
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+.local/
 .DS_Store

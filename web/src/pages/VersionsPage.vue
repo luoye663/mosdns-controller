@@ -4,7 +4,7 @@ import { NAlert, NButton } from 'naive-ui'
 import { api, type Version } from '@/lib/api'
 const versions = ref<Version[]>([]); const loading = ref(false); const message = ref(''); const error = ref('')
 function time(ms: number) { return new Date(ms).toLocaleString() }
-async function load() { loading.value = true; try { versions.value = (await api.versions()).items } catch (e) { error.value = e instanceof Error ? e.message : '无法加载版本' } finally { loading.value = false } }
+async function load() { loading.value = true; try { versions.value = (await api.versions()).items ?? [] } catch (e) { error.value = e instanceof Error ? e.message : '无法加载版本' } finally { loading.value = false } }
 async function rollback(version: Version) { if (!window.confirm(`确认将版本 ${version.version} 的规则重新发布为新版本？`)) return; loading.value = true; try { const result = await api.rollback(version.version); message.value = `已创建并发布版本 ${result.version}`; await load() } catch (e) { error.value = e instanceof Error ? e.message : '回滚失败' } finally { loading.value = false } }
 async function reconcile() { loading.value = true; try { message.value = `运行时状态：${(await api.reconcile()).state}` } catch (e) { error.value = e instanceof Error ? e.message : '对账失败' } finally { loading.value = false } }
 onMounted(load)

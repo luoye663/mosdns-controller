@@ -64,7 +64,8 @@ func (s *Service) List(ctx context.Context) ([]Rule, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Rule
+	// 列表 API 必须序列化为空数组而非 null，避免客户端无法按数组渲染空状态。
+	out := make([]Rule, 0)
 	for rows.Next() {
 		var r Rule
 		if err := rows.Scan(&r.ID, &r.Category, &r.Action, &r.MatchType, &r.Pattern, &r.Priority, &r.Source, &r.Comment, &r.Enabled, &r.CreatedAtMS, &r.UpdatedAtMS); err != nil {
@@ -163,7 +164,8 @@ func (s *Service) Versions(ctx context.Context) ([]Version, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Version
+	// 与规则列表保持一致：没有发布历史时返回 []，不返回 JSON null。
+	out := make([]Version, 0)
 	for rows.Next() {
 		var v Version
 		if err := rows.Scan(&v.Version, &v.Checksum, &v.Status, &v.RuleCount, &v.CreatedAtMS, &v.ErrorCode); err != nil {

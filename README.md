@@ -1,35 +1,176 @@
 # mosdns-manager
 
-局域网 DNS 管理平台。`mosdns/` 是固定在官方 `v5.3.4` 的 GPL-3.0 数据面 fork；`controller/` 与 `web/` 是独立的控制面和管理员界面。
+面向局域网的 DNS 管理平台。`mosdns/` 是固定在官方 `v5.3.4` 的 GPL-3.0 数据面 fork；`controller/` 提供规则、审计、统计和认证 API；`web/` 是 Vue 管理界面。推荐通过 Docker Compose 运行完整系统。
 
-## 当前阶段
+## 功能概览
 
-已完成 Phase 0 与 Phase 1：上游兼容性审计、可注册的 `dynamic_rule_engine` 和 `query_audit` skeleton、controller/WebUI 构建骨架、基础 CI 与 Compose 配置。规则编译、发布、认证、查询审计与正式 DNS 拓扑仍在后续阶段实现。
+- 动态白名单、黑名单、强制 local/remote 路由，规则发布不重启 DNS 监听。
+- 独立 local/remote DNS 缓存，黑名单检查位于缓存之前。
+- 查询审计、SQLite 统计、SSE 实时查询流，以及每次实际采纳响应的 `upstream_tag`。
+- controller 不可用时，mosdns 仍使用最近成功持久化的规则快照继续解析。
+- 管理员 session、CSRF 防护、内部 Bearer Token 和非 root 容器部署。
 
-## 开发环境
+## 快速部署
 
-- Go `1.26.5` 或兼容版本；上游 mosdns 的 `go.mod` 固定为 `1.24.9`，controller 使用 `1.25.0`。
-- Node.js 22 与 npm。
-- Docker Compose，用于后续容器验证。
+### 1. 准备环境
+
+部署主机需要 Docker Engine 和 Docker Compose v2。DNS 服务会占用宿主机的 `53/udp`、`53/tcp`，管理界面占用 `8080/tcp`；请先停止或迁移已有 DNS 服务，并确认这些端口未被占用。
+
+首次部署建议先在测试机器或隔离网络使用 [集成环境](#集成环境验证)，它只使用 `5353`，不会影响生产 DNS。
+
+### 2. 配置密钥和上游
+
+在仓库根目录执行。共享 token 供 controller 与 mosdns 的内部 API 使用，必须保密且不能提交：
 
 ```bash
-npm --prefix web install
+umask 077
+openssl rand -hex 32 > deploy/secrets/mosdns_control_token
+```
+
+编辑 `deploy/mosdns/config.yaml`，将 `<REMOTE_DOH_URL>` 替换为实际远程 DoH 端点。该文件中的 `remote_gateway` 是远程默认路由的必要配置；保留占位符会导致 mosdns 无法启动。请在部署副本中修改，或使用自己的配置管理工具注入该值，切勿提交真实私有 URL。
+
+`deploy/mosdns/rules/geosite_cn.txt` 可导入静态国内域名规则；保留为空时，静态国内分类关闭，但 WebUI 的动态路由规则仍可用。
+
+### 3. 构建并启动
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml ps
+docker compose -f deploy/docker-compose.yml logs --tail=100 mosdns controller
+```
+
+状态为 `healthy` 后，访问 `http://<部署主机IP>:8080`。仅 `53/udp`、`53/tcp` 与 `8080/tcp` 映射到宿主机；mosdns API `9091` 和 controller ingest `8081` 仅在 Compose 内部网络开放。
+
+需要通过 SOCKS5 代理拉取基础镜像或下载构建依赖时，可在运行 Docker 命令的终端设置：
+
+```bash
+export ALL_PROXY=socks5://192.168.18.35:10808
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+不要将代理地址或凭证写入 Dockerfile、Compose 文件或 Git。
+
+### 4. 创建首个管理员
+
+服务启动后创建管理员。命令中的密码会出现在 shell 历史记录中，生产环境应使用受控终端并在执行后清理历史记录。
+
+```bash
+docker compose -f deploy/docker-compose.yml exec controller \
+  controller create-admin \
+  -config /etc/mosdns-controller/config.yaml \
+  -username admin \
+  -password '请替换为高强度密码'
+```
+
+随后在 `http://<部署主机IP>:8080` 登录。首次使用前，应先在 WebUI 确认系统状态和当前规则版本，再让局域网客户端使用该主机作为 DNS 服务器。
+
+### 5. 验证服务
+
+```bash
+curl -fsS http://127.0.0.1:8080/health/ready
+dig @127.0.0.1 example.com A
+dig @127.0.0.1 example.com A +tcp
+```
+
+如果未安装 `dig`，可使用项目自带的健康检查命令：
+
+```bash
+docker compose -f deploy/docker-compose.yml exec mosdns \
+  dns-healthcheck --server 127.0.0.1:53 --network udp
+```
+
+停止服务但保留规则快照、缓存和 SQLite 数据：
+
+```bash
+docker compose -f deploy/docker-compose.yml down
+```
+
+`down -v` 会删除命名卷中的运行数据，仅应在确认不需要恢复数据时使用。
+
+## 本地编译与测试
+
+开发环境需要 Go `1.26.5` 或兼容版本、Node.js 22、npm 和 Docker Compose。mosdns 的 `go.mod` 基线为 Go `1.24.9`，controller 为 Go `1.25.0`。
+
+安装 WebUI 依赖后，可执行完整的本地构建检查：
+
+```bash
+npm --prefix web ci
 make test
 make build
 make race
+make lint
 ```
 
-WebUI 本地开发：
+常用目标：
+
+| 命令 | 用途 |
+|---|---|
+| `make test` | Go 单元测试与 WebUI 类型检查 |
+| `make build` | 编译 mosdns、controller，并构建 WebUI 静态资源 |
+| `make race` | dynamic_rule_engine、query_audit 和 controller 的 race 检查 |
+| `make lint` | Go vet 与 WebUI 类型检查 |
+| `make web-embed` | 构建 WebUI 并同步到 controller 的 `go:embed` 静态目录 |
+| `make compose-up` | 前台构建并启动完整 Compose 环境 |
+| `make compose-down` | 停止 Compose 环境并保留命名卷 |
+
+如需得到本机可直接执行的二进制文件：
 
 ```bash
-npm --prefix web run dev
+mkdir -p bin
+go -C mosdns build -o ../bin/mosdns .
+go -C controller build -o ../bin/controller ./cmd/controller
 ```
 
-`deploy/docker-compose.yml` 仅发布 DNS `53/udp`、`53/tcp` 和 controller 公共 `8080/tcp`。mosdns `9091` 与 controller ingest `8081` 只在 Compose 内部网络可达。
+### 本地运行完整服务
+
+`deploy/local/` 提供不依赖 Docker 的开发配置。它只监听本机回环地址，端口为 DNS `5353`、WebUI/API `18080`、内部 ingest `18081`、mosdns API `19091`，所有本地数据均写入被 Git 忽略的 `.local/`。配置中的公开 DoH 仅用于开发功能验证，不应用于生产。
+
+先执行初始化，然后在两个终端分别运行以下命令：
+
+```bash
+make local-init
+make local-mosdns
+```
+
+```bash
+make local-controller
+```
+
+也可使用 `make local-up` 同时启动两项服务。服务启动后，在第三个终端运行 `make local-create-admin` 创建管理员，并访问 `http://127.0.0.1:18080`。本地 DNS 验证命令为 `dig @127.0.0.1 -p 5353 example.com A`。
+
+`make local-clean` 仅删除 `.local/` 下的本机开发数据库、缓存、快照和 token，不会影响 Docker Compose 的命名卷。WebUI 的生产静态资源会在 `controller/Dockerfile` 构建镜像时嵌入 controller；单独执行 `npm --prefix web run dev` 只启动 Vite 开发服务器，不会自动代理 controller API。
+
+## 集成环境验证
+
+集成 Compose 会启动两个本地 CoreDNS mock upstream，并仅开放 `5353/udp` 和 `5353/tcp`。它不需要真实远程 DoH，适合在迁移 `53` 前验证 DNS 路径：
+
+```bash
+umask 077
+openssl rand -hex 32 > deploy/secrets/mosdns_control_token
+docker compose -f deploy/docker-compose.integration.yml --profile integration up --build
+```
+
+另一个不依赖 Docker 的真实 mosdns 集成测试入口：
+
+```bash
+go -C mosdns test -v ./tests/integration
+```
+
+更多测试范围和清理方式见 [tests/integration/README.md](tests/integration/README.md)。
+
+## 配置、数据与运维
+
+- 生产 Compose：`deploy/docker-compose.yml`。
+- mosdns 配置：`deploy/mosdns/config.yaml`。
+- controller 配置：`deploy/controller/config.yaml`。
+- 持久化数据：Compose 命名卷 `mosdns-state`（快照和缓存）与 `controller-state`（SQLite）。
+- 密钥目录：`deploy/secrets/`，只保留 `.gitkeep`，实际 token 被 Git 忽略。
+- 运维、备份恢复、升级与故障诊断分别见 [operations](docs/operations.md)、[recovery](docs/recovery.md)、[upgrade](docs/upgrade.md) 与 [troubleshooting](docs/troubleshooting.md)。
 
 ## 版本与许可证
 
 - mosdns 基线：`v5.3.4`，commit `b7323188bab1ea742538aeccb31b692bc4967d1b`。
 - 兼容性审计：[docs/mosdns-v5.3.4-compatibility.md](docs/mosdns-v5.3.4-compatibility.md)。
+- 开发说明：[docs/development.md](docs/development.md)。
 - GPL 边界：[docs/license-boundary.md](docs/license-boundary.md)。
-- 不得提交 `deploy/secrets/` 中的真实 token、密码、私有 DoH URL 或 DNS 数据。
+- 不得提交 token、密码、真实私有 DoH URL、生成的 secret 文件或 DNS 数据。

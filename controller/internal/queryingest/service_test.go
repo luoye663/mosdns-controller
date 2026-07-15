@@ -28,6 +28,17 @@ func validBatch(events ...Event) Batch {
 	return Batch{SchemaVersion: 1, SenderID: "mosdns-test", SentAtMS: time.Now().UnixMilli(), Events: events}
 }
 
+func TestEmptyQueryPageReturnsItemsArray(t *testing.T) {
+	s := testService(t)
+	page, err := s.Queries(context.Background(), Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Items == nil || len(page.Items) != 0 {
+		t.Fatalf("empty page items must be a non-nil array: %#v", page.Items)
+	}
+}
+
 func TestDuplicateEventDoesNotAggregateTwice(t *testing.T) {
 	s := testService(t)
 	event := validEvent("event-1")
