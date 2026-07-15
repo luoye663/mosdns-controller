@@ -1,0 +1,4 @@
+.:53 {
+    file /etc/coredns/db.local
+    log
+}

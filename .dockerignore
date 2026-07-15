@@ -1,0 +1,9 @@
+.git/
+deploy/secrets/
+mosdns/mosdns
+controller/controller
+web/node_modules/
+web/dist/
+**/*.db
+**/*.db-shm
+**/*.db-wal

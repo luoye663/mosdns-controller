@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - run: go -C mosdns test ./...
+      - run: go -C controller test ./...
+      - run: go -C mosdns test -race ./plugin/executable/dynamic_rule_engine/...
+      - run: go -C mosdns test -race ./plugin/executable/query_audit/...
+      - run: go -C controller test -race ./...
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - run: npm run build --prefix web
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mosdns
+          push: false
+          platforms: linux/amd64,linux/arm64
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: controller/Dockerfile
+          push: false
+          platforms: linux/amd64,linux/arm64

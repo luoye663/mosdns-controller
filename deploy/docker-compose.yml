@@ -1,0 +1,56 @@
+services:
+  mosdns:
+    build:
+      context: ../mosdns
+      args:
+        MOSDNS_BASE: v5.3.4
+    command: ["start", "-c", "/etc/mosdns/config.yaml"]
+    cap_add:
+      - NET_BIND_SERVICE
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - mosdns-state:/var/lib/mosdns
+      - ./mosdns/config.yaml:/etc/mosdns/config.yaml:ro
+
+      - ./mosdns/rules:/etc/mosdns/rules:ro
+      - ./secrets:/run/secrets:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/mosdns", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  controller:
+    build:
+      context: ..
+      dockerfile: controller/Dockerfile
+    command: ["serve", "-config", "/etc/mosdns-controller/config.yaml"]
+    ports:
+      - "8080:8080/tcp"
+    volumes:
+      - controller-state:/var/lib/mosdns-controller
+      - ./controller/config.yaml:/etc/mosdns-controller/config.yaml:ro
+      - ./secrets:/run/secrets:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health/ready >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  mosdns-state:
+  controller-state:
+
+networks:
+  internal:
+    driver: bridge

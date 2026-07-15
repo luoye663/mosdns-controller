@@ -1,0 +1,149 @@
+log:
+  level: info
+
+# 仅在 Compose 内部网络监听；不得将 :9091 发布到宿主机。
+api:
+  http: "0.0.0.0:9091"
+
+plugins:
+  # 静态国内域名集合由部署目录中的规则文件提供，可按运维流程更新后重启加载。
+  - tag: geosite_cn
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/geosite_cn.txt"
+
+  - tag: dynamic_rules
+    type: dynamic_rule_engine
+    args:
+      snapshot_file: "/var/lib/mosdns/dynamic-rules.json"
+      backup_file: "/var/lib/mosdns/dynamic-rules.json.bak"
+      auth_token_file: "/run/secrets/mosdns_control_token"
+      max_rules: 200000
+      max_regexp_rules: 500
+      max_request_body_bytes: 67108864
+      fail_open_on_snapshot_error: true
+      marks:
+        access_block: 1001
+        route_local: 1101
+        route_remote: 1102
+        no_log: 1201
+
+  - tag: query_audit
+    type: query_audit
+    args:
+      endpoint: "http://controller:8081/internal/v1/query-events/batch"
+      auth_token_file: "/run/secrets/mosdns_control_token"
+      queue_size: 65536
+      batch_size: 256
+      flush_interval: "250ms"
+      request_timeout: "2s"
+      max_retries: 1
+      include_answers: false
+      include_error_text: true
+      max_error_text_bytes: 256
+      marks:
+        access_block: 1001
+        route_local: 1101
+        route_remote: 1102
+        no_log: 1201
+        cache_hit: 2101
+
+  # local 与 remote 绝不能共享 cache，避免不同上游组的结果串用。
+  - tag: cache_local
+    type: cache
+    args:
+      size: 4096
+      lazy_cache_ttl: 0
+      dump_file: "/var/lib/mosdns/cache-local.dump"
+      dump_interval: 600
+      auth_token_file: "/run/secrets/mosdns_control_token"
+
+  - tag: cache_remote
+    type: cache
+    args:
+      size: 4096
+      lazy_cache_ttl: 0
+      dump_file: "/var/lib/mosdns/cache-remote.dump"
+      dump_interval: 600
+      auth_token_file: "/run/secrets/mosdns_control_token"
+
+  - tag: local_dns
+    type: forward
+    args:
+      concurrent: 2
+      upstreams:
+        - tag: alidns_doh
+          addr: "https://223.5.5.5/dns-query"
+        - tag: dnspod_doh
+          addr: "https://1.12.12.12/dns-query"
+
+  - tag: remote_dns
+    type: forward
+    args:
+      concurrent: 1
+      upstreams:
+        - tag: remote_gateway
+          # 生产部署前替换为真实私有 DoH 地址，禁止提交真实地址。
+          addr: "<REMOTE_DOH_URL>"
+
+  - tag: route_local
+    type: sequence
+    args:
+      - exec: mark 1101
+      - exec: $cache_local
+      - matches:
+          - has_resp
+        exec: mark 2101
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $local_dns
+      - exec: accept
+
+  - tag: route_remote
+    type: sequence
+    args:
+      - exec: mark 1102
+      - exec: $cache_remote
+      - matches:
+          - has_resp
+        exec: mark 2101
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $remote_dns
+      - exec: accept
+
+  - tag: main
+    type: sequence
+    args:
+      # 后置审计必须在最前，才能观察后续 goto、accept 与 reject 的结果。
+      - exec: $query_audit
+      - exec: $dynamic_rules
+      # block 必须先于 cache，新增黑名单会立即生效。
+      - matches:
+          - mark 1001
+        exec: reject 3
+      - matches:
+          - mark 1101
+        exec: goto route_local
+      - matches:
+          - mark 1102
+        exec: goto route_remote
+      - matches:
+          - qname $geosite_cn
+        exec: goto route_local
+      - exec: goto route_remote
+
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: main
+      listen: "0.0.0.0:53"
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: main
+      listen: "0.0.0.0:53"

@@ -1,0 +1,24 @@
+:root {
+  color: #1f2937;
+  background: #f8fafc;
+  font-family: Inter, "Noto Sans SC", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  min-height: 100vh;
+}
+
+.header {
+  padding: 14px 24px;
+  background: #ffffff;
+  font-size: 18px;
+  font-weight: 600;
+}

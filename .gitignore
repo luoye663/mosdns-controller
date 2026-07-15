@@ -1,0 +1,15 @@
+# 本地密钥和运行数据绝不能进入版本库。
+deploy/secrets/*
+!deploy/secrets/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.dump
+
+# 构建产物与本地依赖。
+mosdns/mosdns
+controller/controller
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+.DS_Store
