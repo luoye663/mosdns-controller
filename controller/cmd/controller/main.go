@@ -66,15 +66,16 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		serve(cfg, store, mosdnsclient.New(cfg.Mosdns.BaseURL, token, 5*time.Second))
+		serve(cfg, store, mosdnsclient.New(cfg.Mosdns.BaseURL, token, 5*time.Second), token)
 	default:
 		fatal(fmt.Errorf("unknown command %q", command))
 	}
 }
 
-func serve(cfg config.Config, store *storage.Store, client mosdnsclient.Client) {
+func serve(cfg config.Config, store *storage.Store, client mosdnsclient.Client, ingestToken string) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	application := app.New(logger, cfg, store, client)
+	application := app.New(logger, cfg, store, client, ingestToken)
+	defer application.Close()
 	// 对账失败不阻止服务启动：DNS 数据面会继续使用自己的最近快照。
 	if state, err := application.Reconcile(context.Background()); err != nil {
 		logger.Warn("startup reconcile failed", "error", err)

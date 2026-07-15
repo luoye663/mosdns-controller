@@ -19,6 +19,7 @@ import (
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
+	"github.com/managed-dns/controller/internal/queryingest"
 	"github.com/managed-dns/controller/internal/rules"
 	"github.com/managed-dns/controller/internal/storage"
 	"github.com/managed-dns/controller/internal/version"
@@ -33,16 +34,17 @@ type App struct {
 	auth    *auth.Service
 	limiter *auth.LoginLimiter
 	rules   *rules.Service
+	ingest  *queryingest.Service
 }
 type contextKey string
 
 const requestIDKey contextKey = "request_id"
 const adminKey contextKey = "admin"
 
-func New(logger *slog.Logger, cfg config.Config, store *storage.Store, client mosdnsclient.Client) *App {
+func New(logger *slog.Logger, cfg config.Config, store *storage.Store, client mosdnsclient.Client, ingestToken string) *App {
 	service := auth.New(store, cfg.Web.SessionTTL)
 	limiter := auth.NewLoginLimiter()
-	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client)}
+	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client), ingest: queryingest.New(store.DB(), ingestToken, cfg.Storage.Path)}
 }
 
 func (a *App) PublicHandler() http.Handler {
@@ -72,6 +74,14 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Get("/rule-versions/{version}", a.versionDetail)
 			protected.Post("/rule-versions/{version}/rollback", a.requireCSRF(a.rollback))
 			protected.Post("/rule-versions/reconcile", a.requireCSRF(a.reconcile))
+			protected.Get("/queries", a.queries)
+			protected.Get("/queries/stream", a.queryStream)
+			protected.Get("/stats/summary", a.summary)
+			protected.Get("/stats/top-domains", a.statistics("domains"))
+			protected.Get("/stats/top-clients", a.statistics("clients"))
+			protected.Get("/stats/routes", a.statistics("routes"))
+			protected.Get("/stats/rcode", a.statistics("rcode"))
+			protected.Get("/stats/latency", a.latency)
 		})
 	})
 	r.Handle("/*", web.Handler())
@@ -81,8 +91,10 @@ func (a *App) InternalHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(a.middleware)
 	r.Get("/health/ready", a.ready)
+	r.Post("/internal/v1/query-events/batch", a.ingestEvents)
 	return r
 }
+func (a *App) Close()                                        { a.ingest.Close() }
 func (a *App) Reconcile(ctx context.Context) (string, error) { return a.rules.Reconcile(ctx) }
 
 func (a *App) ready(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +284,102 @@ func (a *App) testRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, 200, result)
+}
+
+// ingestEvents 仅由 Docker 内部的 mosdns 调用，使用共享 token 而不是管理员 session。
+func (a *App) ingestEvents(w http.ResponseWriter, r *http.Request) {
+	if !a.ingest.Authorized(r.Header.Get("Authorization")) {
+		writeError(w, r, http.StatusUnauthorized, "AUTH_REQUIRED", "invalid internal token")
+		return
+	}
+	var batch queryingest.Batch
+	if !decodeJSON(w, r, &batch) {
+		return
+	}
+	if err := a.ingest.Enqueue(batch); err != nil {
+		if errors.Is(err, queryingest.ErrOverloaded) {
+			writeError(w, r, http.StatusServiceUnavailable, "INGEST_OVERLOADED", "query ingestion is overloaded")
+			return
+		}
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	writeData(w, r, http.StatusAccepted, map[string]int{"accepted": len(batch.Events), "rejected": 0})
+}
+func (a *App) queries(w http.ResponseWriter, r *http.Request) {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil && r.URL.Query().Get("limit") != "" {
+		writeError(w, r, 400, "VALIDATION_ERROR", "invalid limit")
+		return
+	}
+	page, err := a.ingest.Queries(r.Context(), queryingest.Query{Limit: limit, Cursor: r.URL.Query().Get("cursor"), ClientIP: r.URL.Query().Get("client_ip"), Route: r.URL.Query().Get("route"), QName: r.URL.Query().Get("qname")})
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	writeData(w, r, 200, page)
+}
+
+// queryStream 的写入在 HTTP goroutine 内完成；broadcaster 从不等待该 goroutine。
+func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, r, 500, "INTERNAL_ERROR", "streaming is unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	sub := a.ingest.Subscribe()
+	defer sub.Close()
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case event, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				return
+			}
+			_, _ = w.Write([]byte("event: query\nid: " + event.EventID + "\ndata: " + string(data) + "\n\n"))
+			flusher.Flush()
+		case now := <-heartbeat.C:
+			_, _ = w.Write([]byte("event: heartbeat\ndata: {\"time\":\"" + now.UTC().Format(time.RFC3339) + "\"}\n\n"))
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+func (a *App) summary(w http.ResponseWriter, r *http.Request) {
+	result, err := a.ingest.Summary(r.Context())
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "read summary failed")
+		return
+	}
+	writeData(w, r, 200, result)
+}
+func (a *App) statistics(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		result, err := a.ingest.Top(r.Context(), kind, limit)
+		if err != nil {
+			writeError(w, r, 500, "INTERNAL_ERROR", "read statistics failed")
+			return
+		}
+		writeData(w, r, 200, map[string]any{"items": result})
+	}
+}
+func (a *App) latency(w http.ResponseWriter, r *http.Request) {
+	result, err := a.ingest.Latency(r.Context())
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "read latency failed")
+		return
+	}
+	writeData(w, r, 200, map[string]any{"items": result})
 }
 func (a *App) publishRule(w http.ResponseWriter, r *http.Request, operation func(auth.Admin) (rules.Version, error)) {
 	value, err := operation(r.Context().Value(adminKey).(auth.Admin))

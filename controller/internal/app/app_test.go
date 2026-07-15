@@ -31,7 +31,9 @@ func testApp(t *testing.T) *App {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return New(slog.Default(), cfg, store, mosdnsclient.New("http://127.0.0.1", "test", time.Second))
+	application := New(slog.Default(), cfg, store, mosdnsclient.New("http://127.0.0.1", "test", time.Second), "test")
+	t.Cleanup(application.Close)
+	return application
 }
 func TestHealthEndpoints(t *testing.T) {
 	application := testApp(t)
@@ -116,6 +118,24 @@ func TestRequestBodyLimit(t *testing.T) {
 	application.PublicHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d", rec.Code)
+	}
+}
+
+func TestInternalIngestRequiresSharedToken(t *testing.T) {
+	application := testApp(t)
+	body := `{"schema_version":1,"sender_id":"mosdns-test","sent_at_unix_ms":1,"events":[{"schema_version":1,"event_id":"ingest-1","timestamp_unix_ms":1,"client_ip":"192.0.2.1","protocol":"udp","qname":"example.com","qtype":1,"qclass":1,"rcode":0,"route":"remote","route_source":"default","upstream_group":"","cache_hit":false,"snapshot_version":1,"access_rule_id":0,"route_rule_id":0,"answer_count":0,"latency_us":1,"error_code":"","error_text":""}]}`
+	unauthorized := httptest.NewRequest(http.MethodPost, "/internal/v1/query-events/batch", bytes.NewBufferString(body))
+	unauthorizedRec := httptest.NewRecorder()
+	application.InternalHandler().ServeHTTP(unauthorizedRec, unauthorized)
+	if unauthorizedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized ingest=%d", unauthorizedRec.Code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/query-events/batch", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test")
+	rec := httptest.NewRecorder()
+	application.InternalHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("ingest=%d: %s", rec.Code, rec.Body.String())
 	}
 }
 func authDigest(value string) []byte { result := sha256.Sum256([]byte(value)); return result[:] }
