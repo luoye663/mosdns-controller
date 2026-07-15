@@ -54,11 +54,12 @@ plugins:
       auth_token_file: "../.local/mosdns_control_token"
 
   # 公开 DoH 仅用于本地功能验证。生产请使用 deploy/mosdns/config.yaml。
-  # 若本机需经 SOCKS5 联网，可为两个 forward args 增加 socks5: "host:port"。
+  # 本地网络通过 SOCKS5 访问 DoH；forward 不会自动读取 HTTP(S)_PROXY。
   - tag: local_dns
     type: forward
     args:
       concurrent: 1
+      socks5: "192.168.18.35:10808"
       upstreams:
         - tag: local-google
           addr: "https://dns.google/dns-query"
@@ -67,6 +68,7 @@ plugins:
     type: forward
     args:
       concurrent: 1
+      socks5: "192.168.18.35:10808"
       upstreams:
         - tag: remote-cloudflare
           addr: "https://cloudflare-dns.com/dns-query"

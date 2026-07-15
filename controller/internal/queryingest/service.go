@@ -30,24 +30,26 @@ type Event struct {
 	SchemaVersion int    `json:"schema_version"`
 	EventID       string `json:"event_id"`
 	TimestampMS   int64  `json:"timestamp_unix_ms"`
-	ClientIP      string `json:"client_ip"`
-	Protocol      string `json:"protocol"`
-	QName         string `json:"qname"`
-	QType         uint16 `json:"qtype"`
-	QClass        uint16 `json:"qclass"`
-	RCode         int    `json:"rcode"`
-	Route         string `json:"route"`
-	RouteSource   string `json:"route_source"`
-	UpstreamGroup string `json:"upstream_group"`
-	UpstreamTag   string `json:"upstream_tag"`
-	CacheHit      bool   `json:"cache_hit"`
-	Snapshot      uint64 `json:"snapshot_version"`
-	AccessRuleID  int64  `json:"access_rule_id"`
-	RouteRuleID   int64  `json:"route_rule_id"`
-	AnswerCount   int    `json:"answer_count"`
-	LatencyUS     int64  `json:"latency_us"`
-	ErrorCode     string `json:"error_code"`
-	ErrorText     string `json:"error_text"`
+	// ProcessStartedAtMS 由 mosdns 生成，用于跨进程追踪；当前 SQLite 查询表不需要单独索引该值。
+	ProcessStartedAtMS int64  `json:"process_started_at_unix_ms"`
+	ClientIP           string `json:"client_ip"`
+	Protocol           string `json:"protocol"`
+	QName              string `json:"qname"`
+	QType              uint16 `json:"qtype"`
+	QClass             uint16 `json:"qclass"`
+	RCode              int    `json:"rcode"`
+	Route              string `json:"route"`
+	RouteSource        string `json:"route_source"`
+	UpstreamGroup      string `json:"upstream_group"`
+	UpstreamTag        string `json:"upstream_tag"`
+	CacheHit           bool   `json:"cache_hit"`
+	Snapshot           uint64 `json:"snapshot_version"`
+	AccessRuleID       int64  `json:"access_rule_id"`
+	RouteRuleID        int64  `json:"route_rule_id"`
+	AnswerCount        int    `json:"answer_count"`
+	LatencyUS          int64  `json:"latency_us"`
+	ErrorCode          string `json:"error_code"`
+	ErrorText          string `json:"error_text"`
 }
 
 type Batch struct {

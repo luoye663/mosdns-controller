@@ -123,7 +123,7 @@ func TestRequestBodyLimit(t *testing.T) {
 
 func TestInternalIngestRequiresSharedToken(t *testing.T) {
 	application := testApp(t)
-	body := `{"schema_version":1,"sender_id":"mosdns-test","sent_at_unix_ms":1,"events":[{"schema_version":1,"event_id":"ingest-1","timestamp_unix_ms":1,"client_ip":"192.0.2.1","protocol":"udp","qname":"example.com","qtype":1,"qclass":1,"rcode":0,"route":"remote","route_source":"default","upstream_group":"","cache_hit":false,"snapshot_version":1,"access_rule_id":0,"route_rule_id":0,"answer_count":0,"latency_us":1,"error_code":"","error_text":""}]}`
+	body := `{"schema_version":1,"sender_id":"mosdns-test","sent_at_unix_ms":1,"events":[{"schema_version":1,"event_id":"ingest-1","timestamp_unix_ms":1,"process_started_at_unix_ms":1,"client_ip":"192.0.2.1","protocol":"udp","qname":"example.com","qtype":1,"qclass":1,"rcode":0,"route":"remote","route_source":"default","upstream_group":"","cache_hit":false,"snapshot_version":1,"access_rule_id":0,"route_rule_id":0,"answer_count":0,"latency_us":1,"error_code":"","error_text":""}]}`
 	unauthorized := httptest.NewRequest(http.MethodPost, "/internal/v1/query-events/batch", bytes.NewBufferString(body))
 	unauthorizedRec := httptest.NewRecorder()
 	application.InternalHandler().ServeHTTP(unauthorizedRec, unauthorized)

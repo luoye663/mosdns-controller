@@ -123,7 +123,7 @@ go -C controller build -o ../bin/controller ./cmd/controller
 
 ### 本地运行完整服务
 
-`deploy/local/` 提供不依赖 Docker 的开发配置。它只监听本机回环地址，端口为 DNS `5353`、WebUI/API `18080`、内部 ingest `18081`、mosdns API `19091`，所有本地数据均写入被 Git 忽略的 `.local/`。配置中的公开 DoH 仅用于开发功能验证，不应用于生产。
+`deploy/local/` 提供不依赖 Docker 的开发配置。它只监听本机回环地址，端口为 DNS `5353`、WebUI/API `18080`、内部 ingest `18081`、mosdns API `19091`，所有本地数据均写入被 Git 忽略的 `.local/`。配置中的公开 DoH 仅用于开发功能验证，不应用于生产；其 `forward` 已配置 SOCKS5 `192.168.18.35:10808`，如本机代理地址不同，请修改 `deploy/local/mosdns.yaml` 中两个 `socks5` 值。
 
 先执行初始化，然后在两个终端分别运行以下命令：
 
