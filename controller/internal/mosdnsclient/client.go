@@ -23,6 +23,20 @@ type Client interface {
 	Apply(context.Context, Snapshot) (ApplyResult, error)
 	Match(context.Context, string) (any, error)
 	Flush(context.Context, string) error
+	UpstreamStatus(context.Context, string) (UpstreamSnapshot, error)
+	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
+}
+type UpstreamSnapshot struct {
+	Version                uint64     `json:"version"`
+	ExpectedCurrentVersion uint64     `json:"expected_current_version"`
+	Concurrent             int        `json:"concurrent"`
+	Socks5                 string     `json:"socks5,omitempty"`
+	Upstreams              []Upstream `json:"upstreams"`
+	Checksum               string     `json:"checksum,omitempty"`
+}
+type Upstream struct {
+	Tag  string `json:"tag"`
+	Addr string `json:"addr"`
 }
 type Status struct {
 	State           string `json:"state"`
@@ -100,6 +114,20 @@ func (c *HTTPClient) Flush(ctx context.Context, tag string) error {
 		return fmt.Errorf("unsupported cache tag %q", tag)
 	}
 	return c.request(ctx, http.MethodGet, "/plugins/"+tag+"/flush", nil, nil)
+}
+func (c *HTTPClient) UpstreamStatus(ctx context.Context, group string) (UpstreamSnapshot, error) {
+	if group != "local_dns" && group != "remote_dns" {
+		return UpstreamSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
+	}
+	var value UpstreamSnapshot
+	return value, c.request(ctx, http.MethodGet, "/plugins/"+group+"/status", nil, &value)
+}
+func (c *HTTPClient) ApplyUpstream(ctx context.Context, group string, snapshot UpstreamSnapshot) (UpstreamSnapshot, error) {
+	if group != "local_dns" && group != "remote_dns" {
+		return UpstreamSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
+	}
+	var value UpstreamSnapshot
+	return value, c.request(ctx, http.MethodPut, "/plugins/"+group+"/snapshot", snapshot, &value)
 }
 func (c *HTTPClient) request(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader

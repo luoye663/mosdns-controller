@@ -69,23 +69,33 @@ plugins:
       auth_token_file: "/run/secrets/mosdns_control_token"
 
   - tag: local_dns
-    type: forward
+    type: dynamic_forward
     args:
-      concurrent: 2
-      upstreams:
-        - tag: alidns_doh
-          addr: "https://223.5.5.5/dns-query"
-        - tag: dnspod_doh
-          addr: "https://1.12.12.12/dns-query"
+      snapshot_file: "/var/lib/mosdns/local-upstreams.json"
+      backup_file: "/var/lib/mosdns/local-upstreams.json.bak"
+      auth_token_file: "/run/secrets/mosdns_control_token"
+      initial:
+        version: 1
+        concurrent: 2
+        upstreams:
+          - tag: alidns_doh
+            addr: "https://223.5.5.5/dns-query"
+          - tag: dnspod_doh
+            addr: "https://1.12.12.12/dns-query"
 
   - tag: remote_dns
-    type: forward
+    type: dynamic_forward
     args:
-      concurrent: 1
-      upstreams:
-        - tag: remote_gateway
-          # 生产部署前替换为真实私有 DoH 地址，禁止提交真实地址。
-          addr: "<REMOTE_DOH_URL>"
+      snapshot_file: "/var/lib/mosdns/remote-upstreams.json"
+      backup_file: "/var/lib/mosdns/remote-upstreams.json.bak"
+      auth_token_file: "/run/secrets/mosdns_control_token"
+      initial:
+        version: 1
+        concurrent: 1
+        upstreams:
+          - tag: remote_gateway
+            # 生产部署前替换为真实私有 DoH 地址，禁止提交真实地址。
+            addr: "<REMOTE_DOH_URL>"
 
   - tag: route_local
     type: sequence

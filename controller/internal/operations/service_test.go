@@ -14,6 +14,7 @@ type fakeMosdns struct {
 	flushes   []string
 	flushErr  map[string]error
 	statusErr error
+	upstreams map[string]mosdnsclient.UpstreamSnapshot
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -32,6 +33,23 @@ func (f *fakeMosdns) Match(context.Context, string) (any, error) { return nil, n
 func (f *fakeMosdns) Flush(_ context.Context, tag string) error {
 	f.flushes = append(f.flushes, tag)
 	return f.flushErr[tag]
+}
+func (f *fakeMosdns) UpstreamStatus(_ context.Context, group string) (mosdnsclient.UpstreamSnapshot, error) {
+	if f.upstreams == nil {
+		f.upstreams = map[string]mosdnsclient.UpstreamSnapshot{}
+	}
+	return f.upstreams[group], nil
+}
+func (f *fakeMosdns) ApplyUpstream(_ context.Context, group string, snapshot mosdnsclient.UpstreamSnapshot) (mosdnsclient.UpstreamSnapshot, error) {
+	if f.upstreams == nil {
+		f.upstreams = map[string]mosdnsclient.UpstreamSnapshot{}
+	}
+	current := f.upstreams[group]
+	if snapshot.ExpectedCurrentVersion != current.Version {
+		return mosdnsclient.UpstreamSnapshot{}, mosdnsclient.ErrConflict
+	}
+	f.upstreams[group] = snapshot
+	return snapshot, nil
 }
 
 func testService(t *testing.T, fake *fakeMosdns) *Service {
@@ -106,5 +124,21 @@ func TestSystemStatusDegradesWhenMosdnsUnavailable(t *testing.T) {
 	status := s.SystemStatus(context.Background())
 	if status.Mosdns != nil || status.MosdnsError == "" {
 		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
+	fake := &fakeMosdns{upstreams: map[string]mosdnsclient.UpstreamSnapshot{"local_dns": {Version: 1}}}
+	s := testService(t, fake)
+	updated, err := s.UpdateUpstream(context.Background(), "local_dns", mosdnsclient.UpstreamSnapshot{Version: 2, ExpectedCurrentVersion: 1, Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "test", Addr: "https://dns.example/dns-query"}}}, 1, "req-upstream", "192.0.2.10")
+	if err != nil || updated.Version != 2 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if len(fake.flushes) != 1 || fake.flushes[0] != "cache_local" {
+		t.Fatalf("flushes=%v", fake.flushes)
+	}
+	logs, err := s.AuditLogs(context.Background(), 10)
+	if err != nil || len(logs) != 1 || logs[0].ResourceType != "upstream" {
+		t.Fatalf("logs=%+v err=%v", logs, err)
 	}
 }

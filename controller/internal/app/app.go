@@ -88,6 +88,8 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Patch("/devices/{id}", a.requireCSRF(a.updateDevice))
 			protected.Get("/system/status", a.systemStatus)
 			protected.Post("/system/cache/flush", a.requireCSRF(a.flushCaches))
+			protected.Get("/upstreams", a.upstreams)
+			protected.Put("/upstreams/{group}", a.requireCSRF(a.updateUpstream))
 			protected.Get("/audit-logs", a.auditLogs)
 		})
 	})
@@ -430,6 +432,31 @@ func (a *App) flushCaches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, 200, map[string]bool{"flushed": true})
+}
+func (a *App) upstreams(w http.ResponseWriter, r *http.Request) {
+	items, err := a.ops.Upstreams(r.Context())
+	if err != nil {
+		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", "upstream configuration is unavailable")
+		return
+	}
+	writeData(w, r, 200, items)
+}
+func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request) {
+	var snapshot mosdnsclient.UpstreamSnapshot
+	if !decodeJSON(w, r, &snapshot) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	updated, err := a.ops.UpdateUpstream(r.Context(), chi.URLParam(r, "group"), snapshot, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream configuration changed; refresh and retry")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	writeData(w, r, 200, updated)
 }
 func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))

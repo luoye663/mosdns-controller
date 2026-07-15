@@ -7,6 +7,7 @@ import RulesPage from '@/pages/RulesPage.vue'
 import DevicesPage from '@/pages/DevicesPage.vue'
 import SystemPage from '@/pages/SystemPage.vue'
 import VersionsPage from '@/pages/VersionsPage.vue'
+import UpstreamsPage from '@/pages/UpstreamsPage.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
@@ -19,6 +20,7 @@ const router = createRouter({
     { path: '/versions', name: 'versions', component: VersionsPage },
     { path: '/devices', name: 'devices', component: DevicesPage },
     { path: '/system', name: 'system', component: SystemPage },
+    { path: '/upstreams', name: 'upstreams', component: UpstreamsPage },
   ],
 })
 

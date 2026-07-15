@@ -175,6 +175,12 @@ m.httpMux.Mount("/plugins/"+tag, mux)
 
 ## 生命周期与指标
 
+## dynamic_forward 热更新
+
+`forward.NewForward` 可从独立 `Args` 构造完整上游组，`Forward.Exec` 只依赖该实例内部的不可变 upstream wrapper 列表。因此 `dynamic_forward` 在控制面校验完整上游快照、构造新的 `Forward` 并成功持久化后，以 `atomic.Pointer` 替换当前实例。DNS 请求通过引用计数取得当前实例；被替换的实例仅在所有在途请求完成后关闭，避免关闭 transport 影响已开始的转发。
+
+该插件复用 `BP.RegAPI` 暴露受共享 Bearer token 保护的 `GET /status` 和 `PUT /snapshot`。快照包含单调递增 `version` 与 `expected_current_version` CAS 条件，写盘使用临时文件、fsync、rename 和目录 fsync。上游地址不写入 controller 审计内容或应用日志。
+
 [`coremain/mosdns.go`](../mosdns/coremain/mosdns.go) 会在进程关闭信号后关闭所有实现 `io.Closer` 的已配置插件；它不提供插件专属 context。拥有 goroutine 的插件必须实现：
 
 ```go

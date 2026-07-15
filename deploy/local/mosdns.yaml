@@ -56,22 +56,32 @@ plugins:
   # 公开 DoH 仅用于本地功能验证。生产请使用 deploy/mosdns/config.yaml。
   # 本地网络通过 SOCKS5 访问 DoH；forward 不会自动读取 HTTP(S)_PROXY。
   - tag: local_dns
-    type: forward
+    type: dynamic_forward
     args:
-      concurrent: 1
-      socks5: "192.168.18.35:10808"
-      upstreams:
-        - tag: local-google
-          addr: "https://dns.google/dns-query"
+      snapshot_file: "../.local/mosdns/local-upstreams.json"
+      backup_file: "../.local/mosdns/local-upstreams.json.bak"
+      auth_token_file: "../.local/mosdns_control_token"
+      initial:
+        version: 1
+        concurrent: 1
+        socks5: "192.168.18.35:10808"
+        upstreams:
+          - tag: local-google
+            addr: "https://dns.google/dns-query"
 
   - tag: remote_dns
-    type: forward
+    type: dynamic_forward
     args:
-      concurrent: 1
-      socks5: "192.168.18.35:10808"
-      upstreams:
-        - tag: remote-cloudflare
-          addr: "https://cloudflare-dns.com/dns-query"
+      snapshot_file: "../.local/mosdns/remote-upstreams.json"
+      backup_file: "../.local/mosdns/remote-upstreams.json.bak"
+      auth_token_file: "../.local/mosdns_control_token"
+      initial:
+        version: 1
+        concurrent: 1
+        socks5: "192.168.18.35:10808"
+        upstreams:
+          - tag: remote-cloudflare
+            addr: "https://cloudflare-dns.com/dns-query"
 
   - tag: route_local
     type: sequence
@@ -124,10 +134,10 @@ plugins:
     type: udp_server
     args:
       entry: main
-      listen: "127.0.0.1:5353"
+      listen: "0.0.0.0:53"
 
   - tag: tcp_server
     type: tcp_server
     args:
       entry: main
-      listen: "127.0.0.1:5353"
+      listen: "0.0.0.0:53"

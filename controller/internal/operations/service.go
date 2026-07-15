@@ -53,6 +53,10 @@ type SystemStatus struct {
 	LastSuccessfulIngest string               `json:"last_successful_ingest_at,omitempty"`
 	LastRetention        string               `json:"last_retention_at,omitempty"`
 }
+type Upstreams struct {
+	Local  mosdnsclient.UpstreamSnapshot `json:"local"`
+	Remote mosdnsclient.UpstreamSnapshot `json:"remote"`
+}
 type Service struct {
 	db     *sql.DB
 	dbPath string
@@ -161,6 +165,39 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 		return err
 	}
 	return errors.Join(localErr, remoteErr)
+}
+func (s *Service) Upstreams(ctx context.Context) (Upstreams, error) {
+	local, err := s.mosdns.UpstreamStatus(ctx, "local_dns")
+	if err != nil {
+		return Upstreams{}, err
+	}
+	remote, err := s.mosdns.UpstreamStatus(ctx, "remote_dns")
+	if err != nil {
+		return Upstreams{}, err
+	}
+	return Upstreams{Local: local, Remote: remote}, nil
+}
+func (s *Service) UpdateUpstream(ctx context.Context, group string, snapshot mosdnsclient.UpstreamSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.UpstreamSnapshot, error) {
+	if group != "local_dns" && group != "remote_dns" {
+		return mosdnsclient.UpstreamSnapshot{}, errors.New("invalid upstream group")
+	}
+	updated, err := s.mosdns.ApplyUpstream(ctx, group, snapshot)
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		current, statusErr := s.mosdns.UpstreamStatus(ctx, group)
+		if statusErr == nil && current.Version == snapshot.Version {
+			updated, err = current, nil
+		}
+	}
+	result, code := "success", ""
+	if err != nil {
+		result, code = "failed", "UPSTREAM_APPLY_FAILED"
+	} else if flushErr := s.mosdns.Flush(ctx, map[string]string{"local_dns": "cache_local", "remote_dns": "cache_remote"}[group]); flushErr != nil {
+		err, result, code = flushErr, "failed", "CACHE_FLUSH_FAILED"
+	}
+	if auditErr := s.Audit(ctx, adminID, "update", "upstream", group, requestID, clientIP, result, code); auditErr != nil && err == nil {
+		err = auditErr
+	}
+	return updated, err
 }
 
 func (s *Service) DatabaseStatus() DatabaseStatus {

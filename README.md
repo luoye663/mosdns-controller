@@ -27,7 +27,7 @@ umask 077
 openssl rand -hex 32 > deploy/secrets/mosdns_control_token
 ```
 
-编辑 `deploy/mosdns/config.yaml`，将 `<REMOTE_DOH_URL>` 替换为实际远程 DoH 端点。该文件中的 `remote_gateway` 是远程默认路由的必要配置；保留占位符会导致 mosdns 无法启动。请在部署副本中修改，或使用自己的配置管理工具注入该值，切勿提交真实私有 URL。
+编辑 `deploy/mosdns/config.yaml`，将 `<REMOTE_DOH_URL>` 替换为实际远程 DoH 端点。该初始值仅用于首次启动；保留占位符会导致 mosdns 无法启动。首次启动后，在 WebUI 的“上游 DNS”页面管理本地和远程上游，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
 
 `deploy/mosdns/rules/geosite_cn.txt` 可导入静态国内域名规则；保留为空时，静态国内分类关闭，但 WebUI 的动态路由规则仍可用。
 
