@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/managed-dns/controller/internal/mosdnsclient"
+	"github.com/managed-dns/controller/internal/queryingest"
 )
 
 type Device struct {
@@ -57,14 +59,19 @@ type Upstreams struct {
 	Local  mosdnsclient.UpstreamSnapshot `json:"local"`
 	Remote mosdnsclient.UpstreamSnapshot `json:"remote"`
 }
+type Settings struct {
+	CacheEnabled       bool `json:"cache_enabled"`
+	QueryRetentionDays int  `json:"query_retention_days"`
+}
 type Service struct {
 	db     *sql.DB
 	dbPath string
 	mosdns mosdnsclient.Client
+	ingest *queryingest.Service
 }
 
-func New(db *sql.DB, dbPath string, mosdns mosdnsclient.Client) *Service {
-	return &Service{db: db, dbPath: dbPath, mosdns: mosdns}
+func New(db *sql.DB, dbPath string, mosdns mosdnsclient.Client, ingest *queryingest.Service) *Service {
+	return &Service{db: db, dbPath: dbPath, mosdns: mosdns, ingest: ingest}
 }
 
 func (s *Service) Devices(ctx context.Context) ([]Device, error) {
@@ -165,6 +172,90 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 		return err
 	}
 	return errors.Join(localErr, remoteErr)
+}
+func (s *Service) Settings(ctx context.Context) (Settings, error) {
+	settings := Settings{CacheEnabled: true, QueryRetentionDays: 1}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','query_retention_days')`)
+	if err != nil {
+		return Settings{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return Settings{}, err
+		}
+		switch key {
+		case "cache_enabled":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return Settings{}, err
+			}
+			settings.CacheEnabled = parsed
+		case "query_retention_days":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Settings{}, err
+			}
+			settings.QueryRetentionDays = parsed
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Settings{}, err
+	}
+	if settings.QueryRetentionDays < 1 || settings.QueryRetentionDays > 365 {
+		return Settings{}, errors.New("query retention days must be within 1..365")
+	}
+	return settings, nil
+}
+func (s *Service) SyncSettings(ctx context.Context) error {
+	settings, err := s.Settings(ctx)
+	if err != nil {
+		return err
+	}
+	if s.ingest != nil {
+		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
+			return err
+		}
+	}
+	return s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled)
+}
+func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID int64, requestID, clientIP string) error {
+	if settings.QueryRetentionDays < 1 || settings.QueryRetentionDays > 365 {
+		return errors.New("query retention days must be within 1..365")
+	}
+	current, err := s.Settings(ctx)
+	if err != nil {
+		return err
+	}
+	if current.CacheEnabled != settings.CacheEnabled {
+		if err := s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled); err != nil {
+			return err
+		}
+	}
+	if s.ingest != nil {
+		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
+			return err
+		}
+		if current.QueryRetentionDays != settings.QueryRetentionDays {
+			s.ingest.RetainNow()
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}} {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, item.key, item.value, now); err != nil {
+			return err
+		}
+	}
+	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention", requestID, clientIP, "success", ""); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Service) Upstreams(ctx context.Context) (Upstreams, error) {
 	local, err := s.mosdns.UpstreamStatus(ctx, "local_dns")

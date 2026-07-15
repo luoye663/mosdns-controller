@@ -8,6 +8,7 @@ export interface Device { id: number; ip: string; mac: string; hostname: string;
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
 export interface Upstream { tag: string; addr: string; priority: number; weight: number }
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
+export interface Settings { cache_enabled: boolean; query_retention_days: number }
 
 // CSRF token 只保留在当前浏览器会话，刷新后仍可继续操作已有服务端 session。
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
@@ -52,6 +53,8 @@ export const api = {
   flushCaches: () => request<{ flushed: boolean }>('/system/cache/flush', { method: 'POST', body: '{}' }),
   upstreams: () => request<{ local: UpstreamSnapshot; remote: UpstreamSnapshot }>('/upstreams'),
   updateUpstream: (group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) => request<UpstreamSnapshot>(`/upstreams/${group}`, { method: 'PUT', body: JSON.stringify(snapshot) }),
+  settings: () => request<Settings>('/settings'),
+  updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   auditLogs: () => request<{ items: AuditLog[] }>('/audit-logs'),
 }
 

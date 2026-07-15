@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -119,10 +120,12 @@ type Service struct {
 	subscribers    map[uint64]chan StoredEvent
 	metrics        metrics
 	dbPath         string
+	retentionDays  atomic.Int64
 }
 
 func New(db *sql.DB, token string, dbPath string) *Service {
 	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]chan StoredEvent)}
+	s.retentionDays.Store(1)
 	s.metrics = newMetrics()
 	s.wg.Add(2)
 	go s.writer()
@@ -532,7 +535,7 @@ func (s *Service) retain() {
 	}{{"dns_stats_hourly_client_domain", now.AddDate(0, 0, -90)}, {"dns_stats_hourly_domain", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_client", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_global", now.AddDate(-1, 0, 0)}} {
 		_, _ = s.db.ExecContext(ctx, "DELETE FROM "+item.table+" WHERE hour_start_ms < ?", item.before.UnixMilli())
 	}
-	_, _ = s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE timestamp_unix_ms < ?", now.AddDate(0, 0, -7).UnixMilli())
+	_, _ = s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE timestamp_unix_ms < ?", now.AddDate(0, 0, -int(s.retentionDays.Load())).UnixMilli())
 	if s.dbPath != "" && s.dbPath != ":memory:" {
 		if info, err := os.Stat(s.dbPath); err == nil && info.Size() > int64(2<<30)*9/10 {
 			_, _ = s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE id IN (SELECT id FROM dns_queries ORDER BY timestamp_unix_ms ASC LIMIT 10000)")
@@ -541,6 +544,15 @@ func (s *Service) retain() {
 	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
 	_, _ = s.db.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES('last_retention_at',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, strconv.FormatInt(now.UnixMilli(), 10), now.UnixMilli())
 }
+func (s *Service) SetRetentionDays(days int) error {
+	if days < 1 || days > 365 {
+		return errors.New("query retention days must be within 1..365")
+	}
+	s.retentionDays.Store(int64(days))
+	return nil
+}
+func (s *Service) RetentionDays() int { return int(s.retentionDays.Load()) }
+func (s *Service) RetainNow()         { s.retain() }
 func (s *Service) Close() {
 	close(s.done)
 	s.wg.Wait()

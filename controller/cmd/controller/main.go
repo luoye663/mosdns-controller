@@ -88,6 +88,9 @@ func serve(cfg config.Config, store *storage.Store, client mosdnsclient.Client, 
 	} else {
 		logger.Info("startup reconcile completed", "state", state)
 	}
+	if err := application.SyncSettings(context.Background()); err != nil {
+		logger.Warn("startup settings sync failed", "error", err)
+	}
 	publicServer := &http.Server{Addr: cfg.Server.PublicListen, Handler: application.PublicHandler(), ReadHeaderTimeout: 5 * time.Second}
 	internalServer := &http.Server{Addr: cfg.Server.InternalListen, Handler: application.InternalHandler(), ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 2)

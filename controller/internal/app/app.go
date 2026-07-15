@@ -46,7 +46,8 @@ const adminKey contextKey = "admin"
 func New(logger *slog.Logger, cfg config.Config, store *storage.Store, client mosdnsclient.Client, ingestToken string) *App {
 	service := auth.New(store, cfg.Web.SessionTTL)
 	limiter := auth.NewLoginLimiter()
-	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client), ingest: queryingest.New(store.DB(), ingestToken, cfg.Storage.Path), ops: operations.New(store.DB(), cfg.Storage.Path, client)}
+	ingest := queryingest.New(store.DB(), ingestToken, cfg.Storage.Path)
+	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client), ingest: ingest, ops: operations.New(store.DB(), cfg.Storage.Path, client, ingest)}
 }
 
 func (a *App) PublicHandler() http.Handler {
@@ -90,6 +91,8 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Post("/system/cache/flush", a.requireCSRF(a.flushCaches))
 			protected.Get("/upstreams", a.upstreams)
 			protected.Put("/upstreams/{group}", a.requireCSRF(a.updateUpstream))
+			protected.Get("/settings", a.settings)
+			protected.Put("/settings", a.requireCSRF(a.updateSettings))
 			protected.Get("/audit-logs", a.auditLogs)
 		})
 	})
@@ -106,6 +109,7 @@ func (a *App) InternalHandler() http.Handler {
 }
 func (a *App) Close()                                        { a.ingest.Close() }
 func (a *App) Reconcile(ctx context.Context) (string, error) { return a.rules.Reconcile(ctx) }
+func (a *App) SyncSettings(ctx context.Context) error        { return a.ops.SyncSettings(ctx) }
 
 func (a *App) ready(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.DB().PingContext(r.Context()); err != nil {
@@ -342,6 +346,8 @@ func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	sub := a.ingest.Subscribe()
 	defer sub.Close()
+	_, _ = w.Write([]byte("event: connected\ndata: {}\n\n"))
+	flusher.Flush()
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
 	for {
@@ -457,6 +463,26 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, 200, updated)
+}
+func (a *App) settings(w http.ResponseWriter, r *http.Request) {
+	settings, err := a.ops.Settings(r.Context())
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "read settings failed")
+		return
+	}
+	writeData(w, r, 200, settings)
+}
+func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var settings operations.Settings
+	if !decodeJSON(w, r, &settings) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	if err := a.ops.UpdateSettings(r.Context(), settings, admin.ID, requestID(r), remoteIP(r)); err != nil {
+		writeError(w, r, 502, "SETTINGS_APPLY_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, 200, settings)
 }
 func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))

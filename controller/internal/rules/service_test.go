@@ -42,6 +42,7 @@ func (f *fakeMosdns) Flush(_ context.Context, tag string) error {
 	f.flushes = append(f.flushes, tag)
 	return nil
 }
+func (f *fakeMosdns) SetCacheEnabled(context.Context, bool) error { return nil }
 func (f *fakeMosdns) UpstreamStatus(context.Context, string) (mosdnsclient.UpstreamSnapshot, error) {
 	return mosdnsclient.UpstreamSnapshot{}, nil
 }

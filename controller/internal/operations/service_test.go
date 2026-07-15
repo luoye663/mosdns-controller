@@ -11,10 +11,11 @@ import (
 )
 
 type fakeMosdns struct {
-	flushes   []string
-	flushErr  map[string]error
-	statusErr error
-	upstreams map[string]mosdnsclient.UpstreamSnapshot
+	flushes      []string
+	flushErr     map[string]error
+	statusErr    error
+	upstreams    map[string]mosdnsclient.UpstreamSnapshot
+	cacheEnabled bool
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -33,6 +34,10 @@ func (f *fakeMosdns) Match(context.Context, string) (any, error) { return nil, n
 func (f *fakeMosdns) Flush(_ context.Context, tag string) error {
 	f.flushes = append(f.flushes, tag)
 	return f.flushErr[tag]
+}
+func (f *fakeMosdns) SetCacheEnabled(_ context.Context, enabled bool) error {
+	f.cacheEnabled = enabled
+	return nil
 }
 func (f *fakeMosdns) UpstreamStatus(_ context.Context, group string) (mosdnsclient.UpstreamSnapshot, error) {
 	if f.upstreams == nil {
@@ -65,7 +70,7 @@ func testService(t *testing.T, fake *fakeMosdns) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	return New(store.DB(), ":memory:", fake)
+	return New(store.DB(), ":memory:", fake, nil)
 }
 
 func TestDevicesUpdateAndAudit(t *testing.T) {
@@ -140,5 +145,17 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 	logs, err := s.AuditLogs(context.Background(), 10)
 	if err != nil || len(logs) != 1 || logs[0].ResourceType != "upstream" {
 		t.Fatalf("logs=%+v err=%v", logs, err)
+	}
+}
+
+func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
+	fake := &fakeMosdns{}
+	s := testService(t, fake)
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, QueryRetentionDays: 3}, 1, "req-settings", "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := s.Settings(context.Background())
+	if err != nil || settings.CacheEnabled || settings.QueryRetentionDays != 3 || fake.cacheEnabled {
+		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
 	}
 }

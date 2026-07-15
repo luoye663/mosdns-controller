@@ -23,6 +23,7 @@ type Client interface {
 	Apply(context.Context, Snapshot) (ApplyResult, error)
 	Match(context.Context, string) (any, error)
 	Flush(context.Context, string) error
+	SetCacheEnabled(context.Context, bool) error
 	UpstreamStatus(context.Context, string) (UpstreamSnapshot, error)
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
 }
@@ -117,6 +118,21 @@ func (c *HTTPClient) Flush(ctx context.Context, tag string) error {
 		return fmt.Errorf("unsupported cache tag %q", tag)
 	}
 	return c.request(ctx, http.MethodGet, "/plugins/"+tag+"/flush", nil, nil)
+}
+func (c *HTTPClient) SetCacheEnabled(ctx context.Context, enabled bool) error {
+	var local, remote struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.request(ctx, http.MethodPut, "/plugins/cache_local/enabled", map[string]bool{"enabled": enabled}, &local); err != nil {
+		return err
+	}
+	if err := c.request(ctx, http.MethodPut, "/plugins/cache_remote/enabled", map[string]bool{"enabled": enabled}, &remote); err != nil {
+		return err
+	}
+	if local.Enabled != enabled || remote.Enabled != enabled {
+		return errors.New("cache setting was not applied")
+	}
+	return nil
 }
 func (c *HTTPClient) UpstreamStatus(ctx context.Context, group string) (UpstreamSnapshot, error) {
 	if group != "local_dns" && group != "remote_dns" {
