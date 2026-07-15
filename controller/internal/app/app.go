@@ -59,6 +59,8 @@ func (a *App) PublicHandler() http.Handler {
 	r.Handle("/metrics", promhttp.Handler())
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Post("/auth/login", a.login)
+		api.Get("/auth/bootstrap", a.bootstrapStatus)
+		api.Post("/auth/bootstrap", a.bootstrap)
 		api.Group(func(protected chi.Router) {
 			protected.Use(a.requireSession)
 			protected.Get("/auth/me", a.me)
@@ -144,6 +146,46 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	a.limiter.Succeeded(clientIP)
 	http.SetCookie(w, &http.Cookie{Name: auth.CookieName, Value: token, Path: "/", HttpOnly: true, Secure: a.config.Web.SecureCookie, SameSite: http.SameSiteLaxMode, MaxAge: int(a.config.Web.SessionTTL.Seconds())})
 	writeData(w, r, http.StatusOK, map[string]string{"csrf_token": csrf})
+}
+func (a *App) bootstrapStatus(w http.ResponseWriter, r *http.Request) {
+	required, err := a.auth.NeedsInitialAdmin(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_READY", "database is unavailable")
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string]bool{"required": required})
+}
+func (a *App) bootstrap(w http.ResponseWriter, r *http.Request) {
+	clientIP := remoteIP(r)
+	if !a.limiter.Allowed(clientIP) {
+		writeError(w, r, http.StatusTooManyRequests, "LOGIN_RATE_LIMITED", "too many setup attempts")
+		return
+	}
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	// There is no authenticated session before initial setup, so CSRF cannot apply.
+	if err := a.auth.CreateInitialAdmin(r.Context(), input.Username, input.Password); err != nil {
+		if errors.Is(err, auth.ErrInitialAdminExists) {
+			writeError(w, r, http.StatusConflict, "INITIAL_SETUP_COMPLETE", "an administrator already exists")
+			return
+		}
+		a.limiter.Failed(clientIP)
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	token, csrf, err := a.auth.Login(r.Context(), input.Username, input.Password, clientIP, r.UserAgent())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "initial administrator was created but session creation failed")
+		return
+	}
+	a.limiter.Succeeded(clientIP)
+	http.SetCookie(w, &http.Cookie{Name: auth.CookieName, Value: token, Path: "/", HttpOnly: true, Secure: a.config.Web.SecureCookie, SameSite: http.SameSiteLaxMode, MaxAge: int(a.config.Web.SessionTTL.Seconds())})
+	writeData(w, r, http.StatusCreated, map[string]string{"csrf_token": csrf})
 }
 func (a *App) me(w http.ResponseWriter, r *http.Request) {
 	writeData(w, r, http.StatusOK, r.Context().Value(adminKey).(auth.Admin))

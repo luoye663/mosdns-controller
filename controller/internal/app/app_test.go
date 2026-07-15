@@ -89,6 +89,43 @@ func TestLoginSessionAndCSRF(t *testing.T) {
 		t.Fatalf("logout=%d", logoutRec.Code)
 	}
 }
+
+func TestBootstrapCreatesInitialAdminAndSession(t *testing.T) {
+	application := testApp(t)
+	handler := application.PublicHandler()
+	status := httptest.NewRequest(http.MethodGet, "/api/v1/auth/bootstrap", nil)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, status)
+	if statusRec.Code != http.StatusOK || !bytes.Contains(statusRec.Body.Bytes(), []byte(`"required":true`)) {
+		t.Fatalf("initial status=%d: %s", statusRec.Code, statusRec.Body.String())
+	}
+	setup := httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewBufferString(`{"username":"admin","password":"password"}`))
+	setup.RemoteAddr = "192.0.2.10:1234"
+	setupRec := httptest.NewRecorder()
+	handler.ServeHTTP(setupRec, setup)
+	if setupRec.Code != http.StatusCreated {
+		t.Fatalf("setup=%d: %s", setupRec.Code, setupRec.Body.String())
+	}
+	if len(setupRec.Result().Cookies()) != 1 {
+		t.Fatal("initial setup did not create a session cookie")
+	}
+	repeated := httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewBufferString(`{"username":"other","password":"password"}`))
+	repeatedRec := httptest.NewRecorder()
+	handler.ServeHTTP(repeatedRec, repeated)
+	if repeatedRec.Code != http.StatusConflict {
+		t.Fatalf("repeated setup=%d: %s", repeatedRec.Code, repeatedRec.Body.String())
+	}
+}
+
+func TestPasswordMinimumLengthIsEight(t *testing.T) {
+	application := testApp(t)
+	if err := application.auth.CreateAdmin(context.Background(), "admin", "password"); err != nil {
+		t.Fatalf("8-character password rejected: %v", err)
+	}
+	if err := application.auth.ChangePassword(context.Background(), 1, "password", "short"); err == nil {
+		t.Fatal("short password accepted")
+	}
+}
 func TestExpiredSessionIsRejected(t *testing.T) {
 	application := testApp(t)
 	now := time.Now().UnixMilli()

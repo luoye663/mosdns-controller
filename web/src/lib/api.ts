@@ -33,6 +33,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   login: (username: string, password: string) => request<{ csrf_token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  bootstrapStatus: () => request<{ required: boolean }>('/auth/bootstrap'),
+  bootstrap: (username: string, password: string) => request<{ csrf_token: string }>('/auth/bootstrap', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request<{ id: number; username: string }>('/auth/me'),
   logout: () => request<{ logged_out: boolean }>('/auth/logout', { method: 'POST' }),
   summary: () => request<{ query_count: number; average_latency_us: number }>('/stats/summary'),

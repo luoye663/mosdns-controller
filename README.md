@@ -52,7 +52,9 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 ### 4. 创建首个管理员
 
-服务启动后创建管理员。命令中的密码会出现在 shell 历史记录中，生产环境应使用受控终端并在执行后清理历史记录。
+首次访问 `http://<部署主机IP>:8080` 时，WebUI 会显示管理员初始化页面。设置用户名和至少 8 个字符的密码后会自动登录。
+
+也可使用 CLI 初始化。命令中的密码会出现在 shell 历史记录中，生产环境应使用受控终端并在执行后清理历史记录。
 
 ```bash
 docker compose -f deploy/docker-compose.yml exec controller \
@@ -62,7 +64,7 @@ docker compose -f deploy/docker-compose.yml exec controller \
   -password '请替换为高强度密码'
 ```
 
-随后在 `http://<部署主机IP>:8080` 登录。首次使用前，应先在 WebUI 确认系统状态和当前规则版本，再让局域网客户端使用该主机作为 DNS 服务器。
+管理员只能初始化一次；完成后首次初始化接口会关闭。首次使用前，应先在 WebUI 确认系统状态和当前规则版本，再让局域网客户端使用该主机作为 DNS 服务器。
 
 ### 5. 验证服务
 
@@ -136,7 +138,7 @@ make local-mosdns
 make local-controller
 ```
 
-也可使用 `make local-up` 同时启动两项服务。服务启动后，在第三个终端运行 `make local-create-admin` 创建管理员，并访问 `http://127.0.0.1:18080`。本地 DNS 验证命令为 `dig @127.0.0.1 -p 5353 example.com A`。
+也可使用 `make local-up` 同时启动两项服务。服务启动后访问 `http://127.0.0.1:18080` 创建首个管理员；也可以在第三个终端运行 `make local-create-admin`。本地 DNS 验证命令为 `dig @127.0.0.1 -p 5353 example.com A`。
 
 `make local-clean` 仅删除 `.local/` 下的本机开发数据库、缓存、快照和 token，不会影响 Docker Compose 的命名卷。WebUI 的生产静态资源会在 `controller/Dockerfile` 构建镜像时嵌入 controller；单独执行 `npm --prefix web run dev` 只启动 Vite 开发服务器，不会自动代理 controller API。
 

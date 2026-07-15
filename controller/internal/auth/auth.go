@@ -19,6 +19,8 @@ import (
 
 const CookieName = "mosdns_session"
 
+var ErrInitialAdminExists = errors.New("an administrator already exists")
+
 type Service struct {
 	store *storage.Store
 	ttl   time.Duration
@@ -35,9 +37,9 @@ type Session struct {
 func New(store *storage.Store, ttl time.Duration) *Service { return &Service{store: store, ttl: ttl} }
 
 func (s *Service) CreateAdmin(ctx context.Context, username, password string) error {
-	username = strings.TrimSpace(username)
-	if len(username) < 3 || len(username) > 64 || len(password) < 12 {
-		return errors.New("username must be 3-64 characters and password at least 12 characters")
+	username, err := validateCredentials(username, password)
+	if err != nil {
+		return err
 	}
 	hash, err := hashPassword(password)
 	if err != nil {
@@ -49,6 +51,46 @@ func (s *Service) CreateAdmin(ctx context.Context, username, password string) er
 		return fmt.Errorf("create admin: %w", err)
 	}
 	return nil
+}
+
+// CreateInitialAdmin succeeds only while the controller has no administrators.
+func (s *Service) CreateInitialAdmin(ctx context.Context, username, password string) error {
+	required, err := s.NeedsInitialAdmin(ctx)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return ErrInitialAdminExists
+	}
+	username, err = validateCredentials(username, password)
+	if err != nil {
+		return err
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	result, err := s.store.DB().ExecContext(ctx, `INSERT INTO admins(username,password_hash,created_at_ms,updated_at_ms) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM admins)`, username, hash, now, now)
+	if err != nil {
+		return fmt.Errorf("create initial admin: %w", err)
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check initial admin creation: %w", err)
+	}
+	if created == 0 {
+		return ErrInitialAdminExists
+	}
+	return nil
+}
+
+func (s *Service) NeedsInitialAdmin(ctx context.Context) (bool, error) {
+	var exists bool
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM admins)`).Scan(&exists); err != nil {
+		return false, err
+	}
+	return !exists, nil
 }
 
 func (s *Service) Login(ctx context.Context, username, password, clientIP, userAgent string) (string, string, error) {
@@ -104,8 +146,8 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 	return err
 }
 func (s *Service) ChangePassword(ctx context.Context, adminID int64, currentPassword, nextPassword string) error {
-	if len(nextPassword) < 12 {
-		return errors.New("password must be at least 12 characters")
+	if len(nextPassword) < 8 {
+		return errors.New("password must be at least 8 characters")
 	}
 	var currentHash string
 	if err := s.store.DB().QueryRowContext(ctx, `SELECT password_hash FROM admins WHERE id=? AND disabled=0`, adminID).Scan(&currentHash); err != nil || !verifyPassword(currentPassword, currentHash) {
@@ -117,6 +159,13 @@ func (s *Service) ChangePassword(ctx context.Context, adminID int64, currentPass
 	}
 	_, err = s.store.DB().ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at_ms=? WHERE id=?`, nextHash, time.Now().UnixMilli(), adminID)
 	return err
+}
+func validateCredentials(username, password string) (string, error) {
+	username = strings.TrimSpace(username)
+	if len(username) < 3 || len(username) > 64 || len(password) < 8 {
+		return "", errors.New("username must be 3-64 characters and password at least 8 characters")
+	}
+	return username, nil
 }
 func digest(value string) []byte { result := sha256.Sum256([]byte(value)); return result[:] }
 func randomToken() (string, error) {
