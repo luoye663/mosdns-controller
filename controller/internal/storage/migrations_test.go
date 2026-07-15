@@ -26,6 +26,38 @@ func TestMigrateFromEmptyDatabase(t *testing.T) {
 	}
 }
 
+func TestMigrateV1DatabaseAddsUpstreamTag(t *testing.T) {
+	store, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB().Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range migrationV1 {
+		if _, err := store.DB().Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().Exec(`INSERT INTO schema_migrations(version) VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var columnCount, migrationCount int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='upstream_tag'`).Scan(&columnCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=2`).Scan(&migrationCount); err != nil {
+		t.Fatal(err)
+	}
+	if columnCount != 1 || migrationCount != 1 {
+		t.Fatalf("upstream_tag column=%d migration 2=%d, want 1,1", columnCount, migrationCount)
+	}
+}
+
 func TestBackupCreatesConsistentSQLiteFile(t *testing.T) {
 	store, err := Open(context.Background(), ":memory:")
 	if err != nil {

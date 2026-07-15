@@ -46,6 +46,27 @@ func TestDuplicateEventDoesNotAggregateTwice(t *testing.T) {
 	}
 }
 
+func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
+	s := testService(t)
+	event := validEvent("upstream-tag")
+	event.UpstreamGroup = "remote_dns"
+	event.UpstreamTag = "remote-doh-a"
+	stored, err := s.persist(context.Background(), []Event{event})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].UpstreamTag != event.UpstreamTag {
+		t.Fatalf("stored upstream tag = %+v, want %q", stored, event.UpstreamTag)
+	}
+	page, err := s.Queries(context.Background(), Query{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].UpstreamTag != event.UpstreamTag {
+		t.Fatalf("queried upstream tag = %+v, want %q", page.Items, event.UpstreamTag)
+	}
+}
+
 func TestPersistRollbackDoesNotLeavePartialAggregation(t *testing.T) {
 	s := testService(t)
 	if _, err := s.db.Exec(`CREATE TRIGGER reject_domain BEFORE INSERT ON dns_stats_hourly_domain BEGIN SELECT RAISE(ABORT, 'test rollback'); END`); err != nil {

@@ -39,6 +39,7 @@ type Event struct {
 	Route         string `json:"route"`
 	RouteSource   string `json:"route_source"`
 	UpstreamGroup string `json:"upstream_group"`
+	UpstreamTag   string `json:"upstream_tag"`
 	CacheHit      bool   `json:"cache_hit"`
 	Snapshot      uint64 `json:"snapshot_version"`
 	AccessRuleID  int64  `json:"access_rule_id"`
@@ -77,6 +78,7 @@ type StoredEvent struct {
 	Route         string `json:"route"`
 	RouteSource   string `json:"route_source"`
 	UpstreamGroup string `json:"upstream_group"`
+	UpstreamTag   string `json:"upstream_tag"`
 	CacheHit      bool   `json:"cache_hit"`
 	Snapshot      uint64 `json:"snapshot_version"`
 	AccessRuleID  int64  `json:"access_rule_id"`
@@ -205,7 +207,7 @@ func validateEvent(e Event) error {
 	for _, field := range []struct {
 		v string
 		n int
-	}{{e.UpstreamGroup, 128}, {e.ErrorCode, 128}, {e.ErrorText, 4096}} {
+	}{{e.UpstreamGroup, 128}, {e.UpstreamTag, 128}, {e.ErrorCode, 128}, {e.ErrorText, 4096}} {
 		if len(field.v) > field.n {
 			return errors.New("event field exceeds limit")
 		}
@@ -262,7 +264,7 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 	inserted := make([]Event, 0, len(events))
 	now := time.Now().UnixMilli()
 	for _, e := range events {
-		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,cache_hit,snapshot_version,access_rule_id,route_rule_id,answer_count,latency_us,error_code,error_text,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.AnswerCount, e.LatencyUS, e.ErrorCode, e.ErrorText, now)
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,answer_count,latency_us,error_code,error_text,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, e.UpstreamTag, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.AnswerCount, e.LatencyUS, e.ErrorCode, e.ErrorText, now)
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +325,7 @@ func boolInt(v bool) int {
 	return 0
 }
 func fromEvent(e Event) StoredEvent {
-	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerCount: e.AnswerCount, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText}
+	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerCount: e.AnswerCount, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText}
 }
 
 func (s *Service) Subscribe() Subscriber {
@@ -396,7 +398,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 		args = append(args, ts, ts, id)
 	}
 	args = append(args, q.Limit+1)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,COALESCE(rcode,0),route,route_source,COALESCE(upstream_group,''),cache_hit,snapshot_version,COALESCE(access_rule_id,0),COALESCE(route_rule_id,0),answer_count,latency_us,COALESCE(error_code,''),COALESCE(error_text,'') FROM dns_queries WHERE `+strings.Join(where, " AND ")+` ORDER BY timestamp_unix_ms DESC,id DESC LIMIT ?`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,COALESCE(rcode,0),route,route_source,COALESCE(upstream_group,''),COALESCE(upstream_tag,''),cache_hit,snapshot_version,COALESCE(access_rule_id,0),COALESCE(route_rule_id,0),answer_count,latency_us,COALESCE(error_code,''),COALESCE(error_text,'') FROM dns_queries WHERE `+strings.Join(where, " AND ")+` ORDER BY timestamp_unix_ms DESC,id DESC LIMIT ?`, args...)
 	if err != nil {
 		return Page{}, err
 	}
@@ -405,7 +407,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 	for rows.Next() {
 		var e StoredEvent
 		var hit int
-		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerCount, &e.LatencyUS, &e.ErrorCode, &e.ErrorText); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerCount, &e.LatencyUS, &e.ErrorCode, &e.ErrorText); err != nil {
 			return Page{}, err
 		}
 		e.CacheHit = hit == 1

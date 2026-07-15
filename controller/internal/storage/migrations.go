@@ -9,27 +9,36 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 1`).Scan(&count); err != nil {
-		return err
-	}
-	if count != 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, statement := range migrationV1 {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migration 1: %w", err)
+	for _, migration := range []struct {
+		version    int
+		statements []string
+	}{{1, migrationV1}, {2, migrationV2}} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			continue
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		for _, statement := range migration.statements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("migration %d: %w", migration.version, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (?)`, migration.version); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (1)`); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 var migrationV1 = []string{
@@ -44,4 +53,9 @@ var migrationV1 = []string{
 	`CREATE TABLE dns_stats_hourly_client (hour_start_ms INTEGER NOT NULL, client_ip TEXT NOT NULL, route TEXT NOT NULL, query_count INTEGER NOT NULL, error_count INTEGER NOT NULL, cache_hit_count INTEGER NOT NULL, latency_sum_us INTEGER NOT NULL, PRIMARY KEY(hour_start_ms,client_ip,route)) WITHOUT ROWID`,
 	`CREATE TABLE dns_stats_hourly_client_domain (hour_start_ms INTEGER NOT NULL, client_ip TEXT NOT NULL, qname TEXT NOT NULL, route TEXT NOT NULL, query_count INTEGER NOT NULL, PRIMARY KEY(hour_start_ms,client_ip,qname,route)) WITHOUT ROWID`,
 	`CREATE TABLE system_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)`,
+}
+
+// migrationV2 为已部署的 SQLite 数据库补充精确上游标签，历史记录保持为空。
+var migrationV2 = []string{
+	`ALTER TABLE dns_queries ADD COLUMN upstream_tag TEXT`,
 }

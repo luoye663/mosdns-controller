@@ -125,6 +125,14 @@ type RuntimeDecision struct {
 
 同一文件还提供 `Q()`、`QQuestion()`、`R()`、`StartTime()`、`ServerMeta`、`ClientOpt()`、`RespOpt()` 与 `UpstreamOpt()`。`ServerMeta` 是 [`pkg/server/iface.go`](../mosdns/pkg/server/iface.go) 中 `server.QueryMeta` 的别名，包含 `ClientAddr netip.Addr` 与 `FromUDP bool`。标准 UDP 与 TCP server 会填写这些元数据。
 
+## Phase 11：forward 精确上游追踪审计
+
+[`plugin/executable/forward/forward.go`](../mosdns/plugin/executable/forward/forward.go) 的 `exchange` 会从随机起点并行向最多三个上游发送相同请求。每个 goroutine 将响应投递到无缓冲 `resChan`；主请求 goroutine 按收到顺序评估响应，仅在响应无错误且满足既有 `NOERROR`/`NXDOMAIN` 或最后一次重试语义时返回。因此，实际选中的上游只能在主 goroutine 即将返回该响应时确定。
+
+本项目在 forward 包内注册独立的 `query_context` metadata key。每个并发请求只把自己的配置 tag 附在本地 `res` 值中，主 goroutine 采纳响应后一次性写入 metadata。这个 hook 不改变 goroutine 数量、随机起点、超时、重试规则或 channel 控制流，并避免并发写入 `query_context.Context`。
+
+`query_audit` 在后置阶段读取 `forward.SelectedUpstreamTag` 并上报 `upstream_tag`。没有 forward 调用、缓存命中、请求被 block、全部上游失败或上游未配置 tag 时该字段为空；绝不以候选上游地址或 `upstream_group` 伪造精确结果。
+
 ## 域名匹配与规范化
 
 [`plugin/data_provider/domain_set/domain_set.go`](../mosdns/plugin/data_provider/domain_set/domain_set.go) 使用 `domain.NewDomainMixMatcher()`，并暴露 `DomainMatcherProvider`。匹配器接口在 [`pkg/matcher/domain/interface.go`](../mosdns/pkg/matcher/domain/interface.go)。
