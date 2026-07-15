@@ -4,6 +4,8 @@ interface Envelope<T> { data: T }
 export interface Rule { id: number; category: string; action: string; match_type: string; pattern: string; priority: number; source: string; comment: string; enabled: boolean; updated_at_ms: number }
 export interface Version { version: number; checksum: string; status: string; rule_count: number; created_at_ms: number; error_code?: string }
 export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; qname: string; qtype: number; rcode: number; route: string; route_source: string; cache_hit: boolean; latency_us: number; access_rule_id: number; route_rule_id: number }
+export interface Device { id: number; ip: string; mac: string; hostname: string; display_name: string; note: string; source: string; first_seen_at_ms: number; last_seen_at_ms: number; query_count_24h: number }
+export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
 
 // CSRF token 只保留在当前浏览器会话，刷新后仍可继续操作已有服务端 session。
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
@@ -42,6 +44,11 @@ export const api = {
   versions: () => request<{ items: Version[] }>('/rule-versions'),
   rollback: (version: number) => request<Version>(`/rule-versions/${version}/rollback`, { method: 'POST', body: '{}' }),
   reconcile: () => request<{ state: string }>('/rule-versions/reconcile', { method: 'POST', body: '{}' }),
+  devices: () => request<{ items: Device[] }>('/devices'),
+  updateDevice: (id: number, patch: { display_name?: string; note?: string }) => request<Device>(`/devices/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  systemStatus: () => request<{ controller: Record<string, string>; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string }; mosdns_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }>('/system/status'),
+  flushCaches: () => request<{ flushed: boolean }>('/system/cache/flush', { method: 'POST', body: '{}' }),
+  auditLogs: () => request<{ items: AuditLog[] }>('/audit-logs'),
 }
 
 export function eventStream() { return new EventSource('/api/v1/queries/stream', { withCredentials: true }) }

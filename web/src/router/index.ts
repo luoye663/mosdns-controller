@@ -4,7 +4,8 @@ import OverviewPage from '@/pages/OverviewPage.vue'
 import LoginPage from '@/pages/LoginPage.vue'
 import QueriesPage from '@/pages/QueriesPage.vue'
 import RulesPage from '@/pages/RulesPage.vue'
-import UnavailablePage from '@/pages/UnavailablePage.vue'
+import DevicesPage from '@/pages/DevicesPage.vue'
+import SystemPage from '@/pages/SystemPage.vue'
 import VersionsPage from '@/pages/VersionsPage.vue'
 import { useAuthStore } from '@/stores/auth'
 
@@ -16,8 +17,8 @@ const router = createRouter({
     { path: '/queries', name: 'queries', component: QueriesPage },
     { path: '/rules', name: 'rules', component: RulesPage },
     { path: '/versions', name: 'versions', component: VersionsPage },
-    { path: '/devices', name: 'devices', component: UnavailablePage, props: { title: '设备管理', endpoint: 'GET /api/v1/devices' } },
-    { path: '/system', name: 'system', component: UnavailablePage, props: { title: '系统状态', endpoint: 'GET /api/v1/system/status' } },
+    { path: '/devices', name: 'devices', component: DevicesPage },
+    { path: '/system', name: 'system', component: SystemPage },
   ],
 })
 

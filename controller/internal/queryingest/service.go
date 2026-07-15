@@ -546,3 +546,6 @@ func (s *Service) Close() {
 	}
 	s.mu.Unlock()
 }
+
+// QueueDepth 仅供控制面状态页读取，不参与 DNS 请求路径。
+func (s *Service) QueueDepth() int { return len(s.queue) }

@@ -19,6 +19,7 @@ import (
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
+	"github.com/managed-dns/controller/internal/operations"
 	"github.com/managed-dns/controller/internal/queryingest"
 	"github.com/managed-dns/controller/internal/rules"
 	"github.com/managed-dns/controller/internal/storage"
@@ -35,6 +36,7 @@ type App struct {
 	limiter *auth.LoginLimiter
 	rules   *rules.Service
 	ingest  *queryingest.Service
+	ops     *operations.Service
 }
 type contextKey string
 
@@ -44,7 +46,7 @@ const adminKey contextKey = "admin"
 func New(logger *slog.Logger, cfg config.Config, store *storage.Store, client mosdnsclient.Client, ingestToken string) *App {
 	service := auth.New(store, cfg.Web.SessionTTL)
 	limiter := auth.NewLoginLimiter()
-	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client), ingest: queryingest.New(store.DB(), ingestToken, cfg.Storage.Path)}
+	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client), ingest: queryingest.New(store.DB(), ingestToken, cfg.Storage.Path), ops: operations.New(store.DB(), cfg.Storage.Path, client)}
 }
 
 func (a *App) PublicHandler() http.Handler {
@@ -82,6 +84,11 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Get("/stats/routes", a.statistics("routes"))
 			protected.Get("/stats/rcode", a.statistics("rcode"))
 			protected.Get("/stats/latency", a.latency)
+			protected.Get("/devices", a.devices)
+			protected.Patch("/devices/{id}", a.requireCSRF(a.updateDevice))
+			protected.Get("/system/status", a.systemStatus)
+			protected.Post("/system/cache/flush", a.requireCSRF(a.flushCaches))
+			protected.Get("/audit-logs", a.auditLogs)
 		})
 	})
 	r.Handle("/*", web.Handler())
@@ -91,6 +98,7 @@ func (a *App) InternalHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(a.middleware)
 	r.Get("/health/ready", a.ready)
+	r.Get("/internal/v1/health/ready", a.ready)
 	r.Post("/internal/v1/query-events/batch", a.ingestEvents)
 	return r
 }
@@ -380,6 +388,61 @@ func (a *App) latency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, 200, map[string]any{"items": result})
+}
+func (a *App) devices(w http.ResponseWriter, r *http.Request) {
+	items, err := a.ops.Devices(r.Context())
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "list devices failed")
+		return
+	}
+	writeData(w, r, 200, map[string]any{"items": items})
+}
+func (a *App) updateDevice(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var patch operations.DevicePatch
+	if !decodeJSON(w, r, &patch) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	device, err := a.ops.UpdateDevice(r.Context(), id, patch, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, 404, "NOT_FOUND", "device not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	writeData(w, r, 200, device)
+}
+func (a *App) systemStatus(w http.ResponseWriter, r *http.Request) {
+	status := a.ops.SystemStatus(r.Context())
+	// 日志队列只提供瞬时深度，不能影响 ingest worker 或 SQLite 写入。
+	writeData(w, r, 200, map[string]any{"controller": version.Info(), "database": status.Database, "mosdns": status.Mosdns, "mosdns_error": status.MosdnsError, "ingest_queue_depth": a.ingest.QueueDepth(), "last_successful_ingest_at": status.LastSuccessfulIngest, "last_retention_at": status.LastRetention})
+}
+func (a *App) flushCaches(w http.ResponseWriter, r *http.Request) {
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	if err := a.ops.FlushCaches(r.Context(), admin.ID, requestID(r), remoteIP(r)); err != nil {
+		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", "cache flush failed")
+		return
+	}
+	writeData(w, r, 200, map[string]bool{"flushed": true})
+}
+func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil && r.URL.Query().Get("limit") != "" {
+		writeError(w, r, 400, "VALIDATION_ERROR", "invalid limit")
+		return
+	}
+	items, err := a.ops.AuditLogs(r.Context(), limit)
+	if err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "list audit logs failed")
+		return
+	}
+	writeData(w, r, 200, map[string]any{"items": items})
 }
 func (a *App) publishRule(w http.ResponseWriter, r *http.Request, operation func(auth.Admin) (rules.Version, error)) {
 	value, err := operation(r.Context().Value(adminKey).(auth.Admin))

@@ -138,4 +138,51 @@ func TestInternalIngestRequiresSharedToken(t *testing.T) {
 		t.Fatalf("ingest=%d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestDeviceEndpointsRequireSessionAndCSRF(t *testing.T) {
+	application := testApp(t)
+	now := time.Now().UnixMilli()
+	if _, err := application.store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'admin','x',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.store.DB().Exec(`INSERT INTO sessions(token_hash,admin_id,csrf_hash,created_at_ms,last_seen_at_ms,expires_at_ms) VALUES(?,?,?,?,?,?)`, authDigest("session"), 1, authDigest("csrf"), now, now, now+60_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.store.DB().Exec(`INSERT INTO devices(ip,note,source,first_seen_at_ms,last_seen_at_ms,updated_at_ms) VALUES('192.0.2.5','','observed',?,?,?)`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	unauthorized := httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil)
+	unauthorizedRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(unauthorizedRec, unauthorized)
+	if unauthorizedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("devices without session=%d", unauthorizedRec.Code)
+	}
+	list := httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil)
+	list.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "session"})
+	listRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(listRec, list)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("devices=%d: %s", listRec.Code, listRec.Body.String())
+	}
+	patch := httptest.NewRequest(http.MethodPatch, "/api/v1/devices/1", bytes.NewBufferString(`{"display_name":"办公电脑"}`))
+	patch.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "session"})
+	patchRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(patchRec, patch)
+	if patchRec.Code != http.StatusForbidden {
+		t.Fatalf("patch without csrf=%d", patchRec.Code)
+	}
+	patch.Header.Set("X-CSRF-Token", "csrf")
+	patchRec = httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(patchRec, patch)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch=%d: %s", patchRec.Code, patchRec.Body.String())
+	}
+	flush := httptest.NewRequest(http.MethodPost, "/api/v1/system/cache/flush", nil)
+	flush.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "session"})
+	flushRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(flushRec, flush)
+	if flushRec.Code != http.StatusForbidden {
+		t.Fatalf("flush without csrf=%d", flushRec.Code)
+	}
+}
 func authDigest(value string) []byte { result := sha256.Sum256([]byte(value)); return result[:] }
