@@ -26,6 +26,8 @@ type Client interface {
 	SetCacheEnabled(context.Context, bool) error
 	UpstreamStatus(context.Context, string) (UpstreamSnapshot, error)
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
+	GeositeStatus(context.Context) (DomainSetStatus, error)
+	ApplyGeosite(context.Context, DomainSetSnapshot) (DomainSetStatus, error)
 }
 type UpstreamSnapshot struct {
 	Version                uint64     `json:"version"`
@@ -41,6 +43,17 @@ type Upstream struct {
 	Addr     string `json:"addr"`
 	Priority int    `json:"priority"`
 	Weight   int    `json:"weight"`
+}
+type DomainSetStatus struct {
+	Version   uint64    `json:"version"`
+	Checksum  string    `json:"checksum"`
+	RuleCount int       `json:"rule_count"`
+	LoadedAt  time.Time `json:"loaded_at"`
+}
+type DomainSetSnapshot struct {
+	Version                uint64 `json:"version"`
+	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
+	Rules                  string `json:"rules"`
 }
 type Status struct {
 	State           string `json:"state"`
@@ -148,6 +161,14 @@ func (c *HTTPClient) ApplyUpstream(ctx context.Context, group string, snapshot U
 	var value UpstreamSnapshot
 	return value, c.request(ctx, http.MethodPut, "/plugins/"+group+"/snapshot", snapshot, &value)
 }
+func (c *HTTPClient) GeositeStatus(ctx context.Context) (DomainSetStatus, error) {
+	var value DomainSetStatus
+	return value, c.request(ctx, http.MethodGet, "/plugins/geosite_cn/status", nil, &value)
+}
+func (c *HTTPClient) ApplyGeosite(ctx context.Context, snapshot DomainSetSnapshot) (DomainSetStatus, error) {
+	var value DomainSetStatus
+	return value, c.request(ctx, http.MethodPut, "/plugins/geosite_cn/snapshot", snapshot, &value)
+}
 func (c *HTTPClient) request(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {
@@ -177,10 +198,28 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, input, ou
 		return ErrConflict
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("mosdns API %s %s: %s", method, path, resp.Status)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("mosdns API %s %s: %s: %s", method, path, resp.Status, responseSummary(body))
 	}
 	if output != nil {
-		return json.NewDecoder(resp.Body).Decode(output)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return fmt.Errorf("read mosdns API %s %s: %w", method, path, err)
+		}
+		if err := json.Unmarshal(body, output); err != nil {
+			return fmt.Errorf("mosdns API %s %s returned non-JSON data; the required plugin endpoint may be unavailable: %s", method, path, responseSummary(body))
+		}
 	}
 	return nil
+}
+
+func responseSummary(body []byte) string {
+	value := strings.TrimSpace(string(body))
+	if len(value) > 512 {
+		value = value[:512] + "..."
+	}
+	if value == "" {
+		return "empty response"
+	}
+	return value
 }

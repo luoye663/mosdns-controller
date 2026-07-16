@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -95,6 +96,9 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Put("/upstreams/{group}", a.requireCSRF(a.updateUpstream))
 			protected.Get("/settings", a.settings)
 			protected.Put("/settings", a.requireCSRF(a.updateSettings))
+			protected.Get("/geosite", a.geositeStatus)
+			protected.Put("/geosite", a.requireCSRF(a.updateGeosite))
+			protected.Post("/geosite/upload", a.requireCSRF(a.uploadGeosite))
 			protected.Get("/audit-logs", a.auditLogs)
 		})
 	})
@@ -525,6 +529,53 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, 200, settings)
+}
+func (a *App) geositeStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := a.ops.GeositeStatus(r.Context())
+	if err != nil {
+		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", "geosite status is unavailable")
+		return
+	}
+	writeData(w, r, 200, status)
+}
+func (a *App) updateGeosite(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SourceURL string `json:"source_url"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	status, err := a.ops.UpdateGeosite(r.Context(), input.SourceURL, admin.ID, requestID(r), remoteIP(r))
+	if err != nil {
+		writeError(w, r, 400, "GEOSITE_UPDATE_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, 200, status)
+}
+func (a *App) uploadGeosite(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(20 << 20); err != nil {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid geosite upload")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "geosite file is required")
+		return
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, (20<<20)+1))
+	if err != nil || len(content) > 20<<20 {
+		writeError(w, r, http.StatusRequestEntityTooLarge, "LIMIT_EXCEEDED", "geosite file exceeds 20 MiB")
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	status, err := a.ops.UploadGeosite(r.Context(), content, header.Filename, admin.ID, requestID(r), remoteIP(r))
+	if err != nil {
+		writeError(w, r, 400, "GEOSITE_UPLOAD_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, 200, status)
 }
 func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))

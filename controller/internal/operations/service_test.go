@@ -16,6 +16,7 @@ type fakeMosdns struct {
 	statusErr    error
 	upstreams    map[string]mosdnsclient.UpstreamSnapshot
 	cacheEnabled bool
+	geosite      mosdnsclient.DomainSetStatus
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -55,6 +56,13 @@ func (f *fakeMosdns) ApplyUpstream(_ context.Context, group string, snapshot mos
 	}
 	f.upstreams[group] = snapshot
 	return snapshot, nil
+}
+func (f *fakeMosdns) GeositeStatus(context.Context) (mosdnsclient.DomainSetStatus, error) {
+	return f.geosite, nil
+}
+func (f *fakeMosdns) ApplyGeosite(_ context.Context, snapshot mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
+	f.geosite = mosdnsclient.DomainSetStatus{Version: snapshot.Version, RuleCount: 1}
+	return f.geosite, nil
 }
 
 func testService(t *testing.T, fake *fakeMosdns) *Service {
@@ -157,5 +165,24 @@ func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	settings, err := s.Settings(context.Background())
 	if err != nil || settings.CacheEnabled || settings.QueryRetentionDays != 3 || fake.cacheEnabled {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
+	}
+}
+
+func TestUpdateGeositeDownloadsAndPublishes(t *testing.T) {
+	s := testService(t, &fakeMosdns{})
+	if _, err := s.UpdateGeosite(context.Background(), "http://example.com/geosite.txt", 1, "req-geosite", "192.0.2.10"); err == nil {
+		t.Fatal("non-HTTPS source accepted")
+	}
+}
+
+func TestUploadGeositePublishesAndClearsSubscriptionSource(t *testing.T) {
+	fake := &fakeMosdns{}
+	s := testService(t, fake)
+	status, err := s.UploadGeosite(context.Background(), []byte("example.cn\n"), "china.txt", 1, "req-geosite-upload", "192.0.2.10")
+	if err != nil || status.Version != 1 || status.SourceURL != "" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	if _, err := s.UploadGeosite(context.Background(), []byte("example.cn\n"), "china.dat", 1, "req-geosite-upload", "192.0.2.10"); err == nil {
+		t.Fatal("non-txt upload accepted")
 	}
 }

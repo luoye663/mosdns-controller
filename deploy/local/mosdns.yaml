@@ -8,9 +8,13 @@ api:
 
 plugins:
   - tag: geosite_cn
-    type: domain_set
+    type: dynamic_domain_set
     args:
-      exps: []
+      snapshot_file: "../.local/mosdns/geosite-cn.json"
+      backup_file: "../.local/mosdns/geosite-cn.json.bak"
+      initial_file: "../deploy/mosdns/rules/geosite_cn.txt"
+      auth_token_file: "../.local/mosdns_control_token"
+      max_bytes: 20971520
 
   - tag: dynamic_rules
     type: dynamic_rule_engine

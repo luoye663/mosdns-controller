@@ -9,6 +9,7 @@ export interface AuditLog { id: number; admin_username: string; action: string; 
 export interface Upstream { tag: string; addr: string; priority: number; weight: number }
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
 export interface Settings { cache_enabled: boolean; query_retention_days: number }
+export interface GeositeStatus { source_url: string; version: number; checksum: string; rule_count: number; loaded_at: string }
 
 // CSRF token 只保留在当前浏览器会话，刷新后仍可继续操作已有服务端 session。
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
@@ -18,7 +19,7 @@ export function clearCSRF() { csrfToken = ''; sessionStorage.removeItem('mosdns_
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
-  if (init.body) headers.set('Content-Type', 'application/json')
+  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (csrfToken && !['GET', 'HEAD'].includes(init.method ?? 'GET')) headers.set('X-CSRF-Token', csrfToken)
   const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
   const body = await response.json().catch(() => ({})) as { data?: T; error?: { code?: string; message?: string } }
@@ -57,6 +58,9 @@ export const api = {
   updateUpstream: (group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) => request<UpstreamSnapshot>(`/upstreams/${group}`, { method: 'PUT', body: JSON.stringify(snapshot) }),
   settings: () => request<Settings>('/settings'),
   updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  geositeStatus: () => request<GeositeStatus>('/geosite'),
+  updateGeosite: (sourceURL: string) => request<GeositeStatus>('/geosite', { method: 'PUT', body: JSON.stringify({ source_url: sourceURL }) }),
+  uploadGeosite: (file: File) => { const body = new FormData(); body.append('file', file); return request<GeositeStatus>('/geosite/upload', { method: 'POST', body }) },
   auditLogs: () => request<{ items: AuditLog[] }>('/audit-logs'),
 }
 

@@ -49,6 +49,12 @@ func (f *fakeMosdns) UpstreamStatus(context.Context, string) (mosdnsclient.Upstr
 func (f *fakeMosdns) ApplyUpstream(context.Context, string, mosdnsclient.UpstreamSnapshot) (mosdnsclient.UpstreamSnapshot, error) {
 	return mosdnsclient.UpstreamSnapshot{}, nil
 }
+func (f *fakeMosdns) GeositeStatus(context.Context) (mosdnsclient.DomainSetStatus, error) {
+	return mosdnsclient.DomainSetStatus{}, nil
+}
+func (f *fakeMosdns) ApplyGeosite(context.Context, mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
+	return mosdnsclient.DomainSetStatus{}, nil
+}
 
 func testService(t *testing.T) (*Service, *fakeMosdns) {
 	t.Helper()

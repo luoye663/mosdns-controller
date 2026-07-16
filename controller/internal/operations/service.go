@@ -6,6 +6,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +65,10 @@ type Upstreams struct {
 type Settings struct {
 	CacheEnabled       bool `json:"cache_enabled"`
 	QueryRetentionDays int  `json:"query_retention_days"`
+}
+type GeositeStatus struct {
+	SourceURL string `json:"source_url"`
+	mosdnsclient.DomainSetStatus
 }
 type Service struct {
 	db     *sql.DB
@@ -289,6 +296,84 @@ func (s *Service) UpdateUpstream(ctx context.Context, group string, snapshot mos
 		err = auditErr
 	}
 	return updated, err
+}
+
+func (s *Service) GeositeStatus(ctx context.Context) (GeositeStatus, error) {
+	status, err := s.mosdns.GeositeStatus(ctx)
+	if err != nil {
+		return GeositeStatus{}, err
+	}
+	result := GeositeStatus{DomainSetStatus: status}
+	_ = s.db.QueryRowContext(ctx, `SELECT value_json FROM system_state WHERE key='geosite_cn_source_url'`).Scan(&result.SourceURL)
+	return result, nil
+}
+
+func (s *Service) UpdateGeosite(ctx context.Context, sourceURL string, adminID int64, requestID, clientIP string) (GeositeStatus, error) {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(sourceURL))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return GeositeStatus{}, errors.New("geosite source_url must be an HTTPS URL")
+	}
+	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" {
+			return errors.New("redirect must use HTTPS")
+		}
+		return nil
+	}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return GeositeStatus{}, err
+	}
+	request.Header.Set("Accept", "text/plain")
+	response, err := client.Do(request)
+	if err != nil {
+		return GeositeStatus{}, fmt.Errorf("download geosite: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return GeositeStatus{}, fmt.Errorf("download geosite: HTTP %s", response.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, (20<<20)+1))
+	if err != nil {
+		return GeositeStatus{}, fmt.Errorf("read geosite: %w", err)
+	}
+	if len(body) == 0 || len(body) > 20<<20 {
+		return GeositeStatus{}, errors.New("geosite file must contain 1..20971520 bytes")
+	}
+	return s.applyGeosite(ctx, body, parsed.String(), adminID, requestID, clientIP)
+}
+
+func (s *Service) UploadGeosite(ctx context.Context, content []byte, filename string, adminID int64, requestID, clientIP string) (GeositeStatus, error) {
+	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(filename)), ".txt") {
+		return GeositeStatus{}, errors.New("geosite upload must be a .txt file")
+	}
+	if len(content) == 0 || len(content) > 20<<20 {
+		return GeositeStatus{}, errors.New("geosite file must contain 1..20971520 bytes")
+	}
+	return s.applyGeosite(ctx, content, "", adminID, requestID, clientIP)
+}
+
+func (s *Service) applyGeosite(ctx context.Context, body []byte, sourceURL string, adminID int64, requestID, clientIP string) (GeositeStatus, error) {
+	runtime, err := s.mosdns.GeositeStatus(ctx)
+	if err != nil {
+		return GeositeStatus{}, err
+	}
+	updated, err := s.mosdns.ApplyGeosite(ctx, mosdnsclient.DomainSetSnapshot{Version: runtime.Version + 1, ExpectedCurrentVersion: runtime.Version, Rules: string(body)})
+	result, code := "success", ""
+	if err != nil {
+		result, code = "failed", "GEOSITE_APPLY_FAILED"
+	} else {
+		_, err = s.db.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES('geosite_cn_source_url',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, sourceURL, time.Now().UnixMilli())
+		if err != nil {
+			result, code = "failed", "GEOSITE_SOURCE_PERSIST_FAILED"
+		}
+	}
+	if auditErr := s.Audit(ctx, adminID, "update", "geosite", "cn", requestID, clientIP, result, code); auditErr != nil && err == nil {
+		err = auditErr
+	}
+	if err != nil {
+		return GeositeStatus{}, err
+	}
+	return GeositeStatus{SourceURL: sourceURL, DomainSetStatus: updated}, nil
 }
 
 func (s *Service) DatabaseStatus() DatabaseStatus {
