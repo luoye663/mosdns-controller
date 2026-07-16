@@ -134,10 +134,10 @@ plugins:
     type: udp_server
     args:
       entry: main
-      listen: "0.0.0.0:53"
+      listen: "0.0.0.0:5353"
 
   - tag: tcp_server
     type: tcp_server
     args:
       entry: main
-      listen: "0.0.0.0:53"
+      listen: "0.0.0.0:5353"

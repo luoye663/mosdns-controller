@@ -14,3 +14,5 @@ web/dist/
 web/*.tsbuildinfo
 .local/
 .DS_Store
+
+controller/internal/web/static
