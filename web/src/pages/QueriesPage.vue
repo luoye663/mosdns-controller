@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NDatePicker, NInput, NModal, NSelect, NSwitch } from 'naive-ui'
-import { api, eventStream, type QueryEvent, type QueryParams, type Version } from '@/lib/api'
+import { api, eventStream, type QueryEvent, type QueryParams, type Rule, type Version } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
 
 type SavedFilter = { label: string; filters: Record<string, string>; range: [number, number] | null }
@@ -15,12 +15,13 @@ const live = ref(false)
 const paused = ref(false)
 const streamState = ref('未连接')
 const pending = ref<QueryEvent[]>([])
+const ruleLabels = ref<Record<number, string>>({})
 const savedFilters = ref<SavedFilter[]>(readSavedFilters())
 const selectedSaved = ref<string | null>(null)
 const ruleTarget = ref<QueryEvent | null>(null)
 const published = ref<Version | null>(null)
 const ruleAction = ref('block')
-const range = ref<[number, number] | null>([Date.now() - 24 * 60 * 60 * 1000, Date.now()])
+const range = ref<[number, number] | null>(null)
 const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qtype: '', rcode: '', route: '', route_source: '', upstream_tag: '', protocol: '', cache_hit: '', has_error: '' })
 let stream: EventSource | undefined
 
@@ -47,7 +48,20 @@ function qtypeLabel(value: number) { return ({ 1: 'A', 5: 'CNAME', 12: 'PTR', 15
 function qclassLabel(value: number) { return value === 1 ? 'IN' : `类别 ${value}` }
 function rcodeLabel(value: number) { return ({ 0: '成功', 1: '格式错误', 2: '服务器失败', 3: '域名不存在', 4: '未实现', 5: '已拒绝' } as Record<number, string>)[value] ?? `返回码 ${value}` }
 function routeLabel(value: string) { return ({ local: '本地', remote: '远程', block: '拦截' } as Record<string, string>)[value] ?? value }
-function routeSourceLabel(value: string) { return ({ default: '默认路由', dynamic_rule: '动态规则' } as Record<string, string>)[value] ?? value }
+function ruleLabel(rule: Rule) {
+  return ({
+    'access:allow': '白名单',
+    'access:block': '黑名单',
+    'route:local': '强制国内',
+    'route:remote': '强制国外',
+    'logging:no_log': '不记录日志',
+  } as Record<string, string>)[`${rule.category}:${rule.action}`] ?? '动态规则'
+}
+function routeSourceLabel(row: QueryEvent) {
+  if (row.route_source === 'default') return '默认路由'
+  if (row.route_source === 'dynamic_rule' && row.route === 'local' && !row.route_rule_id && !row.access_rule_id) return '国内域名订阅'
+  return ruleLabels.value[row.route_rule_id] ?? ruleLabels.value[row.access_rule_id] ?? '已删除规则'
+}
 function errorText(row: QueryEvent) { return row.error_text || row.error_code || (row.rcode !== 0 ? rcodeLabel(row.rcode) : '-') }
 function hasError(row: QueryEvent) { return Boolean(row.error_code || row.error_text || row.rcode !== 0) }
 function closeStream() { stream?.close(); stream = undefined; streamState.value = '已断开' }
@@ -74,6 +88,10 @@ async function load(nextCursor = '') {
     rows.value = nextCursor ? [...rows.value, ...items.filter((item) => !rows.value.some((row) => row.event_id === item.event_id))] : items
     cursor.value = page.next_cursor ?? ''
   } catch (e) { error.value = e instanceof Error ? e.message : '无法加载查询日志' } finally { loading.value = false }
+}
+async function loadRuleLabels() {
+  const result = await api.rules()
+  ruleLabels.value = Object.fromEntries(result.items.map((rule) => [rule.id, ruleLabel(rule)]).filter(([, label]) => label))
 }
 async function applyFilters() { pending.value = []; await load(); if (live.value) startStream() }
 function toggleLive(enabled: boolean) { if (enabled) startStream(); else closeStream() }
@@ -111,7 +129,9 @@ async function createRule() {
     ruleTarget.value = null
   } catch (e) { error.value = e instanceof Error ? e.message : '规则发布失败' } finally { loading.value = false }
 }
-onMounted(() => load())
+onMounted(async () => {
+  await Promise.all([load(), loadRuleLabels().catch(() => {})])
+})
 onBeforeUnmount(closeStream)
 </script>
 
@@ -137,7 +157,7 @@ onBeforeUnmount(closeStream)
     <NAlert v-if="published" type="success" closable class="form-alert" @close="published = null">已发布版本 {{ published.version }}，状态：{{ published.status }}。</NAlert>
     <NAlert v-if="error" type="error" closable class="form-alert" @close="error = ''">{{ error }}</NAlert>
     <div class="table-wrap queries-table-wrap"><table><thead><tr><th>时间</th><th>客户端</th><th>域名 / 类型</th><th>结果</th><th>路由</th><th>缓存</th><th>延迟</th><th>规则 / 版本</th><th>诊断</th><th></th></tr></thead><tbody>
-      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td :title="row.client_ip">{{ formatClient(row) }}</td><td><div class="mono">{{ row.qname }}</div><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row.route_source) }}</small></td><td>{{ row.cache_hit ? '命中' : '未命中' }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div>访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)">{{ errorText(row) }}<small v-if="row.answer_count">{{ row.answer_count }} 条应答</small></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
+      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td :title="row.client_ip">{{ formatClient(row) }}</td><td><div class="mono">{{ row.qname }}</div><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td>{{ row.cache_hit ? '命中' : '未命中' }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div>访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)">{{ errorText(row) }}<small v-if="row.answer_count">{{ row.answer_count }} 条应答</small></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
       <tr v-if="!loading && !rows.length"><td colspan="10" class="empty-cell">暂无查询日志</td></tr>
     </tbody></table></div>
     <footer class="table-footer"><span>已显示 {{ rows.length }} 条；查询使用 cursor 分页</span><NButton v-if="cursor" :loading="loading" @click="load(cursor)">加载下一页</NButton></footer>
