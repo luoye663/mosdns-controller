@@ -28,3 +28,4 @@ body {
 .page { width: 100%; max-width: none; margin: 0; }
 .settings-card { max-width: 520px; margin-bottom: 14px; }.settings-card .n-form-item { margin: 0; }
 .setup-note { margin: 0 0 18px; color: #607075; font-size: 13px; }
+.subscription-panel { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(260px, 1.5fr) auto; align-items: center; gap: 20px; margin: 0 0 18px; padding: 14px 16px; border: 1px solid #d8e4e5; border-left: 3px solid #087e8b; background: #fff; }.subscription-panel h2 { margin: 3px 0 0; font-size: 16px; }.subscription-panel .status-list { grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; }.subscription-panel .status-list dd { max-width: 460px; }@media (max-width: 760px) { .subscription-panel { grid-template-columns: 1fr; gap: 12px; }.subscription-panel .status-list dd { max-width: none; } }
