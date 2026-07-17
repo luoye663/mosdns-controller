@@ -106,6 +106,40 @@ docker compose -f deploy/docker-compose.yml down
 
 `down -v` 会删除命名卷中的运行数据，仅应在确认不需要恢复数据时使用。
 
+## 二进制部署
+
+`deploy/binary/` 保存原生 systemd 部署所需的模板：服务文件、配置、安装脚本与说明。`make binary-package` 将它们与当前平台的 `mosdns`、嵌入 WebUI 的 `controller` 二进制一起生成至 `deploy/binary/package/`，同时创建可传输的 `.tar.gz`；生成物被 Git 忽略，不含 token、SQLite 数据、缓存或规则快照。
+
+```bash
+npm --prefix web ci
+make binary-package
+# 交叉编译示例：make binary-package BINARY_GOOS=linux BINARY_GOARCH=arm64
+make binary-copy BINARY_HOST=root@dns-host
+```
+
+在目标机进入复制后的目录并安装：
+
+```bash
+sudo ./install.sh
+sudoedit /etc/mosdns-manager/mosdns/config.yaml
+sudo systemctl start mosdns.service mosdns-controller.service
+```
+
+安装脚本创建最小权限服务用户、运行数据目录和共享 token，并将 [mosdns.service](deploy/binary/mosdns.service) 与 [mosdns-controller.service](deploy/binary/mosdns-controller.service) 安装到 `/etc/systemd/system/`。先将 `<REMOTE_DOH_URL>` 替换为实际端点再启动；DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
+
+首次启动后，访问 `http://<部署主机IP>:8080` 初始化管理员，并使用 `curl -fsS http://127.0.0.1:8080/health/ready`、`dig @127.0.0.1 example.com A` 与 `dig @127.0.0.1 example.com A +tcp` 验证服务。升级前备份 `/etc/mosdns-manager`、`/var/lib/mosdns` 和 `/var/lib/mosdns-controller`；详见 [升级说明](docs/upgrade.md) 与 [恢复说明](docs/recovery.md)。
+
+查看二进制部署的服务日志：
+
+```bash
+# 实时跟随两个服务
+sudo journalctl -fu mosdns.service -u mosdns-controller.service
+# 查看本次启动后的日志
+sudo journalctl -b -u mosdns.service -u mosdns-controller.service
+# 仅查看近期错误
+sudo journalctl -p err..alert -u mosdns.service -u mosdns-controller.service
+```
+
 ## 本地编译与测试
 
 开发环境需要 Go `1.26.5` 或兼容版本、Node.js 22、npm 和 Docker Compose。mosdns 的 `go.mod` 基线为 Go `1.24.9`，controller 为 Go `1.25.0`。

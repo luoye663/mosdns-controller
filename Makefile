@@ -3,8 +3,13 @@ LOCAL_DIR := .local
 LOCAL_TOKEN := $(LOCAL_DIR)/mosdns_control_token
 LOCAL_MOSDNS_CONFIG := deploy/local/mosdns.yaml
 LOCAL_CONTROLLER_CONFIG := deploy/local/controller.yaml
+BINARY_DEPLOY_DIR := deploy/binary
+BINARY_PACKAGE_DIR := $(BINARY_DEPLOY_DIR)/package
+BINARY_GOOS ?= $(shell go env GOOS)
+BINARY_GOARCH ?= $(shell go env GOARCH)
+BINARY_ARCHIVE := $(BINARY_DEPLOY_DIR)/mosdns-manager-$(BINARY_GOOS)-$(BINARY_GOARCH).tar.gz
 
-.PHONY: build test race lint web-build web-embed compose-up compose-down local-init local-mosdns local-controller local-up local-create-admin local-clean
+.PHONY: build test race lint web-build web-embed compose-up compose-down local-init local-mosdns local-controller local-up local-create-admin local-clean binary-package binary-copy binary-clean
 
 build: web-embed
 	go -C mosdns build ./...
@@ -75,3 +80,26 @@ local-create-admin: local-init
 # 仅删除本地开发数据；不会影响 Docker Compose 的命名卷。
 local-clean:
 	rm -rf $(LOCAL_DIR)
+
+# 生成可传输的原生部署目录；包含二进制、配置、规则、systemd 单元和安装脚本。
+binary-package: web-embed
+	rm -rf $(BINARY_PACKAGE_DIR) $(BINARY_DEPLOY_DIR)/mosdns-manager-*.tar.gz
+	install -d $(BINARY_PACKAGE_DIR)/bin $(BINARY_PACKAGE_DIR)/etc/mosdns/rules $(BINARY_PACKAGE_DIR)/etc/controller $(BINARY_PACKAGE_DIR)/systemd
+	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C mosdns build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/mosdns .
+	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C controller build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/controller ./cmd/controller
+	install -m 0640 $(BINARY_DEPLOY_DIR)/mosdns.yaml $(BINARY_PACKAGE_DIR)/etc/mosdns/config.yaml
+	install -m 0640 $(BINARY_DEPLOY_DIR)/controller.yaml $(BINARY_PACKAGE_DIR)/etc/controller/config.yaml
+	install -m 0640 deploy/mosdns/rules/geosite_cn.txt $(BINARY_PACKAGE_DIR)/etc/mosdns/rules/geosite_cn.txt
+	install -m 0644 $(BINARY_DEPLOY_DIR)/mosdns.service $(BINARY_PACKAGE_DIR)/systemd/mosdns.service
+	install -m 0644 $(BINARY_DEPLOY_DIR)/mosdns-controller.service $(BINARY_PACKAGE_DIR)/systemd/mosdns-controller.service
+	install -m 0755 $(BINARY_DEPLOY_DIR)/install.sh $(BINARY_PACKAGE_DIR)/install.sh
+	install -m 0644 $(BINARY_DEPLOY_DIR)/README.md $(BINARY_PACKAGE_DIR)/README.md
+	tar -C $(BINARY_DEPLOY_DIR) -czf $(BINARY_ARCHIVE) package
+
+# BINARY_HOST 例如 root@dns-host；可选 BINARY_REMOTE_DIR=/tmp/mosdns-manager。
+binary-copy: binary-package
+	@test -n "$(BINARY_HOST)" || { printf '%s\n' 'Set BINARY_HOST, for example: make binary-copy BINARY_HOST=root@dns-host'; exit 2; }
+	rsync -az --delete $(BINARY_PACKAGE_DIR)/ $(BINARY_HOST):$(or $(BINARY_REMOTE_DIR),/tmp/mosdns-manager)/
+
+binary-clean:
+	rm -rf $(BINARY_PACKAGE_DIR) $(BINARY_DEPLOY_DIR)/*.tar.gz

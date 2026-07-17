@@ -1,0 +1,20 @@
+[Unit]
+Description=mosdns managed DNS data plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mosdns
+Group=mosdns-manager
+ExecStart=/usr/local/bin/mosdns start -c /etc/mosdns-manager/mosdns/config.yaml
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mosdns
+
+[Install]
+WantedBy=multi-user.target

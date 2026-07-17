@@ -16,3 +16,7 @@ web/*.tsbuildinfo
 .DS_Store
 
 controller/internal/web/static
+
+# 原生二进制部署包由 make binary-package 生成。
+deploy/binary/package/
+deploy/binary/*.tar.gz

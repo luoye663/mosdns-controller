@@ -1,0 +1,18 @@
+[Unit]
+Description=mosdns manager controller
+After=network-online.target mosdns.service
+Wants=network-online.target
+
+[Service]
+User=mosdns-controller
+Group=mosdns-manager
+ExecStart=/usr/local/bin/controller serve -config /etc/mosdns-manager/controller.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mosdns-controller
+
+[Install]
+WantedBy=multi-user.target
