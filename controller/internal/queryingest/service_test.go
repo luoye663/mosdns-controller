@@ -123,6 +123,18 @@ func TestAnswerIPsRemainInBoundedMemoryOnly(t *testing.T) {
 	}
 }
 
+func TestAnswerIPsReturnsEmptyArrayForAnswerWithoutAddress(t *testing.T) {
+	s := testService(t)
+	event := validEvent("empty-answer-ips")
+	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	ips, ok := s.AnswerIPs(event.EventID)
+	if !ok || ips == nil || len(ips) != 0 {
+		t.Fatalf("cached answer IPs = %#v, exists=%t", ips, ok)
+	}
+}
+
 func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	s := testService(t)
 	first := validEvent("query-filter-first")

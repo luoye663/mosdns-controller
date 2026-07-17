@@ -434,7 +434,7 @@ func (s *Service) AnswerIPs(eventID string) ([]string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ips, ok := s.answerIPs[eventID]
-	return append([]string(nil), ips...), ok
+	return append([]string{}, ips...), ok
 }
 
 func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {

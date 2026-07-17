@@ -13,7 +13,7 @@ async function refreshMosdnsStatus() {
   if (isPublicAuth.value || !auth.authenticated) return
   try {
     const status = await api.systemStatus()
-    mosdnsError.value = status.mosdns?.state === 'ready' ? '' : status.mosdns_error || `mosdns 状态为 ${status.mosdns?.state ?? '未知'}`
+    mosdnsError.value = status.mosdns ? '' : status.mosdns_error || 'mosdns 运行时状态未知'
   } catch {
     // Controller 自身不可用时由页面请求错误呈现；不能误报为 mosdns 故障。
   }
