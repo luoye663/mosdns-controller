@@ -475,7 +475,7 @@ func (a *App) updateDevice(w http.ResponseWriter, r *http.Request) {
 func (a *App) systemStatus(w http.ResponseWriter, r *http.Request) {
 	status := a.ops.SystemStatus(r.Context())
 	// 日志队列只提供瞬时深度，不能影响 ingest worker 或 SQLite 写入。
-	writeData(w, r, 200, map[string]any{"controller": version.Info(), "database": status.Database, "mosdns": status.Mosdns, "mosdns_error": status.MosdnsError, "ingest_queue_depth": a.ingest.QueueDepth(), "last_successful_ingest_at": status.LastSuccessfulIngest, "last_retention_at": status.LastRetention})
+	writeData(w, r, 200, map[string]any{"controller": version.Info(), "database": status.Database, "mosdns": status.Mosdns, "mosdns_error": status.MosdnsError, "audit": status.Audit, "audit_error": status.AuditError, "ingest_queue_depth": a.ingest.QueueDepth(), "last_successful_ingest_at": status.LastSuccessfulIngest, "last_retention_at": status.LastRetention})
 }
 func (a *App) flushCaches(w http.ResponseWriter, r *http.Request) {
 	admin := r.Context().Value(adminKey).(auth.Admin)

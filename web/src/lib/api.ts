@@ -11,6 +11,9 @@ export interface Upstream { tag: string; addr: string; priority: number; weight:
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
 export interface Settings { cache_enabled: boolean; query_retention_days: number }
 export interface GeositeStatus { source_url: string; version: number; checksum: string; rule_count: number; loaded_at: string }
+export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; cache_hit_count: number }
+export interface LatencyPoint { hour_start_ms: number; query_count: number; average_latency_us: number; max_latency_us: number }
+export interface SystemStatus { controller: Record<string, string>; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string }; mosdns_error?: string; audit?: { queue_depth: number; queue_capacity: number; dropped_events: number }; audit_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }
 
 // CSRF token 只保留在当前浏览器会话，刷新后仍可继续操作已有服务端 session。
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
@@ -39,9 +42,9 @@ export const api = {
   bootstrap: (username: string, password: string) => request<{ csrf_token: string }>('/auth/bootstrap', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request<{ id: number; username: string }>('/auth/me'),
   logout: () => request<{ logged_out: boolean }>('/auth/logout', { method: 'POST' }),
-  summary: () => request<{ query_count: number; average_latency_us: number }>('/stats/summary'),
+  summary: () => request<DashboardSummary>('/stats/summary'),
   statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : `/stats/${kind}`),
-  latency: () => request<{ items: Array<{ hour_start_ms: number; average_latency_us: number }> }>('/stats/latency'),
+  latency: () => request<{ items: LatencyPoint[] }>('/stats/latency'),
   queries: (params: Record<string, string | number | undefined>) => request<{ items: QueryEvent[]; next_cursor?: string }>(`/queries?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
   rules: () => request<{ items: Rule[] }>('/rules'),
   createRule: (rule: RuleInput) => request<Version>('/rules', { method: 'POST', body: JSON.stringify(rule) }),
@@ -55,7 +58,7 @@ export const api = {
   reconcile: () => request<{ state: string }>('/rule-versions/reconcile', { method: 'POST', body: '{}' }),
   devices: () => request<{ items: Device[] }>('/devices'),
   updateDevice: (id: number, patch: { display_name?: string; note?: string }) => request<Device>(`/devices/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
-  systemStatus: () => request<{ controller: Record<string, string>; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string }; mosdns_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }>('/system/status'),
+  systemStatus: () => request<SystemStatus>('/system/status'),
   flushCaches: () => request<{ flushed: boolean }>('/system/cache/flush', { method: 'POST', body: '{}' }),
   upstreams: () => request<{ local: UpstreamSnapshot; remote: UpstreamSnapshot }>('/upstreams'),
   updateUpstream: (group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) => request<UpstreamSnapshot>(`/upstreams/${group}`, { method: 'PUT', body: JSON.stringify(snapshot) }),

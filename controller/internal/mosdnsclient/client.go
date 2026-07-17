@@ -28,6 +28,7 @@ type Client interface {
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
 	GeositeStatus(context.Context) (DomainSetStatus, error)
 	ApplyGeosite(context.Context, DomainSetSnapshot) (DomainSetStatus, error)
+	AuditStatus(context.Context) (AuditStatus, error)
 }
 type UpstreamSnapshot struct {
 	Version                uint64     `json:"version"`
@@ -59,6 +60,11 @@ type Status struct {
 	State           string `json:"state"`
 	SnapshotVersion uint64 `json:"snapshot_version"`
 	Checksum        string `json:"checksum"`
+}
+type AuditStatus struct {
+	QueueDepth    int   `json:"queue_depth"`
+	QueueCapacity int   `json:"queue_capacity"`
+	DroppedEvents int64 `json:"dropped_events"`
 }
 type ValidateResult struct {
 	Valid           bool   `json:"valid"`
@@ -168,6 +174,10 @@ func (c *HTTPClient) GeositeStatus(ctx context.Context) (DomainSetStatus, error)
 func (c *HTTPClient) ApplyGeosite(ctx context.Context, snapshot DomainSetSnapshot) (DomainSetStatus, error) {
 	var value DomainSetStatus
 	return value, c.request(ctx, http.MethodPut, "/plugins/geosite_cn/snapshot", snapshot, &value)
+}
+func (c *HTTPClient) AuditStatus(ctx context.Context) (AuditStatus, error) {
+	var value AuditStatus
+	return value, c.request(ctx, http.MethodGet, "/plugins/query_audit/status", nil, &value)
 }
 func (c *HTTPClient) request(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader

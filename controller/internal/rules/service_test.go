@@ -55,6 +55,9 @@ func (f *fakeMosdns) GeositeStatus(context.Context) (mosdnsclient.DomainSetStatu
 func (f *fakeMosdns) ApplyGeosite(context.Context, mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
 	return mosdnsclient.DomainSetStatus{}, nil
 }
+func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
+	return mosdnsclient.AuditStatus{}, nil
+}
 
 func testService(t *testing.T) (*Service, *fakeMosdns) {
 	t.Helper()

@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -58,4 +58,10 @@ var migrationV1 = []string{
 // migrationV2 为已部署的 SQLite 数据库补充精确上游标签，历史记录保持为空。
 var migrationV2 = []string{
 	`ALTER TABLE dns_queries ADD COLUMN upstream_tag TEXT`,
+}
+
+// migrationV3 stores one bounded latency bucket per query. Dashboard percentiles
+// are calculated from this aggregate rather than scanning retained query records.
+var migrationV3 = []string{
+	`CREATE TABLE dns_stats_hourly_latency_bucket (hour_start_ms INTEGER NOT NULL, upper_bound_us INTEGER NOT NULL, query_count INTEGER NOT NULL, PRIMARY KEY(hour_start_ms,upper_bound_us)) WITHOUT ROWID`,
 }

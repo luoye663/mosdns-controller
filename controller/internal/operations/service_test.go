@@ -64,6 +64,9 @@ func (f *fakeMosdns) ApplyGeosite(_ context.Context, snapshot mosdnsclient.Domai
 	f.geosite = mosdnsclient.DomainSetStatus{Version: snapshot.Version, RuleCount: 1}
 	return f.geosite, nil
 }
+func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
+	return mosdnsclient.AuditStatus{QueueCapacity: 65536}, nil
+}
 
 func testService(t *testing.T, fake *fakeMosdns) *Service {
 	t.Helper()

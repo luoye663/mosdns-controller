@@ -26,6 +26,8 @@ const (
 	batchSize      = 500
 )
 
+var latencyBucketBoundsUS = [...]int64{1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000, 10_000_000}
+
 // Event 与 mosdns query_audit 的 wire schema 保持独立，避免 controller 链接 GPL 代码。
 type Event struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -321,7 +323,15 @@ func (s *Service) aggregate(tx *sql.Tx, e Event, now int64) error {
 			return err
 		}
 	}
-	return nil
+	upperBound := latencyBucketBoundsUS[len(latencyBucketBoundsUS)-1]
+	for _, candidate := range latencyBucketBoundsUS {
+		if e.LatencyUS <= candidate {
+			upperBound = candidate
+			break
+		}
+	}
+	_, err := tx.Exec(`INSERT INTO dns_stats_hourly_latency_bucket(hour_start_ms,upper_bound_us,query_count) VALUES(?,?,1) ON CONFLICT(hour_start_ms,upper_bound_us) DO UPDATE SET query_count=query_count+1`, hour, upperBound)
+	return err
 }
 func boolInt(v bool) int {
 	if v {
@@ -450,15 +460,56 @@ func decodeCursor(v string) (int64, int64, error) {
 }
 
 func (s *Service) Summary(ctx context.Context) (map[string]any, error) {
-	var count int64
-	var latency sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(query_count),0),COALESCE(SUM(latency_sum_us),0) FROM dns_stats_hourly_global WHERE hour_start_ms>=?`, time.Now().Add(-24*time.Hour).UnixMilli()).Scan(&count, &latency)
-	return map[string]any{"query_count": count, "average_latency_us": func() int64 {
-		if count == 0 {
-			return 0
+	from := time.Now().Add(-24 * time.Hour).UnixMilli()
+	var count, errors, cacheHits, latencySum, latencyMax, lastHourCount int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(query_count),0),COALESCE(SUM(error_count),0),COALESCE(SUM(cache_hit_count),0),COALESCE(SUM(latency_sum_us),0),COALESCE(MAX(latency_max_us),0) FROM dns_stats_hourly_global WHERE hour_start_ms>=?`, from).Scan(&count, &errors, &cacheHits, &latencySum, &latencyMax); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(query_count),0) FROM dns_stats_hourly_global WHERE hour_start_ms>=?`, time.Now().Add(-time.Hour).UnixMilli()).Scan(&lastHourCount); err != nil {
+		return nil, err
+	}
+	p95, samples, err := s.latencyPercentile(ctx, from, 0.95)
+	if err != nil {
+		return nil, err
+	}
+	average := int64(0)
+	if count > 0 {
+		average = latencySum / count
+	}
+	return map[string]any{"query_count": count, "last_hour_query_count": lastHourCount, "average_latency_us": average, "p95_latency_us": p95, "p95_sample_count": samples, "max_latency_us": latencyMax, "error_count": errors, "cache_hit_count": cacheHits}, nil
+}
+
+func (s *Service) latencyPercentile(ctx context.Context, from int64, percentile float64) (int64, int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT upper_bound_us,SUM(query_count) FROM dns_stats_hourly_latency_bucket WHERE hour_start_ms>=? GROUP BY upper_bound_us ORDER BY upper_bound_us`, from)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	counts := make([]struct{ bound, count int64 }, 0, len(latencyBucketBoundsUS))
+	var samples int64
+	for rows.Next() {
+		var item struct{ bound, count int64 }
+		if err := rows.Scan(&item.bound, &item.count); err != nil {
+			return 0, 0, err
 		}
-		return latency.Int64 / count
-	}()}, err
+		counts = append(counts, item)
+		samples += item.count
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	if samples == 0 {
+		return 0, 0, nil
+	}
+	target := int64(float64(samples)*percentile + 0.999999)
+	var cumulative int64
+	for _, item := range counts {
+		cumulative += item.count
+		if cumulative >= target {
+			return item.bound, samples, nil
+		}
+	}
+	return 0, samples, nil
 }
 func (s *Service) Top(ctx context.Context, kind string, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 100 {
@@ -494,18 +545,18 @@ func (s *Service) Top(ctx context.Context, kind string, limit int) ([]map[string
 	return result, rows.Err()
 }
 func (s *Service) Latency(ctx context.Context) ([]map[string]any, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT hour_start_ms,SUM(query_count),SUM(latency_sum_us) FROM dns_stats_hourly_global WHERE hour_start_ms>=? GROUP BY hour_start_ms ORDER BY hour_start_ms`, time.Now().Add(-24*time.Hour).UnixMilli())
+	rows, err := s.db.QueryContext(ctx, `SELECT hour_start_ms,SUM(query_count),SUM(latency_sum_us),MAX(latency_max_us) FROM dns_stats_hourly_global WHERE hour_start_ms>=? GROUP BY hour_start_ms ORDER BY hour_start_ms`, time.Now().Add(-24*time.Hour).UnixMilli())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var hour, count, sum int64
-		if err := rows.Scan(&hour, &count, &sum); err != nil {
+		var hour, count, sum, max int64
+		if err := rows.Scan(&hour, &count, &sum, &max); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"hour_start_ms": hour, "average_latency_us": sum / count})
+		out = append(out, map[string]any{"hour_start_ms": hour, "query_count": count, "average_latency_us": sum / count, "max_latency_us": max})
 	}
 	return out, rows.Err()
 }

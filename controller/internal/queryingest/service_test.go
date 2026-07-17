@@ -57,6 +57,31 @@ func TestDuplicateEventDoesNotAggregateTwice(t *testing.T) {
 	}
 }
 
+func TestSummaryUsesHourlyAggregatesAndLatencyBuckets(t *testing.T) {
+	s := testService(t)
+	now := time.Now().UnixMilli()
+	events := []Event{
+		{SchemaVersion: 1, EventID: "summary-fast", TimestampMS: now, ClientIP: "192.0.2.10", Protocol: "udp", QName: "fast.example", QType: 1, QClass: 1, RCode: 0, Route: "remote", RouteSource: "default", Snapshot: 1, CacheHit: true, LatencyUS: 4_000},
+		{SchemaVersion: 1, EventID: "summary-slow", TimestampMS: now, ClientIP: "192.0.2.11", Protocol: "udp", QName: "slow.example", QType: 1, QClass: 1, RCode: 2, Route: "local", RouteSource: "default", Snapshot: 1, LatencyUS: 80_000},
+	}
+	if _, err := s.persist(context.Background(), events); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := s.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary["query_count"] != int64(2) || summary["cache_hit_count"] != int64(1) || summary["error_count"] != int64(1) {
+		t.Fatalf("summary=%+v", summary)
+	}
+	if summary["p95_latency_us"] != int64(100_000) {
+		t.Fatalf("p95=%v, want bucket upper bound 100000", summary["p95_latency_us"])
+	}
+	if summary["p95_sample_count"] != int64(2) {
+		t.Fatalf("p95 samples=%v, want 2", summary["p95_sample_count"])
+	}
+}
+
 func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
 	s := testService(t)
 	event := validEvent("upstream-tag")

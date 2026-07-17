@@ -52,11 +52,13 @@ type DatabaseStatus struct {
 	WALBytes int64 `json:"wal_bytes"`
 }
 type SystemStatus struct {
-	Database             DatabaseStatus       `json:"database"`
-	Mosdns               *mosdnsclient.Status `json:"mosdns,omitempty"`
-	MosdnsError          string               `json:"mosdns_error,omitempty"`
-	LastSuccessfulIngest string               `json:"last_successful_ingest_at,omitempty"`
-	LastRetention        string               `json:"last_retention_at,omitempty"`
+	Database             DatabaseStatus            `json:"database"`
+	Mosdns               *mosdnsclient.Status      `json:"mosdns,omitempty"`
+	MosdnsError          string                    `json:"mosdns_error,omitempty"`
+	LastSuccessfulIngest string                    `json:"last_successful_ingest_at,omitempty"`
+	LastRetention        string                    `json:"last_retention_at,omitempty"`
+	Audit                *mosdnsclient.AuditStatus `json:"audit,omitempty"`
+	AuditError           string                    `json:"audit_error,omitempty"`
 }
 type Upstreams struct {
 	Local  mosdnsclient.UpstreamSnapshot `json:"local"`
@@ -385,6 +387,11 @@ func (s *Service) SystemStatus(ctx context.Context) SystemStatus {
 		result.MosdnsError = "mosdns runtime is unavailable"
 	} else {
 		result.Mosdns = &status
+	}
+	if status, err := s.mosdns.AuditStatus(ctx); err != nil {
+		result.AuditError = "query audit runtime is unavailable"
+	} else {
+		result.Audit = &status
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('last_successful_ingest_at','last_retention_at')`)
 	if err != nil {
