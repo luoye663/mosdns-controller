@@ -34,25 +34,26 @@ type Event struct {
 	EventID       string `json:"event_id"`
 	TimestampMS   int64  `json:"timestamp_unix_ms"`
 	// ProcessStartedAtMS 由 mosdns 生成，用于跨进程追踪；当前 SQLite 查询表不需要单独索引该值。
-	ProcessStartedAtMS int64  `json:"process_started_at_unix_ms"`
-	ClientIP           string `json:"client_ip"`
-	Protocol           string `json:"protocol"`
-	QName              string `json:"qname"`
-	QType              uint16 `json:"qtype"`
-	QClass             uint16 `json:"qclass"`
-	RCode              int    `json:"rcode"`
-	Route              string `json:"route"`
-	RouteSource        string `json:"route_source"`
-	UpstreamGroup      string `json:"upstream_group"`
-	UpstreamTag        string `json:"upstream_tag"`
-	CacheHit           bool   `json:"cache_hit"`
-	Snapshot           uint64 `json:"snapshot_version"`
-	AccessRuleID       int64  `json:"access_rule_id"`
-	RouteRuleID        int64  `json:"route_rule_id"`
-	AnswerCount        int    `json:"answer_count"`
-	LatencyUS          int64  `json:"latency_us"`
-	ErrorCode          string `json:"error_code"`
-	ErrorText          string `json:"error_text"`
+	ProcessStartedAtMS int64    `json:"process_started_at_unix_ms"`
+	ClientIP           string   `json:"client_ip"`
+	Protocol           string   `json:"protocol"`
+	QName              string   `json:"qname"`
+	QType              uint16   `json:"qtype"`
+	QClass             uint16   `json:"qclass"`
+	RCode              int      `json:"rcode"`
+	Route              string   `json:"route"`
+	RouteSource        string   `json:"route_source"`
+	UpstreamGroup      string   `json:"upstream_group"`
+	UpstreamTag        string   `json:"upstream_tag"`
+	CacheHit           bool     `json:"cache_hit"`
+	Snapshot           uint64   `json:"snapshot_version"`
+	AccessRuleID       int64    `json:"access_rule_id"`
+	RouteRuleID        int64    `json:"route_rule_id"`
+	AnswerCount        int      `json:"answer_count"`
+	AnswerIPs          []string `json:"answer_ips"`
+	LatencyUS          int64    `json:"latency_us"`
+	ErrorCode          string   `json:"error_code"`
+	ErrorText          string   `json:"error_text"`
 }
 
 type Batch struct {
@@ -101,9 +102,8 @@ type StoredEvent struct {
 }
 
 type Subscriber struct {
-	C      <-chan StoredEvent
-	Replay []StoredEvent
-	close  func()
+	C     <-chan StoredEvent
+	close func()
 }
 
 type subscription struct {
@@ -132,14 +132,15 @@ type Service struct {
 	mu             sync.Mutex
 	nextSubscriber uint64
 	subscribers    map[uint64]subscription
-	history        []StoredEvent
+	answerIPs      map[string][]string
+	answerIPOrder  []string
 	metrics        metrics
 	dbPath         string
 	retentionDays  atomic.Int64
 }
 
 func New(db *sql.DB, token string, dbPath string) *Service {
-	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), history: make([]StoredEvent, 0, 1024)}
+	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), answerIPs: make(map[string][]string), answerIPOrder: make([]string, 0, 1024)}
 	s.retentionDays.Store(7)
 	s.metrics = newMetrics()
 	s.wg.Add(2)
@@ -232,6 +233,14 @@ func validateEvent(e Event) error {
 			return errors.New("event field exceeds limit")
 		}
 	}
+	if len(e.AnswerIPs) > 16 {
+		return errors.New("too many answer IPs")
+	}
+	for _, ip := range e.AnswerIPs {
+		if _, err := netip.ParseAddr(ip); err != nil {
+			return errors.New("invalid answer IP")
+		}
+	}
 	return nil
 }
 
@@ -308,6 +317,7 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	s.cacheAnswerIPs(inserted)
 	for i := range stored {
 		// Live events use the same display name preference as paged query results.
 		_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(display_name,''),hostname,'') FROM devices WHERE ip=?`, stored[i].ClientIP).Scan(&stored[i].DeviceName)
@@ -360,7 +370,7 @@ func fromEvent(e Event) StoredEvent {
 	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerCount: e.AnswerCount, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText}
 }
 
-func (s *Service) Subscribe(q Query, lastEventID string) (Subscriber, error) {
+func (s *Service) Subscribe(q Query, _ string) (Subscriber, error) {
 	if _, _, err := queryConditions(q); err != nil {
 		return Subscriber{}, err
 	}
@@ -371,18 +381,7 @@ func (s *Service) Subscribe(q Query, lastEventID string) (Subscriber, error) {
 	ch := make(chan StoredEvent, 256)
 	s.subscribers[id] = subscription{ch: ch, query: q}
 	s.metrics.subscribers.Inc()
-	replay := make([]StoredEvent, 0)
-	found := lastEventID == ""
-	for _, event := range s.history {
-		if !found {
-			found = event.EventID == lastEventID
-			continue
-		}
-		if queryMatches(event, q) {
-			replay = append(replay, event)
-		}
-	}
-	return Subscriber{C: ch, Replay: replay, close: func() {
+	return Subscriber{C: ch, close: func() {
 		s.mu.Lock()
 		if current, ok := s.subscribers[id]; ok {
 			delete(s.subscribers, id)
@@ -396,11 +395,6 @@ func (s *Service) publish(events []StoredEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range events {
-		s.history = append(s.history, e)
-		if len(s.history) > cap(s.history) {
-			copy(s.history, s.history[len(s.history)-cap(s.history):])
-			s.history = s.history[:cap(s.history)]
-		}
 		for id, sub := range s.subscribers {
 			if !queryMatches(e, sub.query) {
 				continue
@@ -415,6 +409,32 @@ func (s *Service) publish(events []StoredEvent) {
 			}
 		}
 	}
+}
+
+func (s *Service) cacheAnswerIPs(events []Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, event := range events {
+		if _, exists := s.answerIPs[event.EventID]; exists {
+			continue
+		}
+		s.answerIPs[event.EventID] = append([]string(nil), event.AnswerIPs...)
+		s.answerIPOrder = append(s.answerIPOrder, event.EventID)
+		if len(s.answerIPOrder) > cap(s.answerIPOrder) {
+			oldest := s.answerIPOrder[0]
+			delete(s.answerIPs, oldest)
+			copy(s.answerIPOrder, s.answerIPOrder[1:])
+			s.answerIPOrder = s.answerIPOrder[:len(s.answerIPOrder)-1]
+		}
+	}
+}
+
+// AnswerIPs returns transient response addresses. They are never written to SQLite.
+func (s *Service) AnswerIPs(eventID string) ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ips, ok := s.answerIPs[eventID]
+	return append([]string(nil), ips...), ok
 }
 
 func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {

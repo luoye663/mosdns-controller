@@ -82,6 +82,7 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Post("/rule-versions/reconcile", a.requireCSRF(a.reconcile))
 			protected.Get("/queries", a.queries)
 			protected.Get("/queries/stream", a.queryStream)
+			protected.Get("/queries/{eventID}/answer-ips", a.answerIPs)
 			protected.Get("/stats/summary", a.summary)
 			protected.Get("/stats/top-domains", a.statistics("domains"))
 			protected.Get("/stats/top-clients", a.statistics("clients"))
@@ -379,6 +380,19 @@ func (a *App) queries(w http.ResponseWriter, r *http.Request) {
 	}
 	writeData(w, r, 200, page)
 }
+func (a *App) answerIPs(w http.ResponseWriter, r *http.Request) {
+	eventID := chi.URLParam(r, "eventID")
+	if len(eventID) == 0 || len(eventID) > 128 {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid event identifier")
+		return
+	}
+	ips, ok := a.ingest.AnswerIPs(eventID)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "ANSWER_IPS_UNAVAILABLE", "answer IPs are no longer available in memory")
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string][]string{"answer_ips": ips})
+}
 
 // queryStream 的写入在 HTTP goroutine 内完成；broadcaster 从不等待该 goroutine。
 func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
@@ -410,11 +424,6 @@ func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("event: query\nid: " + event.EventID + "\ndata: " + string(data) + "\n\n"))
 		flusher.Flush()
 		return true
-	}
-	for _, event := range sub.Replay {
-		if !writeEvent(event) {
-			return
-		}
 	}
 	flusher.Flush()
 	heartbeat := time.NewTicker(30 * time.Second)

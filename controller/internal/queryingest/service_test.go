@@ -103,6 +103,26 @@ func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
 	}
 }
 
+func TestAnswerIPsRemainInBoundedMemoryOnly(t *testing.T) {
+	s := testService(t)
+	event := validEvent("answer-ips")
+	event.AnswerIPs = []string{"192.0.2.1", "2001:db8::1"}
+	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	ips, ok := s.AnswerIPs(event.EventID)
+	if !ok || len(ips) != 2 || ips[0] != "192.0.2.1" || ips[1] != "2001:db8::1" {
+		t.Fatalf("cached answer IPs = %#v, exists=%t", ips, ok)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='answer_ips'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("answer IPs must not be persisted")
+	}
+}
+
 func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	s := testService(t)
 	first := validEvent("query-filter-first")
@@ -138,7 +158,7 @@ func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	}
 }
 
-func TestSubscribeReplaysFilteredEventsAfterLastEventID(t *testing.T) {
+func TestSubscribeOnlyReceivesEventsPublishedAfterSubscription(t *testing.T) {
 	s := testService(t)
 	first := validEvent("replay-first")
 	second := validEvent("replay-second")
@@ -154,8 +174,16 @@ func TestSubscribeReplaysFilteredEventsAfterLastEventID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sub.Close()
-	if len(sub.Replay) != 1 || sub.Replay[0].EventID != third.EventID {
-		t.Fatalf("replay=%+v", sub.Replay)
+	fresh := validEvent("fresh-event")
+	published := fromEvent(fresh)
+	s.publish([]StoredEvent{published})
+	select {
+	case event := <-sub.C:
+		if event.EventID != fresh.EventID {
+			t.Fatalf("event ID = %q, want %q", event.EventID, fresh.EventID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new event was not delivered")
 	}
 }
 

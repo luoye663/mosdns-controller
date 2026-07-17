@@ -34,7 +34,7 @@ plugins:
       flush_interval: "250ms"
       request_timeout: "2s"
       max_retries: 1
-      include_answers: false
+      include_answers: true
       include_error_text: true
       max_error_text_bytes: 256
 

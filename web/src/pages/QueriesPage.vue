@@ -4,6 +4,8 @@ import { NAlert, NButton, NDatePicker, NInput, NModal, NSelect, NSwitch } from '
 import { api, eventStream, type QueryEvent, type QueryParams, type Rule, type Version } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
 
+defineOptions({ name: 'QueriesPage' })
+
 type SavedFilter = { label: string; filters: Record<string, string>; range: [number, number] | null }
 const storageKey = 'mosdns_query_filters'
 const rows = ref<QueryEvent[]>([])
@@ -19,6 +21,9 @@ const ruleLabels = ref<Record<number, string>>({})
 const savedFilters = ref<SavedFilter[]>(readSavedFilters())
 const selectedSaved = ref<string | null>(null)
 const ruleTarget = ref<QueryEvent | null>(null)
+const diagnosticTarget = ref<QueryEvent | null>(null)
+const answerIPs = ref<string[] | null>(null)
+const answerIPsError = ref('')
 const published = ref<Version | null>(null)
 const ruleAction = ref('block')
 const range = ref<[number, number] | null>(null)
@@ -129,6 +134,16 @@ async function createRule() {
     ruleTarget.value = null
   } catch (e) { error.value = e instanceof Error ? e.message : '规则发布失败' } finally { loading.value = false }
 }
+async function openDiagnostics(row: QueryEvent) {
+  diagnosticTarget.value = row
+  answerIPs.value = null
+  answerIPsError.value = ''
+  try {
+    answerIPs.value = (await api.answerIPs(row.event_id)).answer_ips
+  } catch (e) {
+    answerIPsError.value = e instanceof Error ? e.message : '应答 IP 已不可用'
+  }
+}
 onMounted(async () => {
   await Promise.all([load(), loadRuleLabels().catch(() => {})])
 })
@@ -157,10 +172,11 @@ onBeforeUnmount(closeStream)
     <NAlert v-if="published" type="success" closable class="form-alert" @close="published = null">已发布版本 {{ published.version }}，状态：{{ published.status }}。</NAlert>
     <NAlert v-if="error" type="error" closable class="form-alert" @close="error = ''">{{ error }}</NAlert>
     <div class="table-wrap queries-table-wrap"><table><thead><tr><th>时间</th><th>客户端</th><th>域名 / 类型</th><th>结果</th><th>路由</th><th>缓存</th><th>延迟</th><th>规则 / 版本</th><th>诊断</th><th></th></tr></thead><tbody>
-      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td :title="row.client_ip">{{ formatClient(row) }}</td><td><div class="mono">{{ row.qname }}</div><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td>{{ row.cache_hit ? '命中' : '未命中' }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div>访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)">{{ errorText(row) }}<small v-if="row.answer_count">{{ row.answer_count }} 条应答</small></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
+      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td :title="row.client_ip">{{ formatClient(row) }}</td><td><div class="mono">{{ row.qname }}</div><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td>{{ row.cache_hit ? '命中' : '未命中' }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div>访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)">{{ errorText(row) }}<small v-if="row.answer_count">{{ row.answer_count }} 条应答</small><NButton v-if="row.answer_count" size="tiny" text @click="openDiagnostics(row)">应答 IP</NButton></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
       <tr v-if="!loading && !rows.length"><td colspan="10" class="empty-cell">暂无查询日志</td></tr>
     </tbody></table></div>
     <footer class="table-footer"><span>已显示 {{ rows.length }} 条；查询使用 cursor 分页</span><NButton v-if="cursor" :loading="loading" @click="load(cursor)">加载下一页</NButton></footer>
     <NModal :show="Boolean(ruleTarget)" preset="card" title="从查询创建规则" class="rule-modal" @update:show="(show) => { if (!show) ruleTarget = null }"><p class="mono">{{ ruleTarget?.qname }}</p><NSelect v-model:value="ruleAction" :options="actionOptions" /><div class="modal-actions"><NButton @click="ruleTarget = null">取消</NButton><NButton type="primary" :loading="loading" @click="createRule">保存并发布</NButton></div></NModal>
+    <NModal :show="Boolean(diagnosticTarget)" preset="card" title="应答 IP" class="rule-modal" @update:show="(show) => { if (!show) diagnosticTarget = null }"><p class="mono">{{ diagnosticTarget?.qname }}</p><NAlert v-if="answerIPsError" type="warning">{{ answerIPsError }}</NAlert><p v-else-if="answerIPs === null" class="muted">正在读取内存缓存...</p><p v-else-if="!answerIPs.length" class="muted">该应答不包含 A 或 AAAA 地址。</p><div v-else class="mono">{{ answerIPs.join('\n') }}</div></NModal>
   </section>
 </template>
