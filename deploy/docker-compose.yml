@@ -1,9 +1,6 @@
 services:
   mosdns:
-    build:
-      context: ../mosdns
-      args:
-        MOSDNS_BASE: v5.3.4
+    image: luoye663/mosdns-manager:latest
     command: ["start", "-c", "/etc/mosdns/config.yaml"]
     restart: unless-stopped
     init: true
@@ -28,17 +25,15 @@ services:
       - mosdns_control_token
     networks:
       - internal
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/dns-healthcheck", "--server", "127.0.0.1:53", "--network", "udp"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+#    healthcheck:
+#      test: ["CMD", "/usr/local/bin/dns-healthcheck", "--server", "127.0.0.1:53", "--network", "udp"]
+#      interval: 10s
+#      timeout: 3s
+#      retries: 3
+#      start_period: 10s
 
   controller:
-    build:
-      context: ..
-      dockerfile: controller/Dockerfile
+    image: luoye663/mosdns-controller:latest
     command: ["serve", "-config", "/etc/mosdns-controller/config.yaml"]
     restart: unless-stopped
     init: true

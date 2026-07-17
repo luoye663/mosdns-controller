@@ -24,8 +24,14 @@
 
 ```bash
 umask 077
+mkdir -p deploy/secrets
+chmod 0700 deploy/secrets
 openssl rand -hex 32 > deploy/secrets/mosdns_control_token
+# Compose 的 file secret 会保留此文件权限；两个非 root 容器均需读取它。
+chmod 0444 deploy/secrets/mosdns_control_token
 ```
+
+`deploy/secrets/` 保持为 `0700`，token 文件可供容器内的非 root 服务读取，但普通宿主机用户不能访问该目录。不要将 token 写入 Compose 文件或提交到 Git。
 
 编辑 `deploy/mosdns/config.yaml`，将 `<REMOTE_DOH_URL>` 替换为实际远程 DoH 端点。该初始值仅用于首次启动；保留占位符会导致 mosdns 无法启动。首次启动后，在 WebUI 的“上游 DNS”页面管理本地和远程上游，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
 
@@ -34,7 +40,16 @@ openssl rand -hex 32 > deploy/secrets/mosdns_control_token
 ### 3. 构建并启动
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build
+docker build \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  --tag luoye663/mosdns-manager:latest \
+  mosdns
+docker build \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  --file controller/Dockerfile \
+  --tag luoye663/mosdns-controller:latest \
+  .
+docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps
 docker compose -f deploy/docker-compose.yml logs --tail=100 mosdns controller
 ```
@@ -44,8 +59,10 @@ docker compose -f deploy/docker-compose.yml logs --tail=100 mosdns controller
 需要通过 SOCKS5 代理拉取基础镜像或下载构建依赖时，可在运行 Docker 命令的终端设置：
 
 ```bash
-export ALL_PROXY=socks5://192.168.18.35:10808
-docker compose -f deploy/docker-compose.yml up -d --build
+export ALL_PROXY=socks5://127.0.0.1:10808
+docker build --build-arg GOPROXY=https://goproxy.cn,direct --tag mosdns-manager-mosdns:latest mosdns
+docker build --build-arg GOPROXY=https://goproxy.cn,direct --file controller/Dockerfile --tag mosdns-manager-controller:latest .
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 不要将代理地址或凭证写入 Dockerfile、Compose 文件或 Git。
@@ -148,7 +165,10 @@ make local-controller
 
 ```bash
 umask 077
+mkdir -p deploy/secrets
+chmod 0700 deploy/secrets
 openssl rand -hex 32 > deploy/secrets/mosdns_control_token
+chmod 0444 deploy/secrets/mosdns_control_token
 docker compose -f deploy/docker-compose.integration.yml --profile integration up --build
 ```
 

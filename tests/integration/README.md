@@ -18,7 +18,7 @@ go -C mosdns run ./cmd/dns-healthcheck --server 127.0.0.1:5353 --network tcp
 Docker Compose 的常规入口为：
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build
+docker compose -f deploy/docker-compose.yml up
 ```
 
 使用两个 CoreDNS mock upstream 的 Compose integration profile：

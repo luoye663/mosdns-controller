@@ -97,8 +97,7 @@ plugins:
         concurrent: 1
         upstreams:
           - tag: remote_gateway
-            # 生产部署前替换为真实私有 DoH 地址，禁止提交真实地址。
-            addr: "<REMOTE_DOH_URL>"
+            addr: "https://cloudflare-dns.com/dns-query"
 
   - tag: route_local
     type: sequence
