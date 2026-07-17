@@ -183,7 +183,7 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 	return errors.Join(localErr, remoteErr)
 }
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
-	settings := Settings{CacheEnabled: true, QueryRetentionDays: 1}
+	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7}
 	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','query_retention_days')`)
 	if err != nil {
 		return Settings{}, err

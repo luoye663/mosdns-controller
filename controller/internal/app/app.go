@@ -367,12 +367,12 @@ func (a *App) ingestEvents(w http.ResponseWriter, r *http.Request) {
 	writeData(w, r, http.StatusAccepted, map[string]int{"accepted": len(batch.Events), "rejected": 0})
 }
 func (a *App) queries(w http.ResponseWriter, r *http.Request) {
-	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
-	if err != nil && r.URL.Query().Get("limit") != "" {
-		writeError(w, r, 400, "VALIDATION_ERROR", "invalid limit")
+	query, err := queryFromRequest(r)
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
 		return
 	}
-	page, err := a.ingest.Queries(r.Context(), queryingest.Query{Limit: limit, Cursor: r.URL.Query().Get("cursor"), ClientIP: r.URL.Query().Get("client_ip"), Route: r.URL.Query().Get("route"), QName: r.URL.Query().Get("qname")})
+	page, err := a.ingest.Queries(r.Context(), query)
 	if err != nil {
 		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
 		return
@@ -390,9 +390,32 @@ func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	sub := a.ingest.Subscribe()
+	query, err := queryFromRequest(r)
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	sub, err := a.ingest.Subscribe(query, r.Header.Get("Last-Event-ID"))
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
 	defer sub.Close()
 	_, _ = w.Write([]byte("event: connected\ndata: {}\n\n"))
+	writeEvent := func(event queryingest.StoredEvent) bool {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return false
+		}
+		_, _ = w.Write([]byte("event: query\nid: " + event.EventID + "\ndata: " + string(data) + "\n\n"))
+		flusher.Flush()
+		return true
+	}
+	for _, event := range sub.Replay {
+		if !writeEvent(event) {
+			return
+		}
+	}
 	flusher.Flush()
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
@@ -402,12 +425,9 @@ func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			data, err := json.Marshal(event)
-			if err != nil {
+			if !writeEvent(event) {
 				return
 			}
-			_, _ = w.Write([]byte("event: query\nid: " + event.EventID + "\ndata: " + string(data) + "\n\n"))
-			flusher.Flush()
 		case now := <-heartbeat.C:
 			_, _ = w.Write([]byte("event: heartbeat\ndata: {\"time\":\"" + now.UTC().Format(time.RFC3339) + "\"}\n\n"))
 			flusher.Flush()
@@ -415,6 +435,74 @@ func (a *App) queryStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func queryFromRequest(r *http.Request) (queryingest.Query, error) {
+	values := r.URL.Query()
+	parseInt := func(name string) (int, error) {
+		if values.Get(name) == "" {
+			return 0, nil
+		}
+		value, err := strconv.Atoi(values.Get(name))
+		if err != nil {
+			return 0, errors.New("invalid " + name)
+		}
+		return value, nil
+	}
+	parseMS := func(name string) (int64, error) {
+		if values.Get(name) == "" {
+			return 0, nil
+		}
+		value, err := strconv.ParseInt(values.Get(name), 10, 64)
+		if err != nil {
+			return 0, errors.New("invalid " + name)
+		}
+		return value, nil
+	}
+	parseBool := func(name string) (*bool, error) {
+		if values.Get(name) == "" {
+			return nil, nil
+		}
+		value, err := strconv.ParseBool(values.Get(name))
+		if err != nil {
+			return nil, errors.New("invalid " + name)
+		}
+		return &value, nil
+	}
+	limit, err := parseInt("limit")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	qtype, err := parseInt("qtype")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	rcode, err := parseInt("rcode")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	from, err := parseMS("from")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	to, err := parseMS("to")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	cacheHit, err := parseBool("cache_hit")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	hasError, err := parseBool("has_error")
+	if err != nil {
+		return queryingest.Query{}, err
+	}
+	var rcodePtr *int
+	if values.Get("rcode") != "" {
+		rcodePtr = &rcode
+	}
+	qname := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(values.Get("qname"))), ".")
+	return queryingest.Query{Limit: limit, Cursor: values.Get("cursor"), FromMS: from, ToMS: to, ClientIP: values.Get("client_ip"), Route: values.Get("route"), RouteSource: values.Get("route_source"), UpstreamTag: values.Get("upstream_tag"), Protocol: values.Get("protocol"), QName: qname, QNameMatch: values.Get("qname_match"), QType: qtype, RCode: rcodePtr, CacheHit: cacheHit, HasError: hasError}, nil
 }
 func (a *App) summary(w http.ResponseWriter, r *http.Request) {
 	result, err := a.ingest.Summary(r.Context())

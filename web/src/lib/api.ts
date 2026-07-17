@@ -4,7 +4,8 @@ interface Envelope<T> { data: T }
 export interface Rule { id: number; category: string; action: string; match_type: string; pattern: string; priority: number; source: string; comment: string; enabled: boolean; updated_at_ms: number }
 export type RuleInput = Omit<Rule, 'id' | 'updated_at_ms'>
 export interface Version { version: number; checksum: string; status: string; rule_count: number; created_at_ms: number; error_code?: string }
-export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; qname: string; qtype: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; latency_us: number; access_rule_id: number; route_rule_id: number }
+export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; device_name: string; protocol: string; qname: string; qtype: number; qclass: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; snapshot_version: number; access_rule_id: number; route_rule_id: number; answer_count: number; latency_us: number; error_code: string; error_text: string }
+export type QueryParams = Record<string, string | number | boolean | undefined>
 export interface Device { id: number; ip: string; mac: string; hostname: string; display_name: string; note: string; source: string; first_seen_at_ms: number; last_seen_at_ms: number; query_count_24h: number }
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
 export interface Upstream { tag: string; addr: string; priority: number; weight: number }
@@ -45,7 +46,7 @@ export const api = {
   summary: () => request<DashboardSummary>('/stats/summary'),
   statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : `/stats/${kind}`),
   latency: () => request<{ items: LatencyPoint[] }>('/stats/latency'),
-  queries: (params: Record<string, string | number | undefined>) => request<{ items: QueryEvent[]; next_cursor?: string }>(`/queries?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
+  queries: (params: QueryParams) => request<{ items: QueryEvent[]; next_cursor?: string }>(`/queries?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
   rules: () => request<{ items: Rule[] }>('/rules'),
   createRule: (rule: RuleInput) => request<Version>('/rules', { method: 'POST', body: JSON.stringify(rule) }),
   updateRule: (id: number, rule: Rule) => request<Version>(`/rules/${id}`, { method: 'PATCH', body: JSON.stringify(rule) }),
@@ -70,4 +71,4 @@ export const api = {
   auditLogs: () => request<{ items: AuditLog[] }>('/audit-logs'),
 }
 
-export function eventStream() { return new EventSource('/api/v1/queries/stream', { withCredentials: true }) }
+export function eventStream(params: QueryParams = {}) { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>); return new EventSource(`/api/v1/queries/stream?${query.toString()}`, { withCredentials: true }) }

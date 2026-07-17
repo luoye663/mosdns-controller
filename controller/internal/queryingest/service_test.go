@@ -103,6 +103,64 @@ func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
 	}
 }
 
+func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
+	s := testService(t)
+	first := validEvent("query-filter-first")
+	first.TimestampMS = time.Now().Add(-2 * time.Second).UnixMilli()
+	first.QName = "one.example"
+	first.CacheHit = true
+	first.UpstreamTag = "remote-a"
+	second := validEvent("query-filter-second")
+	second.TimestampMS = time.Now().Add(-time.Second).UnixMilli()
+	second.QName = "two.example"
+	second.RCode = 3
+	second.ErrorCode = "NXDOMAIN"
+	second.Route = "local"
+	if _, err := s.persist(context.Background(), []Event{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE devices SET display_name='laptop' WHERE ip=?`, first.ClientIP); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Queries(context.Background(), Query{FromMS: first.TimestampMS - 100, ToMS: first.TimestampMS + 100, QName: "one.example", QNameMatch: "exact", CacheHit: boolPtr(true), UpstreamTag: "remote-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].EventID != first.EventID || page.Items[0].DeviceName != "laptop" {
+		t.Fatalf("filtered page=%+v", page.Items)
+	}
+	page, err = s.Queries(context.Background(), Query{FromMS: first.TimestampMS - 100, ToMS: second.TimestampMS + 100, QName: "two", QNameMatch: "contains", HasError: boolPtr(true)})
+	if err != nil || len(page.Items) != 1 || page.Items[0].EventID != second.EventID {
+		t.Fatalf("contains error filter page=%+v err=%v", page.Items, err)
+	}
+	if _, err := s.Queries(context.Background(), Query{QName: "example", QNameMatch: "contains"}); err == nil {
+		t.Fatal("contains query without time range was accepted")
+	}
+}
+
+func TestSubscribeReplaysFilteredEventsAfterLastEventID(t *testing.T) {
+	s := testService(t)
+	first := validEvent("replay-first")
+	second := validEvent("replay-second")
+	second.Route = "local"
+	third := validEvent("replay-third")
+	stored, err := s.persist(context.Background(), []Event{first, second, third})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.publish(stored)
+	sub, err := s.Subscribe(Query{Route: "remote"}, first.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	if len(sub.Replay) != 1 || sub.Replay[0].EventID != third.EventID {
+		t.Fatalf("replay=%+v", sub.Replay)
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
 func TestPersistRollbackDoesNotLeavePartialAggregation(t *testing.T) {
 	s := testService(t)
 	if _, err := s.db.Exec(`CREATE TRIGGER reject_domain BEFORE INSERT ON dns_stats_hourly_domain BEGIN SELECT RAISE(ABORT, 'test rollback'); END`); err != nil {
@@ -145,7 +203,10 @@ func TestBatchValidationAndQueueOverload(t *testing.T) {
 
 func TestSlowSubscriberIsDisconnected(t *testing.T) {
 	s := testService(t)
-	sub := s.Subscribe()
+	sub, err := s.Subscribe(Query{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer sub.Close()
 	events := make([]StoredEvent, 257)
 	for i := range events {

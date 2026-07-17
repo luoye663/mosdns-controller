@@ -63,8 +63,13 @@ type Batch struct {
 }
 
 type Query struct {
-	Limit                          int
-	Cursor, ClientIP, Route, QName string
+	Limit                                          int
+	FromMS, ToMS                                   int64
+	QType                                          int
+	RCode                                          *int
+	CacheHit, HasError                             *bool
+	Cursor, ClientIP, Route, QName                 string
+	QNameMatch, RouteSource, UpstreamTag, Protocol string
 }
 type Page struct {
 	Items      []StoredEvent `json:"items"`
@@ -92,11 +97,18 @@ type StoredEvent struct {
 	LatencyUS     int64  `json:"latency_us"`
 	ErrorCode     string `json:"error_code"`
 	ErrorText     string `json:"error_text"`
+	DeviceName    string `json:"device_name"`
 }
 
 type Subscriber struct {
-	C     <-chan StoredEvent
-	close func()
+	C      <-chan StoredEvent
+	Replay []StoredEvent
+	close  func()
+}
+
+type subscription struct {
+	ch    chan StoredEvent
+	query Query
 }
 
 func (s Subscriber) Close() {
@@ -119,15 +131,16 @@ type Service struct {
 	wg             sync.WaitGroup
 	mu             sync.Mutex
 	nextSubscriber uint64
-	subscribers    map[uint64]chan StoredEvent
+	subscribers    map[uint64]subscription
+	history        []StoredEvent
 	metrics        metrics
 	dbPath         string
 	retentionDays  atomic.Int64
 }
 
 func New(db *sql.DB, token string, dbPath string) *Service {
-	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]chan StoredEvent)}
-	s.retentionDays.Store(1)
+	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), history: make([]StoredEvent, 0, 1024)}
+	s.retentionDays.Store(7)
 	s.metrics = newMetrics()
 	s.wg.Add(2)
 	go s.writer()
@@ -269,6 +282,7 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 	}
 	defer tx.Rollback()
 	inserted := make([]Event, 0, len(events))
+	stored := make([]StoredEvent, 0, len(events))
 	now := time.Now().UnixMilli()
 	for _, e := range events {
 		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,answer_count,latency_us,error_code,error_text,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, e.UpstreamTag, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.AnswerCount, e.LatencyUS, e.ErrorCode, e.ErrorText, now)
@@ -278,6 +292,9 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 		n, _ := result.RowsAffected()
 		if n == 1 {
 			inserted = append(inserted, e)
+			item := fromEvent(e)
+			item.ID, _ = result.LastInsertId()
+			stored = append(stored, item)
 		}
 	}
 	for _, e := range inserted {
@@ -291,12 +308,12 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	result := make([]StoredEvent, 0, len(inserted))
-	for _, e := range inserted {
-		result = append(result, fromEvent(e))
+	for i := range stored {
+		// Live events use the same display name preference as paged query results.
+		_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(display_name,''),hostname,'') FROM devices WHERE ip=?`, stored[i].ClientIP).Scan(&stored[i].DeviceName)
 	}
-	s.metrics.written.Add(float64(len(result)))
-	return result, nil
+	s.metrics.written.Add(float64(len(stored)))
+	return stored, nil
 }
 
 // aggregate 与原始 INSERT 使用同一事务，因此重试的 event_id 绝不会重复计数。
@@ -343,34 +360,56 @@ func fromEvent(e Event) StoredEvent {
 	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerCount: e.AnswerCount, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText}
 }
 
-func (s *Service) Subscribe() Subscriber {
+func (s *Service) Subscribe(q Query, lastEventID string) (Subscriber, error) {
+	if _, _, err := queryConditions(q); err != nil {
+		return Subscriber{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := s.nextSubscriber
 	s.nextSubscriber++
 	ch := make(chan StoredEvent, 256)
-	s.subscribers[id] = ch
+	s.subscribers[id] = subscription{ch: ch, query: q}
 	s.metrics.subscribers.Inc()
-	return Subscriber{C: ch, close: func() {
+	replay := make([]StoredEvent, 0)
+	found := lastEventID == ""
+	for _, event := range s.history {
+		if !found {
+			found = event.EventID == lastEventID
+			continue
+		}
+		if queryMatches(event, q) {
+			replay = append(replay, event)
+		}
+	}
+	return Subscriber{C: ch, Replay: replay, close: func() {
 		s.mu.Lock()
 		if current, ok := s.subscribers[id]; ok {
 			delete(s.subscribers, id)
-			close(current)
+			close(current.ch)
 			s.metrics.subscribers.Dec()
 		}
 		s.mu.Unlock()
-	}}
+	}}, nil
 }
 func (s *Service) publish(events []StoredEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range events {
-		for id, ch := range s.subscribers {
+		s.history = append(s.history, e)
+		if len(s.history) > cap(s.history) {
+			copy(s.history, s.history[len(s.history)-cap(s.history):])
+			s.history = s.history[:cap(s.history)]
+		}
+		for id, sub := range s.subscribers {
+			if !queryMatches(e, sub.query) {
+				continue
+			}
 			select {
-			case ch <- e:
+			case sub.ch <- e:
 			default:
 				delete(s.subscribers, id)
-				close(ch)
+				close(sub.ch)
 				s.metrics.subscribers.Dec()
 				s.metrics.sseDropped.Inc()
 			}
@@ -382,38 +421,20 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 	if q.Limit <= 0 || q.Limit > 500 {
 		q.Limit = 100
 	}
-	if q.ClientIP != "" {
-		if _, err := netip.ParseAddr(q.ClientIP); err != nil {
-			return Page{}, errors.New("invalid client_ip")
-		}
-	}
-	if q.Route != "" && q.Route != "local" && q.Route != "remote" && q.Route != "block" {
-		return Page{}, errors.New("invalid route")
-	}
-	where := []string{"1=1"}
-	args := []any{}
-	if q.ClientIP != "" {
-		where = append(where, "client_ip=?")
-		args = append(args, q.ClientIP)
-	}
-	if q.Route != "" {
-		where = append(where, "route=?")
-		args = append(args, q.Route)
-	}
-	if q.QName != "" {
-		where = append(where, "qname=?")
-		args = append(args, q.QName)
+	where, args, err := queryConditions(q)
+	if err != nil {
+		return Page{}, err
 	}
 	if q.Cursor != "" {
 		ts, id, err := decodeCursor(q.Cursor)
 		if err != nil {
 			return Page{}, errors.New("invalid cursor")
 		}
-		where = append(where, "(timestamp_unix_ms < ? OR (timestamp_unix_ms = ? AND id < ?))")
+		where = append(where, "(q.timestamp_unix_ms < ? OR (q.timestamp_unix_ms = ? AND q.id < ?))")
 		args = append(args, ts, ts, id)
 	}
 	args = append(args, q.Limit+1)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,COALESCE(rcode,0),route,route_source,COALESCE(upstream_group,''),COALESCE(upstream_tag,''),cache_hit,snapshot_version,COALESCE(access_rule_id,0),COALESCE(route_rule_id,0),answer_count,latency_us,COALESCE(error_code,''),COALESCE(error_text,'') FROM dns_queries WHERE `+strings.Join(where, " AND ")+` ORDER BY timestamp_unix_ms DESC,id DESC LIMIT ?`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT q.id,q.event_id,q.timestamp_unix_ms,q.client_ip,q.protocol,q.qname,q.qtype,q.qclass,COALESCE(q.rcode,0),q.route,q.route_source,COALESCE(q.upstream_group,''),COALESCE(q.upstream_tag,''),q.cache_hit,q.snapshot_version,COALESCE(q.access_rule_id,0),COALESCE(q.route_rule_id,0),q.answer_count,q.latency_us,COALESCE(q.error_code,''),COALESCE(q.error_text,''),COALESCE(NULLIF(d.display_name,''),d.hostname,'') FROM dns_queries q LEFT JOIN devices d ON d.ip=q.client_ip WHERE `+strings.Join(where, " AND ")+` ORDER BY q.timestamp_unix_ms DESC,q.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return Page{}, err
 	}
@@ -423,7 +444,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 	for rows.Next() {
 		var e StoredEvent
 		var hit int
-		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerCount, &e.LatencyUS, &e.ErrorCode, &e.ErrorText); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerCount, &e.LatencyUS, &e.ErrorCode, &e.ErrorText, &e.DeviceName); err != nil {
 			return Page{}, err
 		}
 		e.CacheHit = hit == 1
@@ -438,6 +459,99 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 		page.Items = page.Items[:q.Limit]
 	}
 	return page, nil
+}
+
+func queryConditions(q Query) ([]string, []any, error) {
+	if q.ClientIP != "" {
+		if _, err := netip.ParseAddr(q.ClientIP); err != nil {
+			return nil, nil, errors.New("invalid client_ip")
+		}
+	}
+	if q.Route != "" && q.Route != "local" && q.Route != "remote" && q.Route != "block" {
+		return nil, nil, errors.New("invalid route")
+	}
+	if q.QNameMatch != "" && q.QNameMatch != "exact" && q.QNameMatch != "contains" {
+		return nil, nil, errors.New("invalid qname_match")
+	}
+	if q.QType < 0 || q.QType > 65535 {
+		return nil, nil, errors.New("invalid qtype")
+	}
+	if q.RCode != nil && (*q.RCode < 0 || *q.RCode > 65535) {
+		return nil, nil, errors.New("invalid rcode")
+	}
+	if q.FromMS < 0 || q.ToMS < 0 || (q.FromMS != 0 && q.ToMS != 0 && q.FromMS > q.ToMS) {
+		return nil, nil, errors.New("invalid time range")
+	}
+	if q.QName != "" && q.QNameMatch == "contains" && (q.FromMS == 0 || q.ToMS == 0 || q.ToMS-q.FromMS > int64(7*24*time.Hour/time.Millisecond)) {
+		return nil, nil, errors.New("qname contains requires a time range of at most 7 days")
+	}
+	where, args := []string{"1=1"}, []any{}
+	add := func(condition string, value any) { where = append(where, condition); args = append(args, value) }
+	if q.FromMS != 0 {
+		add("q.timestamp_unix_ms>=?", q.FromMS)
+	}
+	if q.ToMS != 0 {
+		add("q.timestamp_unix_ms<=?", q.ToMS)
+	}
+	if q.ClientIP != "" {
+		add("q.client_ip=?", q.ClientIP)
+	}
+	if q.Route != "" {
+		add("q.route=?", q.Route)
+	}
+	if q.RouteSource != "" {
+		add("q.route_source=?", q.RouteSource)
+	}
+	if q.UpstreamTag != "" {
+		add("q.upstream_tag=?", q.UpstreamTag)
+	}
+	if q.Protocol != "" {
+		add("q.protocol=?", q.Protocol)
+	}
+	if q.QType != 0 {
+		add("q.qtype=?", q.QType)
+	}
+	if q.RCode != nil {
+		add("q.rcode=?", *q.RCode)
+	}
+	if q.CacheHit != nil {
+		add("q.cache_hit=?", boolInt(*q.CacheHit))
+	}
+	if q.HasError != nil {
+		if *q.HasError {
+			where = append(where, "(COALESCE(q.error_code,'')<>'' OR COALESCE(q.rcode,0)<>0)")
+		} else {
+			where = append(where, "COALESCE(q.error_code,'')='' AND COALESCE(q.rcode,0)=0")
+		}
+	}
+	if q.QName != "" {
+		if q.QNameMatch == "contains" {
+			add("q.qname LIKE ? ESCAPE '\\'", "%"+escapeLike(q.QName)+"%")
+		} else {
+			add("q.qname=?", q.QName)
+		}
+	}
+	return where, args, nil
+}
+
+func escapeLike(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(value)
+}
+
+func queryMatches(event StoredEvent, q Query) bool {
+	if q.FromMS != 0 && event.TimestampMS < q.FromMS || q.ToMS != 0 && event.TimestampMS > q.ToMS || q.ClientIP != "" && event.ClientIP != q.ClientIP || q.Route != "" && event.Route != q.Route || q.RouteSource != "" && event.RouteSource != q.RouteSource || q.UpstreamTag != "" && event.UpstreamTag != q.UpstreamTag || q.Protocol != "" && event.Protocol != q.Protocol || q.QType != 0 && event.QType != q.QType || q.RCode != nil && event.RCode != *q.RCode || q.CacheHit != nil && event.CacheHit != *q.CacheHit {
+		return false
+	}
+	if q.HasError != nil && (event.ErrorCode != "" || event.RCode != 0) != *q.HasError {
+		return false
+	}
+	if q.QName == "" {
+		return true
+	}
+	if q.QNameMatch == "contains" {
+		return strings.Contains(event.QName, q.QName)
+	}
+	return event.QName == q.QName
 }
 func encodeCursor(ts, id int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(ts, 10) + ":" + strconv.FormatInt(id, 10)))
@@ -608,9 +722,9 @@ func (s *Service) Close() {
 	close(s.done)
 	s.wg.Wait()
 	s.mu.Lock()
-	for id, ch := range s.subscribers {
+	for id, sub := range s.subscribers {
 		delete(s.subscribers, id)
-		close(ch)
+		close(sub.ch)
 	}
 	s.mu.Unlock()
 }

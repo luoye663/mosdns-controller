@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -64,4 +64,12 @@ var migrationV2 = []string{
 // are calculated from this aggregate rather than scanning retained query records.
 var migrationV3 = []string{
 	`CREATE TABLE dns_stats_hourly_latency_bucket (hour_start_ms INTEGER NOT NULL, upper_bound_us INTEGER NOT NULL, query_count INTEGER NOT NULL, PRIMARY KEY(hour_start_ms,upper_bound_us)) WITHOUT ROWID`,
+}
+
+// migrationV4 keeps common diagnostic filters bounded by their value and time.
+var migrationV4 = []string{
+	`CREATE INDEX idx_dns_queries_qtype_time ON dns_queries(qtype,timestamp_unix_ms DESC,id DESC)`,
+	`CREATE INDEX idx_dns_queries_rcode_time ON dns_queries(rcode,timestamp_unix_ms DESC,id DESC)`,
+	`CREATE INDEX idx_dns_queries_cache_time ON dns_queries(cache_hit,timestamp_unix_ms DESC,id DESC)`,
+	`CREATE INDEX idx_dns_queries_upstream_tag_time ON dns_queries(upstream_tag,timestamp_unix_ms DESC,id DESC)`,
 }
