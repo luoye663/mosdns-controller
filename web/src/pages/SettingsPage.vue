@@ -22,4 +22,29 @@ async function uploadGeosite() { if (!geositeFile.value) return; saving.value = 
 onMounted(load)
 </script>
 
-<template><section class="page"><header class="page-heading"><div><p class="eyebrow">系统配置</p><h1>设置</h1></div><NButton :loading="loading" @click="load">刷新</NButton></header><NAlert v-if="message" type="success" class="form-alert">{{ message }}</NAlert><NAlert v-if="error" type="error" class="form-alert">{{ error }}</NAlert><NCard title="DNS 缓存" size="small" class="settings-card"><NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem></NCard><NCard title="查询日志" size="small" class="settings-card"><NFormItem label="保留天数"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem></NCard><div class="inline-controls"><NButton type="primary" :loading="saving" @click="save">保存设置</NButton></div><NCard title="国内域名订阅" size="small" class="settings-card"><NFormItem label="订阅地址"><NInput v-model:value="geositeSource" placeholder="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/china-list.txt" /></NFormItem><div class="inline-controls"><NButton type="primary" :loading="saving" @click="updateGeosite">立即更新</NButton></div><input ref="uploadInput" type="file" accept=".txt,text/plain" hidden @change="selectGeositeFile" /><div class="inline-controls"><NButton @click="chooseGeositeFile">选择 TXT</NButton><span class="muted">{{ geositeFile?.name || '未选择文件' }}</span><NButton type="primary" :disabled="!geositeFile" :loading="saving" @click="uploadGeosite">上传并应用</NButton></div><dl v-if="geosite" class="status-list"><dt>运行时版本</dt><dd>{{ geosite.version }}</dd><dt>规则数量</dt><dd>{{ geosite.rule_count }}</dd><dt>更新时间</dt><dd>{{ formatTime(geosite.loaded_at) }}</dd></dl></NCard></section></template>
+<template>
+  <section class="page">
+    <header class="page-heading">
+      <div><p class="eyebrow">系统配置</p><h1>设置</h1></div>
+      <NButton :loading="loading" @click="load">刷新</NButton>
+    </header>
+    <NAlert v-if="message" type="success" class="form-alert">{{ message }}</NAlert>
+    <NAlert v-if="error" type="error" class="form-alert">{{ error }}</NAlert>
+    <NCard title="DNS 缓存" size="small" class="settings-card">
+      <NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem>
+    </NCard>
+    <NCard title="查询日志" size="small" class="settings-card">
+      <NFormItem label="保留天数"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem>
+      <div class="inline-controls settings-save-action"><NButton type="primary" :loading="saving" @click="save">保存设置</NButton></div>
+    </NCard>
+    <NCard title="国内域名订阅" size="small" class="settings-card">
+      <NFormItem label="订阅地址"><NInput v-model:value="geositeSource" placeholder="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/china-list.txt" /></NFormItem>
+      <div class="subscription-actions">
+        <div class="inline-controls"><NButton type="primary" :loading="saving" @click="updateGeosite">立即更新</NButton></div>
+        <input ref="uploadInput" type="file" accept=".txt,text/plain" hidden @change="selectGeositeFile" />
+        <div class="inline-controls"><NButton @click="chooseGeositeFile">选择 TXT</NButton><span class="muted">{{ geositeFile?.name || '未选择文件' }}</span><NButton type="primary" :disabled="!geositeFile" :loading="saving" @click="uploadGeosite">上传并应用</NButton></div>
+      </div>
+      <dl v-if="geosite" class="status-list"><dt>运行时版本</dt><dd>{{ geosite.version }}</dd><dt>规则数量</dt><dd>{{ geosite.rule_count }}</dd><dt>更新时间</dt><dd>{{ formatTime(geosite.loaded_at) }}</dd></dl>
+    </NCard>
+  </section>
+</template>
