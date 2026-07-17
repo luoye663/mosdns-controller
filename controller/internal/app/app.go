@@ -761,9 +761,13 @@ func (a *App) middleware(next http.Handler) http.Handler {
 				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
 			}
 		}()
-		ctx, cancel := context.WithTimeout(r.Context(), a.config.HTTP.Timeout)
-		defer cancel()
-		next.ServeHTTP(w, r.WithContext(ctx))
+		if r.URL.Path == "/api/v1/queries/stream" {
+			next.ServeHTTP(w, r)
+		} else {
+			ctx, cancel := context.WithTimeout(r.Context(), a.config.HTTP.Timeout)
+			defer cancel()
+			next.ServeHTTP(w, r.WithContext(ctx))
+		}
 		a.logger.Info("http request", "request_id", id, "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(started).Milliseconds())
 	})
 }
