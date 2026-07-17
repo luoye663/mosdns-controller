@@ -90,6 +90,9 @@ plugins:
         exec: goto route_remote
       - matches:
           - qname $geosite_cn
+        exec: mark 1301
+      - matches:
+          - qname $geosite_cn
         exec: goto route_local
       - exec: goto route_remote
   - tag: udp_server

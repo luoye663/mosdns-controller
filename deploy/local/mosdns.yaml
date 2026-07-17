@@ -37,6 +37,13 @@ plugins:
       include_answers: true
       include_error_text: true
       max_error_text_bytes: 256
+      marks:
+        access_block: 1001
+        route_local: 1101
+        route_remote: 1102
+        no_log: 1201
+        geosite_local: 1301
+        cache_hit: 2101
 
   # local 与 remote 使用独立 cache，保证路由切换不会复用另一组的结果。
   - tag: cache_local
@@ -129,6 +136,9 @@ plugins:
       - matches:
           - mark 1102
         exec: goto route_remote
+      - matches:
+          - qname $geosite_cn
+        exec: mark 1301
       - matches:
           - qname $geosite_cn
         exec: goto route_local
