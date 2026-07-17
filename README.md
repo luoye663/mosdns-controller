@@ -140,7 +140,7 @@ make local-controller
 
 也可使用 `make local-up` 同时启动两项服务。服务启动后访问 `http://127.0.0.1:18080` 创建首个管理员；也可以在第三个终端运行 `make local-create-admin`。本地 DNS 验证命令为 `dig @127.0.0.1 -p 5353 example.com A`。
 
-`make local-clean` 仅删除 `.local/` 下的本机开发数据库、缓存、快照和 token，不会影响 Docker Compose 的命名卷。WebUI 的生产静态资源会在 `controller/Dockerfile` 构建镜像时嵌入 controller；单独执行 `npm --prefix web run dev` 只启动 Vite 开发服务器，不会自动代理 controller API。
+`make local-clean` 仅删除 `.local/` 下的本机开发数据库、缓存、快照和 token，不会影响 Docker Compose 的命名卷。WebUI 的生产静态资源会在 `controller/Dockerfile` 构建镜像时嵌入 controller；执行 `npm --prefix web run dev` 后，Vite 会将 `/api` 请求反代到本地 controller `http://127.0.0.1:18080`。可通过环境变量覆盖后端地址，例如 `VITE_API_PROXY_TARGET=http://127.0.0.1:8080 npm --prefix web run dev`。
 
 ## 集成环境验证
 

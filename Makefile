@@ -25,6 +25,10 @@ lint:
 	go -C controller vet ./...
 	npm --prefix web run typecheck
 
+# web-dev: 运行 WebUI 开发服务器，支持热更新。
+web-dev:
+	npm --prefix web run dev
+
 web-build: web-embed
 
 # controller 通过 go:embed 提供生产 WebUI；本地 Go 构建前必须同步最新 dist。
@@ -50,7 +54,8 @@ local-init:
 local-mosdns: local-init
 	go -C mosdns run . start -c ../$(LOCAL_MOSDNS_CONFIG)
 
-local-controller: local-init web-embed
+# 运行 controller
+local-controller: local-init
 	go -C controller run ./cmd/controller serve -config ../$(LOCAL_CONTROLLER_CONFIG)
 
 local-up: local-init web-embed
