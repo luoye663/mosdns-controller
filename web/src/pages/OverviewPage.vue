@@ -34,7 +34,7 @@ function renderCharts() {
     color: ['#087e8b', '#e7793c'],
     grid: { top: 28, right: 16, bottom: 28, left: 42 },
     tooltip: { trigger: 'axis' },
-    legend: { data: ['查询数', '平均延迟'], right: 8, top: 0, textStyle: { fontSize: 12 } },
+    legend: { data: ['查询数', '平均延迟'], left: 'center', top: 0, textStyle: { fontSize: 12 } },
     xAxis: { type: 'category', data: labels, axisTick: { show: false }, axisLabel: { color: '#718084', fontSize: 11 } },
     yAxis: [{ type: 'value', name: '请求', minInterval: 1, splitLine: { lineStyle: { color: '#edf1f1' } }, axisLabel: { color: '#718084' } }, { type: 'value', name: 'ms', splitLine: { show: false }, axisLabel: { color: '#718084' } }],
     series: [
