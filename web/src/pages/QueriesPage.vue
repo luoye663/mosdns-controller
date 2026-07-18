@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NDatePicker, NInput, NModal, NSelect, NSwitch } from 'naive-ui'
-import { api, eventStream, type QueryEvent, type QueryParams, type Rule, type Version } from '@/lib/api'
+import { api, eventStream, type QueryEvent, type QueryParams, type Rule } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
+import { notify } from '@/lib/notify'
 
 defineOptions({ name: 'QueriesPage' })
 
@@ -12,7 +13,6 @@ const rows = ref<QueryEvent[]>([])
 const cursor = ref('')
 const pageSize = ref(100)
 const loading = ref(false)
-const error = ref('')
 const live = ref(false)
 const paused = ref(false)
 const streamState = ref('未连接')
@@ -24,7 +24,6 @@ const ruleTarget = ref<QueryEvent | null>(null)
 const diagnosticTarget = ref<QueryEvent | null>(null)
 const answerIPs = ref<string[] | null>(null)
 const answerIPsError = ref('')
-const published = ref<Version | null>(null)
 const ruleAction = ref('block')
 const range = ref<[number, number] | null>(null)
 const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qtype: '', rcode: '', route: '', route_source: '', upstream_tag: '', protocol: '', cache_hit: '', has_error: '' })
@@ -86,13 +85,12 @@ function startStream() {
 }
 async function load(nextCursor = '') {
   loading.value = true
-  error.value = ''
   try {
     const page = await api.queries(params(nextCursor))
     const items = page.items ?? []
     rows.value = nextCursor ? [...rows.value, ...items.filter((item) => !rows.value.some((row) => row.event_id === item.event_id))] : items
     cursor.value = page.next_cursor ?? ''
-  } catch (e) { error.value = e instanceof Error ? e.message : '无法加载查询日志' } finally { loading.value = false }
+  } catch (e) { notify.error(e instanceof Error ? e.message : '无法加载查询日志') } finally { loading.value = false }
 }
 async function loadRuleLabels() {
   const result = await api.rules()
@@ -126,13 +124,13 @@ function removeSaved() {
 async function createRule() {
   if (!ruleTarget.value) return
   loading.value = true
-  error.value = ''
   const action = ruleAction.value
   const category = action === 'block' || action === 'allow' ? 'access' : action === 'no_log' ? 'logging' : 'route'
   try {
-    published.value = await api.createRule({ category, action, match_type: 'domain', pattern: ruleTarget.value.qname, priority: 100, source: 'query', comment: `来自查询日志 ${ruleTarget.value.event_id}`, enabled: true })
+    const published = await api.createRule({ category, action, match_type: 'domain', pattern: ruleTarget.value.qname, priority: 100, source: 'query', comment: `来自查询日志 ${ruleTarget.value.event_id}`, enabled: true })
+    notify.success(`已发布版本 ${published.version}，状态：${published.status}。`)
     ruleTarget.value = null
-  } catch (e) { error.value = e instanceof Error ? e.message : '规则发布失败' } finally { loading.value = false }
+  } catch (e) { notify.error(e instanceof Error ? e.message : '规则发布失败') } finally { loading.value = false }
 }
 async function openDiagnostics(row: QueryEvent) {
   diagnosticTarget.value = row
@@ -169,8 +167,6 @@ onBeforeUnmount(closeStream)
       <NButton type="primary" :loading="loading" @click="applyFilters">筛选</NButton>
     </div>
     <div class="inline-controls query-presets"><NSelect v-model:value="selectedSaved" :options="savedFilters.map((item) => ({ label: item.label, value: item.label }))" placeholder="保存的筛选" clearable @update:value="applySaved" /><NButton @click="saveFilter">保存筛选</NButton><NButton :disabled="!selectedSaved" @click="removeSaved">删除</NButton><span v-if="paused && pending.length" class="muted">已暂停 {{ pending.length }} 条新查询</span></div>
-    <NAlert v-if="published" type="success" closable class="form-alert" @close="published = null">已发布版本 {{ published.version }}，状态：{{ published.status }}。</NAlert>
-    <NAlert v-if="error" type="error" closable class="form-alert" @close="error = ''">{{ error }}</NAlert>
     <div class="table-wrap queries-table-wrap"><table><thead><tr><th>时间</th><th>客户端</th><th>域名 / 类型</th><th>结果</th><th>路由</th><th>缓存</th><th>延迟</th><th>规则 / 版本</th><th>诊断</th><th></th></tr></thead><tbody>
       <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td :title="row.client_ip">{{ formatClient(row) }}</td><td><div class="mono">{{ row.qname }}</div><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td><span class="cache-status" :class="row.cache_hit ? 'hit' : 'miss'">{{ row.cache_hit ? '命中' : '未命中' }}</span></td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div>访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)"><div v-if="hasError(row)">{{ errorText(row) }}</div><div v-if="row.answer_count"><NButton size="tiny" text @click="openDiagnostics(row)">{{ row.answer_count }} 条应答</NButton></div></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
       <tr v-if="!loading && !rows.length"><td colspan="10" class="empty-cell">暂无查询日志</td></tr>

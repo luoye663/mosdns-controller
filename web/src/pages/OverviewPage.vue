@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import * as echarts from 'echarts'
-import { NAlert, NButton, NSpin } from 'naive-ui'
+import { NButton, NSpin } from 'naive-ui'
 import { api, type DashboardSummary, type LatencyPoint, type SystemStatus } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
+import { notify } from '@/lib/notify'
 
 type StatItem = { value: string | number; query_count: number }
 const loading = ref(true)
-const error = ref('')
 const summary = ref<DashboardSummary>({ query_count: 0, last_hour_query_count: 0, average_latency_us: 0, p95_latency_us: 0, p95_sample_count: 0, max_latency_us: 0, error_count: 0, cache_hit_count: 0 })
 const domains = ref<StatItem[]>([])
 const clients = ref<StatItem[]>([])
@@ -52,7 +52,6 @@ function renderCharts() {
 }
 async function load() {
   loading.value = true
-  error.value = ''
   try {
     const [nextSummary, nextDomains, nextClients, nextRoutes, nextRCodes, nextLatency, nextStatus] = await Promise.all([api.summary(), api.statistic('domains'), api.statistic('clients'), api.statistic('routes'), api.statistic('rcode'), api.latency(), api.systemStatus()])
     summary.value = nextSummary
@@ -65,7 +64,7 @@ async function load() {
     await nextTick()
     renderCharts()
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '无法加载概况数据'
+    notify.error(cause instanceof Error ? cause.message : '无法加载概况数据')
   } finally {
     loading.value = false
   }
@@ -81,7 +80,6 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
       <div><p class="eyebrow">运行概览</p><h1>DNS 查询状态</h1></div>
       <NButton @click="load" :loading="loading">刷新数据</NButton>
     </header>
-    <NAlert v-if="error" type="error" class="form-alert">{{ error }}</NAlert>
     <NSpin :show="loading">
       <div class="health-strip">
         <div><span class="health-dot" :class="status?.mosdns?.state === 'ready' ? 'healthy' : 'unhealthy'"></span><b>mosdns</b><small>{{ status?.mosdns?.state ?? status?.mosdns_error ?? '状态未知' }}</small></div>

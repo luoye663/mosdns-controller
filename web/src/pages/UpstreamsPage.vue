@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NFormItem, NInput, NInputNumber, NSelect } from 'naive-ui'
 import { api, type ECSSnapshot, type UpstreamSnapshot } from '@/lib/api'
+import { notify } from '@/lib/notify'
 
 const local = ref<UpstreamSnapshot | null>(null)
 const remote = ref<UpstreamSnapshot | null>(null)
@@ -9,21 +10,18 @@ const localECS = ref<ECSSnapshot | null>(null)
 const remoteECS = ref<ECSSnapshot | null>(null)
 const loading = ref(false)
 const saving = ref<'local_dns' | 'remote_dns' | ''>('')
-const error = ref('')
-const message = ref('')
 
 function clone(snapshot: UpstreamSnapshot): UpstreamSnapshot { return { ...snapshot, upstreams: snapshot.upstreams.map((item) => ({ ...item })) } }
 function cloneECS(snapshot: ECSSnapshot): ECSSnapshot { return { ...snapshot } }
-async function load() { loading.value = true; error.value = ''; try { const data = await api.upstreams(); local.value = clone(data.local); remote.value = clone(data.remote); localECS.value = cloneECS(data.local_ecs); remoteECS.value = cloneECS(data.remote_ecs) } catch (e) { error.value = e instanceof Error ? e.message : '无法读取上游配置' } finally { loading.value = false } }
+async function load() { loading.value = true; try { const data = await api.upstreams(); local.value = clone(data.local); remote.value = clone(data.remote); localECS.value = cloneECS(data.local_ecs); remoteECS.value = cloneECS(data.remote_ecs) } catch (e) { notify.error(e instanceof Error ? e.message : '无法读取上游配置') } finally { loading.value = false } }
 function add(snapshot: UpstreamSnapshot) { snapshot.upstreams.push({ tag: `upstream_${snapshot.upstreams.length + 1}`, addr: 'https://', priority: 100, weight: 1 }) }
 function remove(snapshot: UpstreamSnapshot, index: number) { if (snapshot.upstreams.length > 1) snapshot.upstreams.splice(index, 1) }
-async function save(group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot, ecs: ECSSnapshot) { saving.value = group; error.value = ''; message.value = ''; try { const [updated, updatedECS] = await Promise.all([api.updateUpstream(group, { ...clone(snapshot), version: snapshot.version + 1, expected_current_version: snapshot.version }), api.updateECS(group, { ...cloneECS(ecs), version: ecs.version + 1, expected_current_version: ecs.version })]); if (group === 'local_dns') { local.value = clone(updated); localECS.value = cloneECS(updatedECS) } else { remote.value = clone(updated); remoteECS.value = cloneECS(updatedECS) }; message.value = `${group === 'local_dns' ? '本地' : '远程'}上游与 ECS 已热加载，对应缓存已清空` } catch (e) { error.value = e instanceof Error ? e.message : '保存上游配置失败' } finally { saving.value = '' } }
+async function save(group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot, ecs: ECSSnapshot) { saving.value = group; try { const [updated, updatedECS] = await Promise.all([api.updateUpstream(group, { ...clone(snapshot), version: snapshot.version + 1, expected_current_version: snapshot.version }), api.updateECS(group, { ...cloneECS(ecs), version: ecs.version + 1, expected_current_version: ecs.version })]); if (group === 'local_dns') { local.value = clone(updated); localECS.value = cloneECS(updatedECS) } else { remote.value = clone(updated); remoteECS.value = cloneECS(updatedECS) }; notify.success(`${group === 'local_dns' ? '本地' : '远程'}上游与 ECS 已热加载，对应缓存已清空`) } catch (e) { notify.error(e instanceof Error ? e.message : '保存上游配置失败') } finally { saving.value = '' } }
 onMounted(load)
 </script>
 
 <template>
   <section class="page"><header class="page-heading"><div><p class="eyebrow">解析路径</p><h1>上游 DNS</h1></div><NButton :loading="loading" @click="load">刷新</NButton></header>
-    <NAlert v-if="message" type="success" class="form-alert">{{ message }}</NAlert><NAlert v-if="error" type="error" class="form-alert">{{ error }}</NAlert>
     <NAlert type="info" class="form-alert">竞速模式随机选择端点并采用最快有效响应；加权模式按权重决定入选概率；主备模式按优先级从小到大处理，同优先级内竞速，连接错误、超时或 SERVFAIL 才切换到下一优先级。标签仅用于识别和查询审计。</NAlert>
     <div class="upstream-grid">
       <NCard v-for="item in [{ group: 'local_dns' as const, title: '本地上游', snapshot: local, ecs: localECS }, { group: 'remote_dns' as const, title: '远程上游', snapshot: remote, ecs: remoteECS }]" :key="item.group" :title="item.title" size="small">

@@ -2,7 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NAlert, NButton, NInput, NInputNumber, NModal, NSelect, NSwitch } from 'naive-ui'
-import { api, type GeositeStatus, type Rule, type RuleInput, type Version } from '@/lib/api'
+import { api, type GeositeStatus, type Rule, type RuleInput } from '@/lib/api'
+import { notify } from '@/lib/notify'
 
 const router = useRouter()
 const rules = ref<Rule[]>([])
@@ -10,8 +11,6 @@ const geosite = ref<GeositeStatus | null>(null)
 const geositeError = ref('')
 const active = ref('block')
 const loading = ref(false)
-const error = ref('')
-const published = ref<Version | null>(null)
 const showEditor = ref(false)
 const editing = ref<Rule | null>(null)
 const draft = reactive({ category: 'access', action: 'block', match_type: 'domain', pattern: '', priority: 100, source: 'manual', comment: '', enabled: true })
@@ -27,7 +26,6 @@ function openCreate() { resetDraft(); showEditor.value = true }
 function openEdit(rule: Rule) { editing.value = rule; Object.assign(draft, rule); showEditor.value = true }
 async function load() {
   loading.value = true
-  error.value = ''
   geositeError.value = ''
   try {
     const [ruleResult, geositeResult] = await Promise.allSettled([api.rules(), api.geositeStatus()])
@@ -39,43 +37,41 @@ async function load() {
       geositeError.value = geositeResult.reason instanceof Error ? geositeResult.reason.message : '无法读取订阅状态'
     }
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '无法加载规则'
+    notify.error(e instanceof Error ? e.message : '无法加载规则')
   } finally {
     loading.value = false
   }
 }
 async function save() {
   loading.value = true
-  error.value = ''
   try {
     const patterns = draftPatterns.value
     if (patterns.length === 0) throw new Error('请至少填写一个域名')
     if (editing.value) {
       if (patterns.length !== 1) throw new Error('编辑规则时只能填写一个域名')
-      published.value = await api.updateRule(editing.value.id, { ...draft, pattern: patterns[0]!, id: editing.value.id, updated_at_ms: editing.value.updated_at_ms })
+      const published = await api.updateRule(editing.value.id, { ...draft, pattern: patterns[0]!, id: editing.value.id, updated_at_ms: editing.value.updated_at_ms })
+      notify.success(`已发布版本 ${published.version}，状态：${published.status}。`)
     } else {
       const entries: RuleInput[] = patterns.map((pattern) => ({ ...draft, pattern }))
-      if (entries.length === 1) published.value = await api.createRule(entries[0]!)
-      else published.value = await api.importRules((await api.previewRuleImport(entries)).rules)
+      const published = entries.length === 1 ? await api.createRule(entries[0]!) : await api.importRules((await api.previewRuleImport(entries)).rules)
+      notify.success(`已发布版本 ${published.version}，状态：${published.status}。`)
     }
     showEditor.value = false
     await load()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '发布失败，已保留编辑内容'
+    notify.error(e instanceof Error ? e.message : '发布失败，已保留编辑内容')
   } finally {
     loading.value = false
   }
 }
-async function remove(rule: Rule) { if (!window.confirm(`确认删除规则 ${rule.pattern}？`)) return; loading.value = true; try { published.value = await api.deleteRule(rule.id); await load() } catch (e) { error.value = e instanceof Error ? e.message : '删除失败' } finally { loading.value = false } }
-async function switchRule(rule: Rule, enabled: boolean) { try { published.value = await api.updateRule(rule.id, { ...rule, enabled }); await load() } catch (e) { error.value = e instanceof Error ? e.message : '更新失败' } }
+async function remove(rule: Rule) { if (!window.confirm(`确认删除规则 ${rule.pattern}？`)) return; loading.value = true; try { const published = await api.deleteRule(rule.id); notify.success(`已发布版本 ${published.version}，状态：${published.status}。`); await load() } catch (e) { notify.error(e instanceof Error ? e.message : '删除失败') } finally { loading.value = false } }
+async function switchRule(rule: Rule, enabled: boolean) { try { const published = await api.updateRule(rule.id, { ...rule, enabled }); notify.success(`已发布版本 ${published.version}，状态：${published.status}。`); await load() } catch (e) { notify.error(e instanceof Error ? e.message : '更新失败') } }
 onMounted(load)
 </script>
 
 <template>
   <section class="page">
     <header class="page-heading"><div><p class="eyebrow">动态策略</p><h1>规则管理</h1></div><NButton v-if="active !== 'geosite'" type="primary" @click="openCreate">新增规则</NButton></header>
-    <NAlert v-if="published" type="success" closable @close="published = null" class="form-alert">已发布版本 {{ published.version }}，状态：{{ published.status }}。</NAlert>
-    <NAlert v-if="error" type="error" closable @close="error = ''" class="form-alert">{{ error }}</NAlert>
     <nav class="rule-tabs"><button v-for="tab in tabs" :key="tab.key" :class="{ active: active === tab.key }" @click="active = tab.key">{{ tab.label }} <small v-if="tab.key !== 'geosite'">{{ rules.filter((r) => r.category === tab.category && r.action === tab.action).length }}</small></button></nav>
     <section v-if="active === 'geosite'" class="subscription-panel">
       <NAlert v-if="geositeError" type="warning">国内域名订阅状态不可用：{{ geositeError }}</NAlert>
