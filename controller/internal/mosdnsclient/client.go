@@ -78,13 +78,22 @@ type ApplyResult struct {
 	Checksum        string `json:"checksum"`
 }
 type Snapshot struct {
-	SchemaVersion          uint32    `json:"schema_version"`
-	Version                uint64    `json:"version"`
-	ExpectedCurrentVersion uint64    `json:"expected_current_version"`
-	GeneratedAt            time.Time `json:"generated_at"`
-	Checksum               string    `json:"checksum"`
-	BlockRCode             int       `json:"block_rcode"`
-	Rules                  []Rule    `json:"rules"`
+	SchemaVersion          uint32            `json:"schema_version"`
+	Version                uint64            `json:"version"`
+	ExpectedCurrentVersion uint64            `json:"expected_current_version"`
+	GeneratedAt            time.Time         `json:"generated_at"`
+	Checksum               string            `json:"checksum"`
+	BlockRCode             int               `json:"block_rcode"`
+	Rules                  []Rule            `json:"rules"`
+	SubscriptionSets       []SubscriptionSet `json:"subscription_sets,omitempty"`
+}
+type SubscriptionSet struct {
+	SourceID   int64    `json:"source_id"`
+	SourceName string   `json:"source_name"`
+	Category   string   `json:"category"`
+	Action     string   `json:"action"`
+	Priority   int      `json:"priority"`
+	Domains    []string `json:"domains"`
 }
 type Rule struct {
 	ID        int64  `json:"id"`

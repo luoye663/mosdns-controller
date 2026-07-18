@@ -61,7 +61,9 @@ func New(store *storage.Store, client mosdnsclient.Client) *Service {
 func (s *Service) List(ctx context.Context) ([]Rule, error) {
 	return s.list(ctx, ` WHERE source NOT LIKE 'subscription:%'`)
 }
-func (s *Service) allRules(ctx context.Context) ([]Rule, error) { return s.list(ctx, "") }
+func (s *Service) allRules(ctx context.Context) ([]Rule, error) {
+	return s.list(ctx, ` WHERE source NOT LIKE 'subscription:%'`)
+}
 func (s *Service) list(ctx context.Context, filter string) ([]Rule, error) {
 	rows, err := s.store.DB().QueryContext(ctx, `SELECT id,category,action,match_type,pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms FROM domain_rules`+filter+` ORDER BY category,match_type,normalized_pattern,priority DESC,id`)
 	if err != nil {
@@ -321,13 +323,17 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 	if err != nil {
 		return Version{}, err
 	}
-	snapshot := buildSnapshot(version, current, rules)
+	sets, err := s.subscriptionSets(ctx)
+	if err != nil {
+		return Version{}, err
+	}
+	snapshot := buildSnapshot(version, current, rules, sets)
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return Version{}, err
 	}
-	v := Version{Version: version, Checksum: snapshot.Checksum, Status: statusPending, RuleCount: len(snapshot.Rules), CreatedAtMS: time.Now().UnixMilli()}
-	if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rollback_from_version,rule_count,regexp_rule_count,snapshot_json,created_by,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, version, 1, snapshot.Checksum, statusPending, current, nullableVersion(rollbackFrom), len(snapshot.Rules), regexpCount(snapshot.Rules), encoded, adminID, v.CreatedAtMS); err != nil {
+	v := Version{Version: version, Checksum: snapshot.Checksum, Status: statusPending, RuleCount: snapshotRuleCount(snapshot), CreatedAtMS: time.Now().UnixMilli()}
+	if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rollback_from_version,rule_count,regexp_rule_count,snapshot_json,created_by,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, version, 2, snapshot.Checksum, statusPending, current, nullableVersion(rollbackFrom), v.RuleCount, regexpCount(snapshot.Rules), encoded, adminID, v.CreatedAtMS); err != nil {
 		return Version{}, err
 	}
 	validation, err := s.mosdns.Validate(ctx, snapshot)
@@ -408,12 +414,17 @@ func (s *Service) finalizeWithRules(ctx context.Context, version uint64, rules [
 	if _, err = tx.ExecContext(ctx, `DELETE FROM domain_rules`); err != nil {
 		return err
 	}
+	insertRule, err := tx.PrepareContext(ctx, `INSERT INTO domain_rules(id,version,category,action,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer insertRule.Close()
 	for _, r := range rules {
 		normalized, err := normalize(r.Pattern, r.MatchType)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO domain_rules(id,version,category,action,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, version, r.Category, r.Action, r.MatchType, r.Pattern, normalized, r.Priority, r.Source, r.Comment, r.Enabled, r.CreatedAtMS, r.UpdatedAtMS); err != nil {
+		if _, err = insertRule.ExecContext(ctx, r.ID, version, r.Category, r.Action, r.MatchType, r.Pattern, normalized, r.Priority, r.Source, r.Comment, r.Enabled, r.CreatedAtMS, r.UpdatedAtMS); err != nil {
 			return err
 		}
 	}
@@ -450,24 +461,38 @@ func (s *Service) nextVersion(ctx context.Context) (uint64, error) {
 	return v, err
 }
 func (s *Service) nextRuleID(ctx context.Context) (int64, error) {
-	_, err := s.store.DB().ExecContext(ctx, `INSERT OR IGNORE INTO system_state(key,value_json,updated_at_ms) VALUES('next_rule_id','0',?)`, time.Now().UnixMilli())
+	ids, err := s.reserveRuleIDs(ctx, 1)
 	if err != nil {
 		return 0, err
+	}
+	return ids[0], nil
+}
+func (s *Service) reserveRuleIDs(ctx context.Context, count int) ([]int64, error) {
+	if count < 1 {
+		return nil, errors.New("rule ID count must be greater than zero")
+	}
+	_, err := s.store.DB().ExecContext(ctx, `INSERT OR IGNORE INTO system_state(key,value_json,updated_at_ms) VALUES('next_rule_id','0',?)`, time.Now().UnixMilli())
+	if err != nil {
+		return nil, err
 	}
 	var raw string
 	if err = s.store.DB().QueryRowContext(ctx, `SELECT value_json FROM system_state WHERE key='next_rule_id'`).Scan(&raw); err != nil {
-		return 0, err
+		return nil, err
 	}
-	var id int64
-	_, err = fmt.Sscan(raw, &id)
+	var first int64
+	_, err = fmt.Sscan(raw, &first)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	id++
-	_, err = s.store.DB().ExecContext(ctx, `UPDATE system_state SET value_json=?,updated_at_ms=? WHERE key='next_rule_id'`, fmt.Sprint(id), time.Now().UnixMilli())
-	return id, err
+	ids := make([]int64, count)
+	for i := range ids {
+		first++
+		ids[i] = first
+	}
+	_, err = s.store.DB().ExecContext(ctx, `UPDATE system_state SET value_json=?,updated_at_ms=? WHERE key='next_rule_id'`, fmt.Sprint(first), time.Now().UnixMilli())
+	return ids, err
 }
-func buildSnapshot(version, current uint64, rules []Rule) mosdnsclient.Snapshot {
+func buildSnapshot(version, current uint64, rules []Rule, sets []mosdnsclient.SubscriptionSet) mosdnsclient.Snapshot {
 	wire := make([]mosdnsclient.Rule, 0, len(rules))
 	for _, r := range rules {
 		if r.Enabled {
@@ -490,19 +515,27 @@ func buildSnapshot(version, current uint64, rules []Rule) mosdnsclient.Snapshot 
 		}
 		return a.ID < b.ID
 	})
-	snap := mosdnsclient.Snapshot{SchemaVersion: 1, Version: version, ExpectedCurrentVersion: current, GeneratedAt: time.Now().UTC(), BlockRCode: 3, Rules: wire}
+	snap := mosdnsclient.Snapshot{SchemaVersion: 2, Version: version, ExpectedCurrentVersion: current, GeneratedAt: time.Now().UTC(), BlockRCode: 3, Rules: wire, SubscriptionSets: sets}
 	canonical := struct {
-		SchemaVersion uint32              `json:"schema_version"`
-		Version       uint64              `json:"version"`
-		Expected      uint64              `json:"expected_current_version"`
-		GeneratedAt   time.Time           `json:"generated_at"`
-		BlockRCode    int                 `json:"block_rcode"`
-		Rules         []mosdnsclient.Rule `json:"rules"`
-	}{snap.SchemaVersion, snap.Version, snap.ExpectedCurrentVersion, snap.GeneratedAt, snap.BlockRCode, snap.Rules}
+		SchemaVersion    uint32                         `json:"schema_version"`
+		Version          uint64                         `json:"version"`
+		Expected         uint64                         `json:"expected_current_version"`
+		GeneratedAt      time.Time                      `json:"generated_at"`
+		BlockRCode       int                            `json:"block_rcode"`
+		Rules            []mosdnsclient.Rule            `json:"rules"`
+		SubscriptionSets []mosdnsclient.SubscriptionSet `json:"subscription_sets,omitempty"`
+	}{snap.SchemaVersion, snap.Version, snap.ExpectedCurrentVersion, snap.GeneratedAt, snap.BlockRCode, snap.Rules, snap.SubscriptionSets}
 	data, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(data)
 	snap.Checksum = "sha256:" + hex.EncodeToString(sum[:])
 	return snap
+}
+func snapshotRuleCount(snapshot mosdnsclient.Snapshot) int {
+	count := len(snapshot.Rules)
+	for _, set := range snapshot.SubscriptionSets {
+		count += len(set.Domains)
+	}
+	return count
 }
 func toWire(r Rule) mosdnsclient.Rule {
 	return mosdnsclient.Rule{ID: r.ID, Category: r.Category, Action: r.Action, MatchType: r.MatchType, Pattern: r.Pattern, Priority: r.Priority, Source: r.Source, Comment: r.Comment}

@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -84,4 +84,15 @@ var migrationV5 = []string{
 var migrationV6 = []string{
 	`CREATE TABLE rule_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL CHECK(category IN ('access','route')), action TEXT NOT NULL CHECK(action IN ('allow','block','local','remote')), kind TEXT NOT NULL CHECK(kind IN ('url','upload')), name TEXT NOT NULL, source_url TEXT NOT NULL DEFAULT '', refresh_interval_seconds INTEGER NOT NULL DEFAULT 86400 CHECK(refresh_interval_seconds BETWEEN 900 AND 2592000), enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), content_checksum TEXT NOT NULL DEFAULT '', rule_count INTEGER NOT NULL DEFAULT 0, last_checked_at_ms INTEGER NOT NULL DEFAULT 0, last_success_at_ms INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
 	`CREATE INDEX idx_rule_subscriptions_due ON rule_subscriptions(kind,enabled,last_checked_at_ms)`,
+}
+
+// migrationV7 stores a whole normalized source collection as one immutable
+// JSON value instead of expanding every subscribed domain into domain_rules.
+var migrationV7 = []string{
+	`ALTER TABLE rule_subscriptions ADD COLUMN domains_json BLOB`,
+}
+
+var migrationV8 = []string{
+	`ALTER TABLE dns_queries ADD COLUMN subscription_source_id INTEGER`,
+	`ALTER TABLE dns_queries ADD COLUMN subscription_source_name TEXT`,
 }

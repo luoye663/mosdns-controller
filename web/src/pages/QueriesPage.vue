@@ -70,6 +70,7 @@ function ruleLabel(rule: Rule) {
 }
 function routeSourceLabel(row: QueryEvent) {
   if (row.route_source === 'default') return '默认路由'
+	if (row.subscription_source_id) return `${row.subscription_source_name || '订阅源'} #${row.subscription_source_id}`
   return ruleLabels.value[row.route_rule_id] ?? ruleLabels.value[row.access_rule_id] ?? '已删除规则'
 }
 function errorText(row: QueryEvent) { return row.error_text || row.error_code || (row.rcode !== 0 ? rcodeLabel(row.rcode) : '') }

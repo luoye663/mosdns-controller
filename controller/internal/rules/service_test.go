@@ -132,7 +132,7 @@ func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
 	if err != nil || source.RuleCount != 2 || published.Version != 1 {
 		t.Fatalf("source=%+v version=%+v err=%v", source, published, err)
 	}
-	if len(fake.current.Rules) != 2 || fake.current.Rules[0].Action != "local" || len(fake.flushes) != 2 {
+	if len(fake.current.SubscriptionSets) != 1 || len(fake.current.SubscriptionSets[0].Domains) != 2 || fake.current.SubscriptionSets[0].Action != "local" || len(fake.flushes) != 2 {
 		t.Fatalf("snapshot=%+v flushes=%v", fake.current, fake.flushes)
 	}
 	manual, err := service.List(context.Background())
@@ -140,7 +140,7 @@ func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
 		t.Fatalf("subscription rules leaked into manual list: %+v err=%v", manual, err)
 	}
 	updated, version, err := service.SetSubscriptionEnabled(context.Background(), source.ID, false, 1, "sub-disable", "127.0.0.1")
-	if err != nil || updated.Enabled || version.Version != 2 || len(fake.current.Rules) != 0 {
+	if err != nil || updated.Enabled || version.Version != 2 || len(fake.current.SubscriptionSets) != 0 {
 		t.Fatalf("updated=%+v version=%+v snapshot=%+v err=%v", updated, version, fake.current, err)
 	}
 }
@@ -159,24 +159,9 @@ func TestDeleteSubscriptionRemovesOnlyItsRules(t *testing.T) {
 	if _, err = service.DeleteSubscription(context.Background(), first.ID, 1, "sub-delete", "127.0.0.1"); err != nil {
 		t.Fatal(err)
 	}
-	all, err := service.allRules(context.Background())
-	if err != nil || len(all) != 1 || all[0].Pattern != "two.example" {
-		t.Fatalf("remaining rules=%+v err=%v", all, err)
-	}
-}
-
-func TestSubscriptionRulesRejectGenericMutation(t *testing.T) {
-	service, _ := testService(t)
-	input := SubscriptionInput{Category: "access", Action: "block", Name: "source.txt", RefreshIntervalSeconds: 86400, Enabled: true}
-	if _, _, err := service.CreateUploadSubscription(context.Background(), input, "source.txt", []byte("blocked.example\n"), 1, "sub", "127.0.0.1"); err != nil {
-		t.Fatal(err)
-	}
-	all, err := service.allRules(context.Background())
-	if err != nil || len(all) != 1 {
-		t.Fatalf("rules=%+v err=%v", all, err)
-	}
-	if _, err := service.Delete(context.Background(), all[0].ID, 1, "delete", "127.0.0.1"); err == nil {
-		t.Fatal("generic delete accepted a subscription rule")
+	sets, err := service.subscriptionSets(context.Background())
+	if err != nil || len(sets) != 1 || len(sets[0].Domains) != 1 || sets[0].Domains[0] != "two.example" {
+		t.Fatalf("remaining sets=%+v err=%v", sets, err)
 	}
 }
 
@@ -186,6 +171,18 @@ func TestDownloadSubscriptionAcceptsHTTPSource(t *testing.T) {
 	body, sourceURL, err := downloadSubscription(context.Background(), server.URL)
 	if err != nil || string(body) != "example.test\n" || sourceURL != server.URL {
 		t.Fatalf("body=%q source_url=%q err=%v", body, sourceURL, err)
+	}
+}
+
+func TestReserveRuleIDsAllocatesContiguousRange(t *testing.T) {
+	service, _ := testService(t)
+	ids, err := service.reserveRuleIDs(context.Background(), 3)
+	if err != nil || len(ids) != 3 || ids[0] != 1 || ids[1] != 2 || ids[2] != 3 {
+		t.Fatalf("ids=%v err=%v", ids, err)
+	}
+	ids, err = service.reserveRuleIDs(context.Background(), 2)
+	if err != nil || ids[0] != 4 || ids[1] != 5 {
+		t.Fatalf("ids=%v err=%v", ids, err)
 	}
 }
 func TestDeleteLastRulePublishesEmptySnapshot(t *testing.T) {
