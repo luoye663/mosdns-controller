@@ -1,0 +1,26 @@
+# controller 配置模板。由 deploy/render-controller-config.sh 按运行 profile 渲染。
+server:
+  # 管理 WebUI/API 与仅供 mosdns ingest 使用的内部监听地址。
+  public_listen: "${CONTROLLER_PUBLIC_LISTEN}"
+  internal_listen: "${CONTROLLER_INTERNAL_LISTEN}"
+  # 仅在反向代理部署时填写可信代理 CIDR。
+  trusted_proxies: []
+
+storage:
+  # SQLite 数据库位置；父目录必须可由 controller 服务用户写入。
+  path: "${CONTROLLER_DB_PATH}"
+
+mosdns:
+  # mosdns 内部插件 API 地址及共享 Bearer token 文件。
+  base_url: "${CONTROLLER_MOSDNS_BASE_URL}"
+  token_file: "${CONTROLLER_MOSDNS_TOKEN_FILE}"
+
+web:
+  # HTTPS 反向代理或 TLS 直连时应设为 true。
+  secure_cookie: ${CONTROLLER_SECURE_COOKIE}
+  session_ttl: "24h"
+
+http:
+  # 公共 API 的请求体与处理超时上限。
+  max_body_bytes: 67108864
+  timeout: "30s"

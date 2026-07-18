@@ -26,3 +26,5 @@ deploy/binary/*.tar.gz
 deploy/mosdns/config.yaml
 deploy/mosdns/config.integration.yaml
 deploy/local/mosdns.yaml
+deploy/controller/config.yaml
+deploy/local/controller.yaml

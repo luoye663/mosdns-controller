@@ -219,7 +219,7 @@ go -C mosdns test -v ./tests/integration
 
 - 生产 Compose：`deploy/docker-compose.yml`。
 - mosdns 配置模板：`deploy/mosdns/config.yaml.tmpl`；运行配置由 `make configs` 生成。
-- controller 配置：`deploy/controller/config.yaml`。
+- controller 配置模板：`deploy/controller/config.yaml.tmpl`；运行配置由 `make configs` 生成。
 - 持久化数据：Compose 命名卷 `mosdns-state`（快照和缓存）与 `controller-state`（SQLite）。
 - 密钥目录：`deploy/secrets/`，只保留 `.gitkeep`，实际 token 被 Git 忽略。
 - 运维、备份恢复、升级与故障诊断分别见 [operations](docs/operations.md)、[recovery](docs/recovery.md)、[upgrade](docs/upgrade.md) 与 [troubleshooting](docs/troubleshooting.md)。
