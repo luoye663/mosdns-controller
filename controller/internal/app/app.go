@@ -65,6 +65,7 @@ func (a *App) PublicHandler() http.Handler {
 		api.Group(func(protected chi.Router) {
 			protected.Use(a.requireSession)
 			protected.Get("/auth/me", a.me)
+			protected.Get("/auth/csrf", a.refreshCSRF)
 			protected.Post("/auth/logout", a.requireCSRF(a.logout))
 			protected.Post("/auth/change-password", a.requireCSRF(a.changePassword))
 			protected.Get("/rules", a.listRules)
@@ -195,6 +196,15 @@ func (a *App) bootstrap(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) me(w http.ResponseWriter, r *http.Request) {
 	writeData(w, r, http.StatusOK, r.Context().Value(adminKey).(auth.Admin))
+}
+func (a *App) refreshCSRF(w http.ResponseWriter, r *http.Request) {
+	csrf, err := a.auth.RefreshCSRF(r.Context(), sessionToken(r))
+	if err != nil {
+		writeError(w, r, http.StatusUnauthorized, "AUTH_REQUIRED", "authentication required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, r, http.StatusOK, map[string]string{"csrf_token": csrf})
 }
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	_ = a.auth.Logout(r.Context(), sessionToken(r))

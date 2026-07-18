@@ -9,6 +9,7 @@ export const useAuthStore = defineStore('auth', {
       try {
         this.username = (await api.me()).username
         this.setupRequired = false
+        await api.csrf()
       } catch {
         this.username = ''
         try { this.setupRequired = (await api.bootstrapStatus()).required }

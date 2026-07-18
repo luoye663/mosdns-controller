@@ -21,8 +21,16 @@ export interface SystemStatus { controller: Record<string, string>; database: { 
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
 export function setCSRF(token: string) { csrfToken = token; sessionStorage.setItem('mosdns_csrf', token) }
 export function clearCSRF() { csrfToken = ''; sessionStorage.removeItem('mosdns_csrf') }
+let csrfRefresh: Promise<void> | undefined
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export function refreshCSRF() {
+  if (!csrfRefresh) {
+    csrfRefresh = request<{ csrf_token: string }>('/auth/csrf').then((result) => setCSRF(result.csrf_token)).finally(() => { csrfRefresh = undefined })
+  }
+  return csrfRefresh
+}
+
+async function request<T>(path: string, init: RequestInit = {}, retryCSRF = true): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
   if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
@@ -33,6 +41,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const error = new Error(body.error?.message ?? '请求失败') as ApiError
     error.code = body.error?.code
     error.status = response.status
+    if (retryCSRF && response.status === 403 && error.code === 'FORBIDDEN' && !['GET', 'HEAD'].includes(init.method ?? 'GET')) {
+      await refreshCSRF()
+      return request<T>(path, init, false)
+    }
     throw error
   }
   return body.data as T
@@ -43,6 +55,7 @@ export const api = {
   bootstrapStatus: () => request<{ required: boolean }>('/auth/bootstrap'),
   bootstrap: (username: string, password: string) => request<{ csrf_token: string }>('/auth/bootstrap', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request<{ id: number; username: string }>('/auth/me'),
+  csrf: () => refreshCSRF(),
   logout: () => request<{ logged_out: boolean }>('/auth/logout', { method: 'POST' }),
   changePassword: (currentPassword: string, newPassword: string) => request<{ changed: boolean }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
   summary: () => request<DashboardSummary>('/stats/summary'),

@@ -82,7 +82,31 @@ func TestLoginSessionAndCSRF(t *testing.T) {
 	if logoutRec.Code != http.StatusForbidden {
 		t.Fatalf("logout without csrf=%d", logoutRec.Code)
 	}
+	refresh := httptest.NewRequest(http.MethodGet, "/api/v1/auth/csrf", nil)
+	refresh.AddCookie(cookie)
+	refreshRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(refreshRec, refresh)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh csrf=%d: %s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshResponse struct {
+		Data struct {
+			CSRFToken string `json:"csrf_token"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResponse); err != nil {
+		t.Fatal(err)
+	}
+	if refreshResponse.Data.CSRFToken == "" || refreshResponse.Data.CSRFToken == response.Data.CSRFToken {
+		t.Fatal("csrf refresh did not issue a new token")
+	}
 	logout.Header.Set("X-CSRF-Token", response.Data.CSRFToken)
+	logoutRec = httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(logoutRec, logout)
+	if logoutRec.Code != http.StatusForbidden {
+		t.Fatalf("logout with replaced csrf=%d", logoutRec.Code)
+	}
+	logout.Header.Set("X-CSRF-Token", refreshResponse.Data.CSRFToken)
 	logoutRec = httptest.NewRecorder()
 	application.PublicHandler().ServeHTTP(logoutRec, logout)
 	if logoutRec.Code != http.StatusOK {

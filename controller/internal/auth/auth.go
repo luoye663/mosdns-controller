@@ -142,6 +142,24 @@ func (s *Service) VerifyCSRF(ctx context.Context, token, csrf string) bool {
 	got := digest(csrf)
 	return subtle.ConstantTimeCompare(expected, got) == 1
 }
+func (s *Service) RefreshCSRF(ctx context.Context, token string) (string, error) {
+	csrf, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	result, err := s.store.DB().ExecContext(ctx, `UPDATE sessions SET csrf_hash=? WHERE token_hash=? AND expires_at_ms>?`, digest(csrf), digest(token), time.Now().UnixMilli())
+	if err != nil {
+		return "", err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if updated != 1 {
+		return "", errors.New("session expired")
+	}
+	return csrf, nil
+}
 func (s *Service) Logout(ctx context.Context, token string) error {
 	_, err := s.store.DB().ExecContext(ctx, `DELETE FROM sessions WHERE token_hash=?`, digest(token))
 	return err
