@@ -128,6 +128,31 @@ func TestPublishAndRouteCacheFlush(t *testing.T) {
 		t.Fatalf("rules=%v err=%v", listed, err)
 	}
 }
+func TestDeleteLastRulePublishesEmptySnapshot(t *testing.T) {
+	service, fake := testService(t)
+	created, err := service.Create(context.Background(), blockRule("only.example"), 1, "r1", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := service.Delete(context.Background(), 1, 1, "r2", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Status != statusActive || deleted.Version <= created.Version || deleted.RuleCount != 0 {
+		t.Fatalf("delete version=%+v, created=%+v", deleted, created)
+	}
+	if len(fake.current.Rules) != 0 {
+		t.Fatalf("runtime rules=%+v, want empty snapshot", fake.current.Rules)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("rules=%+v, want no rules", listed)
+	}
+}
 func TestUnknownApplyIsReconciled(t *testing.T) {
 	service, fake := testService(t)
 	fake.unknown = true
