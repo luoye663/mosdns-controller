@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { NAlert, NButton, NDatePicker, NInput, NModal, NSelect, NSwitch } from 'naive-ui'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { NAlert, NButton, NDatePicker, NInput, NModal, NSelect, NSwitch, NTooltip } from 'naive-ui'
 import { api, eventStream, type QueryEvent, type QueryParams, type Rule } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
 import { notify } from '@/lib/notify'
@@ -26,8 +26,14 @@ const answerIPs = ref<string[] | null>(null)
 const answerIPsError = ref('')
 const ruleAction = ref('block')
 const range = ref<[number, number] | null>(null)
+const tableScroller = ref<HTMLElement | null>(null)
+const topScroller = ref<HTMLElement | null>(null)
+const topScrollContent = ref<HTMLElement | null>(null)
+const queriesTable = ref<HTMLTableElement | null>(null)
+const hasHorizontalScroll = ref(false)
 const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qtype: '', rcode: '', route: '', route_source: '', upstream_tag: '', protocol: '', cache_hit: '', has_error: '' })
 let stream: EventSource | undefined
+let tableResizeObserver: ResizeObserver | undefined
 
 const routeOptions = [{ label: '全部路由', value: '' }, { label: '本地', value: 'local' }, { label: '远程', value: 'remote' }, { label: '拦截', value: 'block' }]
 const booleanOptions = [{ label: '不限', value: '' }, { label: '是', value: 'true' }, { label: '否', value: 'false' }]
@@ -69,6 +75,15 @@ function routeSourceLabel(row: QueryEvent) {
 }
 function errorText(row: QueryEvent) { return row.error_text || row.error_code || (row.rcode !== 0 ? rcodeLabel(row.rcode) : '') }
 function hasError(row: QueryEvent) { return Boolean(row.error_code || row.error_text || row.rcode !== 0) }
+function updateTopScrollbar() {
+  const scroller = tableScroller.value
+  const content = topScrollContent.value
+  if (!scroller || !content) return
+  hasHorizontalScroll.value = scroller.scrollWidth > scroller.clientWidth
+  content.style.width = `${scroller.scrollWidth}px`
+}
+function syncTableScroll() { if (tableScroller.value && topScroller.value) tableScroller.value.scrollLeft = topScroller.value.scrollLeft }
+function syncTopScroll() { if (tableScroller.value && topScroller.value) topScroller.value.scrollLeft = tableScroller.value.scrollLeft }
 function closeStream() { stream?.close(); stream = undefined; streamState.value = '已断开' }
 function insertLive(event: QueryEvent) { if (rows.value.some((row) => row.event_id === event.event_id)) return; rows.value = [event, ...rows.value].slice(0, 300) }
 function startStream() {
@@ -145,8 +160,13 @@ async function openDiagnostics(row: QueryEvent) {
 }
 onMounted(async () => {
   await Promise.all([load(), loadRuleLabels().catch(() => {})])
+  await nextTick()
+  updateTopScrollbar()
+  tableResizeObserver = new ResizeObserver(updateTopScrollbar)
+  if (tableScroller.value) tableResizeObserver.observe(tableScroller.value)
+  if (queriesTable.value) tableResizeObserver.observe(queriesTable.value)
 })
-onBeforeUnmount(closeStream)
+onBeforeUnmount(() => { closeStream(); tableResizeObserver?.disconnect() })
 </script>
 
 <template>
@@ -168,8 +188,9 @@ onBeforeUnmount(closeStream)
       <NButton type="primary" :loading="loading" @click="applyFilters">筛选</NButton>
     </div>
     <div class="inline-controls query-presets"><NSelect v-model:value="selectedSaved" :options="savedFilters.map((item) => ({ label: item.label, value: item.label }))" placeholder="保存的筛选" clearable @update:value="applySaved" /><NButton @click="saveFilter">保存筛选</NButton><NButton :disabled="!selectedSaved" @click="removeSaved">删除</NButton><span v-if="paused && pending.length" class="muted">已暂停 {{ pending.length }} 条新查询</span></div>
-    <div class="table-wrap queries-table-wrap"><table><thead><tr><th>时间</th><th>客户端</th><th>域名 / 类型</th><th>结果</th><th>路由</th><th>缓存</th><th>TTL</th><th>延迟</th><th>规则 / 版本</th><th>诊断</th><th></th></tr></thead><tbody>
-      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td :title="row.client_ip">{{ formatClient(row) }}</td><td><div class="mono">{{ row.qname }}</div><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td><span class="cache-status" :class="row.cache_hit ? 'hit' : 'miss'">{{ row.cache_hit ? '命中' : '未命中' }}</span></td><td>{{ formatTTL(row.answer_min_ttl_seconds) }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div>访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)"><div v-if="hasError(row)">{{ errorText(row) }}</div><div v-if="row.answer_count"><NButton size="tiny" text @click="openDiagnostics(row)">{{ row.answer_count }} 条应答</NButton></div></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
+    <div v-show="hasHorizontalScroll" ref="topScroller" class="queries-top-scrollbar" aria-label="查询表格横向滚动" @scroll="syncTableScroll"><div ref="topScrollContent"></div></div>
+    <div ref="tableScroller" class="table-wrap queries-table-wrap" @scroll="syncTopScroll"><table ref="queriesTable"><colgroup><col class="query-time-column"><col class="query-client-column"><col class="query-domain-column"><col class="query-result-column"><col class="query-route-column"><col class="query-cache-column"><col class="query-ttl-column"><col class="query-latency-column"><col class="query-rules-column"><col class="query-diagnostics-column"><col class="query-actions-column"></colgroup><thead><tr><th>时间</th><th>客户端</th><th>域名 / 类型</th><th>结果</th><th>路由</th><th>缓存</th><th>TTL</th><th>延迟</th><th>规则 / 版本</th><th>诊断</th><th></th></tr></thead><tbody>
+      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td><NTooltip :delay="300"><template #trigger><div class="query-cell-text">{{ formatClient(row) }}</div></template>{{ formatClient(row) }}</NTooltip></td><td><NTooltip :delay="300"><template #trigger><div class="query-cell-text mono">{{ row.qname }}</div></template>{{ row.qname }}</NTooltip><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td><span class="cache-status" :class="row.cache_hit ? 'hit' : 'miss'">{{ row.cache_hit ? '命中' : '未命中' }}</span></td><td>{{ formatTTL(row.answer_min_ttl_seconds) }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div class="query-cell-text">访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)"><div v-if="hasError(row)" class="query-cell-text">{{ errorText(row) }}</div><div v-if="row.answer_count"><NButton size="tiny" text @click="openDiagnostics(row)">{{ row.answer_count }} 条应答</NButton></div></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
       <tr v-if="!loading && !rows.length"><td colspan="11" class="empty-cell">暂无查询日志</td></tr>
     </tbody></table></div>
     <footer class="table-footer"><span>已显示 {{ rows.length }} 条；查询使用 cursor 分页</span><NButton v-if="cursor" :loading="loading" @click="load(cursor)">加载下一页</NButton></footer>
