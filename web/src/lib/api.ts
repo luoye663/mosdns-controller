@@ -12,7 +12,8 @@ export interface Upstream { tag: string; addr: string; priority: number; weight:
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
 export interface ECSSnapshot { version: number; expected_current_version: number; mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }
 export interface Settings { cache_enabled: boolean; cache_ttl: number; query_retention_days: number }
-export interface GeositeStatus { source_url: string; version: number; checksum: string; rule_count: number; loaded_at: string }
+export interface RuleSubscription { id: number; category: string; action: string; kind: 'url' | 'upload'; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean; rule_count: number; last_checked_at_ms: number; last_success_at_ms: number; last_error: string; created_at_ms: number; updated_at_ms: number }
+export interface RuleSubscriptionInput { category: string; action: string; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean }
 export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; cache_hit_count: number }
 export interface LatencyPoint { hour_start_ms: number; query_count: number; average_latency_us: number; max_latency_us: number }
 export interface SystemStatus { controller: Record<string, string>; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string }; mosdns_error?: string; audit?: { queue_depth: number; queue_capacity: number; dropped_events: number }; audit_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }
@@ -70,6 +71,12 @@ export const api = {
   previewRuleImport: (rules: RuleInput[]) => request<{ rules: RuleInput[]; count: number }>('/rules/import/preview', { method: 'POST', body: JSON.stringify({ rules }) }),
   importRules: (rules: RuleInput[]) => request<Version>('/rules/import/apply', { method: 'POST', body: JSON.stringify({ rules }) }),
   ruleTest: (qname: string) => request<unknown>('/rules/test', { method: 'POST', body: JSON.stringify({ qname }) }),
+  ruleSubscriptions: (category?: string, action?: string) => request<{ items: RuleSubscription[] }>(`/rule-subscriptions?${new URLSearchParams(Object.entries({ category, action }).filter(([, value]) => value) as Array<[string, string]>).toString()}`),
+  createRuleSubscription: (input: RuleSubscriptionInput) => request<{ subscription: RuleSubscription; version: Version }>('/rule-subscriptions', { method: 'POST', body: JSON.stringify(input) }),
+  uploadRuleSubscription: (input: Omit<RuleSubscriptionInput, 'source_url'>, file: File) => { const body = new FormData(); body.append('category', input.category); body.append('action', input.action); body.append('name', input.name); body.append('refresh_interval_seconds', String(input.refresh_interval_seconds)); body.append('enabled', String(input.enabled)); body.append('file', file); return request<{ subscription: RuleSubscription; version: Version }>('/rule-subscriptions/upload', { method: 'POST', body }) },
+  updateRuleSubscription: (id: number, enabled: boolean) => request<{ subscription: RuleSubscription; version: Version }>(`/rule-subscriptions/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  refreshRuleSubscription: (id: number) => request<{ subscription: RuleSubscription; version?: Version }>(`/rule-subscriptions/${id}/refresh`, { method: 'POST', body: '{}' }),
+  deleteRuleSubscription: (id: number) => request<Version>(`/rule-subscriptions/${id}`, { method: 'DELETE' }),
   versions: () => request<{ items: Version[] }>('/rule-versions'),
   rollback: (version: number) => request<Version>(`/rule-versions/${version}/rollback`, { method: 'POST', body: '{}' }),
   reconcile: () => request<{ state: string }>('/rule-versions/reconcile', { method: 'POST', body: '{}' }),
@@ -82,9 +89,6 @@ export const api = {
   updateECS: (group: 'local_dns' | 'remote_dns', snapshot: ECSSnapshot) => request<ECSSnapshot>(`/upstreams/${group}/ecs`, { method: 'PUT', body: JSON.stringify(snapshot) }),
   settings: () => request<Settings>('/settings'),
   updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
-  geositeStatus: () => request<GeositeStatus>('/geosite'),
-  updateGeosite: (sourceURL: string) => request<GeositeStatus>('/geosite', { method: 'PUT', body: JSON.stringify({ source_url: sourceURL }) }),
-  uploadGeosite: (file: File) => { const body = new FormData(); body.append('file', file); return request<GeositeStatus>('/geosite/upload', { method: 'POST', body }) },
   auditLogs: () => request<{ items: AuditLog[] }>('/audit-logs'),
 }
 

@@ -2,6 +2,8 @@ package rules
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -55,12 +57,6 @@ func (f *fakeMosdns) ECSStatus(context.Context, string) (mosdnsclient.ECSSnapsho
 }
 func (f *fakeMosdns) ApplyECS(context.Context, string, mosdnsclient.ECSSnapshot) (mosdnsclient.ECSSnapshot, error) {
 	return mosdnsclient.ECSSnapshot{}, nil
-}
-func (f *fakeMosdns) GeositeStatus(context.Context) (mosdnsclient.DomainSetStatus, error) {
-	return mosdnsclient.DomainSetStatus{}, nil
-}
-func (f *fakeMosdns) ApplyGeosite(context.Context, mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
-	return mosdnsclient.DomainSetStatus{}, nil
 }
 func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
 	return mosdnsclient.AuditStatus{}, nil
@@ -126,6 +122,70 @@ func TestPublishAndRouteCacheFlush(t *testing.T) {
 	listed, err := service.List(context.Background())
 	if err != nil || len(listed) != 2 {
 		t.Fatalf("rules=%v err=%v", listed, err)
+	}
+}
+
+func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
+	service, fake := testService(t)
+	input := SubscriptionInput{Category: "route", Action: "local", Name: "domestic.txt", RefreshIntervalSeconds: 86400, Enabled: true}
+	source, published, err := service.CreateUploadSubscription(context.Background(), input, "domestic.txt", []byte("# comment\nExample.CN.\napi.example.cn\nexample.cn\n"), 1, "sub-create", "127.0.0.1")
+	if err != nil || source.RuleCount != 2 || published.Version != 1 {
+		t.Fatalf("source=%+v version=%+v err=%v", source, published, err)
+	}
+	if len(fake.current.Rules) != 2 || fake.current.Rules[0].Action != "local" || len(fake.flushes) != 2 {
+		t.Fatalf("snapshot=%+v flushes=%v", fake.current, fake.flushes)
+	}
+	manual, err := service.List(context.Background())
+	if err != nil || len(manual) != 0 {
+		t.Fatalf("subscription rules leaked into manual list: %+v err=%v", manual, err)
+	}
+	updated, version, err := service.SetSubscriptionEnabled(context.Background(), source.ID, false, 1, "sub-disable", "127.0.0.1")
+	if err != nil || updated.Enabled || version.Version != 2 || len(fake.current.Rules) != 0 {
+		t.Fatalf("updated=%+v version=%+v snapshot=%+v err=%v", updated, version, fake.current, err)
+	}
+}
+
+func TestDeleteSubscriptionRemovesOnlyItsRules(t *testing.T) {
+	service, _ := testService(t)
+	input := SubscriptionInput{Category: "access", Action: "block", Name: "one.txt", RefreshIntervalSeconds: 86400, Enabled: true}
+	first, _, err := service.CreateUploadSubscription(context.Background(), input, "one.txt", []byte("one.example\n"), 1, "sub-one", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Name = "two.txt"
+	if _, _, err = service.CreateUploadSubscription(context.Background(), input, "two.txt", []byte("two.example\n"), 1, "sub-two", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.DeleteSubscription(context.Background(), first.ID, 1, "sub-delete", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	all, err := service.allRules(context.Background())
+	if err != nil || len(all) != 1 || all[0].Pattern != "two.example" {
+		t.Fatalf("remaining rules=%+v err=%v", all, err)
+	}
+}
+
+func TestSubscriptionRulesRejectGenericMutation(t *testing.T) {
+	service, _ := testService(t)
+	input := SubscriptionInput{Category: "access", Action: "block", Name: "source.txt", RefreshIntervalSeconds: 86400, Enabled: true}
+	if _, _, err := service.CreateUploadSubscription(context.Background(), input, "source.txt", []byte("blocked.example\n"), 1, "sub", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	all, err := service.allRules(context.Background())
+	if err != nil || len(all) != 1 {
+		t.Fatalf("rules=%+v err=%v", all, err)
+	}
+	if _, err := service.Delete(context.Background(), all[0].ID, 1, "delete", "127.0.0.1"); err == nil {
+		t.Fatal("generic delete accepted a subscription rule")
+	}
+}
+
+func TestDownloadSubscriptionAcceptsHTTPSource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("example.test\n")) }))
+	defer server.Close()
+	body, sourceURL, err := downloadSubscription(context.Background(), server.URL)
+	if err != nil || string(body) != "example.test\n" || sourceURL != server.URL {
+		t.Fatalf("body=%q source_url=%q err=%v", body, sourceURL, err)
 	}
 }
 func TestDeleteLastRulePublishesEmptySnapshot(t *testing.T) {

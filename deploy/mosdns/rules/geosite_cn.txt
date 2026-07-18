@@ -1,2 +1,0 @@
-# 首次启动的本地回退集合；订阅成功后由 controller 原子发布运行时快照。
-# 规则必须是 mosdns domain_set 兼容的纯文本，例如：domain:example.cn

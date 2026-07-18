@@ -59,7 +59,11 @@ func New(store *storage.Store, client mosdnsclient.Client) *Service {
 	return &Service{store: store, mosdns: client}
 }
 func (s *Service) List(ctx context.Context) ([]Rule, error) {
-	rows, err := s.store.DB().QueryContext(ctx, `SELECT id,category,action,match_type,pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms FROM domain_rules ORDER BY category,match_type,normalized_pattern,priority DESC,id`)
+	return s.list(ctx, ` WHERE source NOT LIKE 'subscription:%'`)
+}
+func (s *Service) allRules(ctx context.Context) ([]Rule, error) { return s.list(ctx, "") }
+func (s *Service) list(ctx context.Context, filter string) ([]Rule, error) {
+	rows, err := s.store.DB().QueryContext(ctx, `SELECT id,category,action,match_type,pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms FROM domain_rules`+filter+` ORDER BY category,match_type,normalized_pattern,priority DESC,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +82,10 @@ func (s *Service) List(ctx context.Context) ([]Rule, error) {
 func (s *Service) Create(ctx context.Context, r Rule, adminID int64, requestID, ip string) (Version, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rules, err := s.List(ctx)
+	if isSubscriptionRule(r) {
+		return Version{}, errors.New("subscription rules must be managed through their source")
+	}
+	rules, err := s.allRules(ctx)
 	if err != nil {
 		return Version{}, err
 	}
@@ -98,13 +105,16 @@ func (s *Service) Create(ctx context.Context, r Rule, adminID int64, requestID, 
 func (s *Service) Update(ctx context.Context, id int64, patch Rule, adminID int64, requestID, ip string) (Version, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rules, err := s.List(ctx)
+	rules, err := s.allRules(ctx)
 	if err != nil {
 		return Version{}, err
 	}
 	found := false
 	for i := range rules {
 		if rules[i].ID == id {
+			if isSubscriptionRule(rules[i]) {
+				return Version{}, errors.New("subscription rules must be managed through their source")
+			}
 			patch.ID = id
 			patch.CreatedAtMS = rules[i].CreatedAtMS
 			patch.UpdatedAtMS = time.Now().UnixMilli()
@@ -123,7 +133,7 @@ func (s *Service) Update(ctx context.Context, id int64, patch Rule, adminID int6
 func (s *Service) Delete(ctx context.Context, id int64, adminID int64, requestID, ip string) (Version, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rules, err := s.List(ctx)
+	rules, err := s.allRules(ctx)
 	if err != nil {
 		return Version{}, err
 	}
@@ -131,6 +141,9 @@ func (s *Service) Delete(ctx context.Context, id int64, adminID int64, requestID
 	found := false
 	for _, r := range rules {
 		if r.ID == id {
+			if isSubscriptionRule(r) {
+				return Version{}, errors.New("subscription rules must be managed through their source")
+			}
 			found = true
 			continue
 		}
@@ -192,7 +205,7 @@ func (s *Service) Batch(ctx context.Context, operation string, ids []int64, admi
 	if len(ids) == 0 {
 		return Version{}, errors.New("ids must not be empty")
 	}
-	rules, err := s.List(ctx)
+	rules, err := s.allRules(ctx)
 	if err != nil {
 		return Version{}, err
 	}
@@ -206,6 +219,9 @@ func (s *Service) Batch(ctx context.Context, operation string, ids []int64, admi
 		if !selected[r.ID] {
 			out = append(out, r)
 			continue
+		}
+		if isSubscriptionRule(r) {
+			return Version{}, errors.New("subscription rules must be managed through their source")
 		}
 		found++
 		switch operation {
@@ -228,11 +244,14 @@ func (s *Service) Batch(ctx context.Context, operation string, ids []int64, admi
 func (s *Service) Import(ctx context.Context, incoming []Rule, adminID int64, requestID, ip string) (Version, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, err := s.List(ctx)
+	current, err := s.allRules(ctx)
 	if err != nil {
 		return Version{}, err
 	}
 	for i := range incoming {
+		if isSubscriptionRule(incoming[i]) {
+			return Version{}, errors.New("subscription rules must be managed through their source")
+		}
 		if incoming[i].ID == 0 {
 			id, err := s.nextRuleID(ctx)
 			if err != nil {
@@ -276,7 +295,7 @@ func (s *Service) Reconcile(ctx context.Context) (string, error) {
 	}
 	if runtime.SnapshotVersion < active {
 		// 运行时回退或丢失快照时，以 controller ACTIVE 内容创建新版本重发，版本绝不倒退。
-		current, err := s.List(ctx)
+		current, err := s.allRules(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -289,7 +308,7 @@ func (s *Service) Reconcile(ctx context.Context) (string, error) {
 	return "unchanged", nil
 }
 func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requestID, ip string, rollbackFrom uint64) (Version, error) {
-	existing, _ := s.List(ctx)
+	existing, _ := s.allRules(ctx)
 	routeChanged := routeFingerprint(existing) != routeFingerprint(rules)
 	if err := validateRules(rules); err != nil {
 		return Version{}, err
@@ -516,6 +535,7 @@ func routeFingerprint(rs []Rule) string {
 	sort.Strings(out)
 	return strings.Join(out, "|")
 }
+func isSubscriptionRule(r Rule) bool { return strings.HasPrefix(r.Source, "subscription:") }
 func validateRules(rules []Rule) error {
 	if len(rules) > 200000 {
 		return errors.New("rule limit exceeded")

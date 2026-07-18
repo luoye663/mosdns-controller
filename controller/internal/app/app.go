@@ -77,6 +77,12 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Post("/rules/import/apply", a.requireCSRF(a.importRules))
 			protected.Get("/rules/export", a.exportRules)
 			protected.Post("/rules/test", a.testRule)
+			protected.Get("/rule-subscriptions", a.listSubscriptions)
+			protected.Post("/rule-subscriptions", a.requireCSRF(a.createSubscription))
+			protected.Post("/rule-subscriptions/upload", a.requireCSRF(a.uploadSubscription))
+			protected.Patch("/rule-subscriptions/{id}", a.requireCSRF(a.updateSubscription))
+			protected.Post("/rule-subscriptions/{id}/refresh", a.requireCSRF(a.refreshSubscription))
+			protected.Delete("/rule-subscriptions/{id}", a.requireCSRF(a.deleteSubscription))
 			protected.Get("/rule-versions", a.listVersions)
 			protected.Get("/rule-versions/{version}", a.versionDetail)
 			protected.Post("/rule-versions/{version}/rollback", a.requireCSRF(a.rollback))
@@ -99,9 +105,6 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Put("/upstreams/{group}/ecs", a.requireCSRF(a.updateECS))
 			protected.Get("/settings", a.settings)
 			protected.Put("/settings", a.requireCSRF(a.updateSettings))
-			protected.Get("/geosite", a.geositeStatus)
-			protected.Put("/geosite", a.requireCSRF(a.updateGeosite))
-			protected.Post("/geosite/upload", a.requireCSRF(a.uploadGeosite))
 			protected.Get("/audit-logs", a.auditLogs)
 		})
 	})
@@ -119,6 +122,7 @@ func (a *App) InternalHandler() http.Handler {
 func (a *App) Close()                                        { a.ingest.Close() }
 func (a *App) Reconcile(ctx context.Context) (string, error) { return a.rules.Reconcile(ctx) }
 func (a *App) SyncSettings(ctx context.Context) error        { return a.ops.SyncSettings(ctx) }
+func (a *App) RefreshSubscriptions(ctx context.Context)      { a.rules.RefreshDue(ctx) }
 
 func (a *App) ready(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.DB().PingContext(r.Context()); err != nil {
@@ -659,52 +663,113 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeData(w, r, 200, settings)
 }
-func (a *App) geositeStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := a.ops.GeositeStatus(r.Context())
+func (a *App) listSubscriptions(w http.ResponseWriter, r *http.Request) {
+	items, err := a.rules.Subscriptions(r.Context(), r.URL.Query().Get("category"), r.URL.Query().Get("action"))
 	if err != nil {
-		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", "geosite status is unavailable")
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
 		return
 	}
-	writeData(w, r, 200, status)
+	writeData(w, r, 200, map[string]any{"items": items})
 }
-func (a *App) updateGeosite(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		SourceURL string `json:"source_url"`
-	}
+func (a *App) createSubscription(w http.ResponseWriter, r *http.Request) {
+	var input rules.SubscriptionInput
 	if !decodeJSON(w, r, &input) {
 		return
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
-	status, err := a.ops.UpdateGeosite(r.Context(), input.SourceURL, admin.ID, requestID(r), remoteIP(r))
+	item, published, err := a.rules.CreateURLSubscription(r.Context(), input, admin.ID, requestID(r), remoteIP(r))
 	if err != nil {
-		writeError(w, r, 400, "GEOSITE_UPDATE_FAILED", err.Error())
+		writeError(w, r, 400, "SUBSCRIPTION_CREATE_FAILED", err.Error())
 		return
 	}
-	writeData(w, r, 200, status)
+	writeData(w, r, 200, map[string]any{"subscription": item, "version": published})
 }
-func (a *App) uploadGeosite(w http.ResponseWriter, r *http.Request) {
+func (a *App) uploadSubscription(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(20 << 20); err != nil {
-		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid geosite upload")
+		writeError(w, r, 400, "VALIDATION_ERROR", "invalid subscription upload")
 		return
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "geosite file is required")
+		writeError(w, r, 400, "VALIDATION_ERROR", "subscription file is required")
 		return
 	}
 	defer file.Close()
 	content, err := io.ReadAll(io.LimitReader(file, (20<<20)+1))
 	if err != nil || len(content) > 20<<20 {
-		writeError(w, r, http.StatusRequestEntityTooLarge, "LIMIT_EXCEEDED", "geosite file exceeds 20 MiB")
+		writeError(w, r, 413, "LIMIT_EXCEEDED", "subscription file exceeds 20 MiB")
+		return
+	}
+	interval, err := strconv.Atoi(r.FormValue("refresh_interval_seconds"))
+	if err != nil && r.FormValue("refresh_interval_seconds") != "" {
+		writeError(w, r, 400, "VALIDATION_ERROR", "invalid refresh interval")
 		return
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
-	status, err := a.ops.UploadGeosite(r.Context(), content, header.Filename, admin.ID, requestID(r), remoteIP(r))
+	input := rules.SubscriptionInput{Category: r.FormValue("category"), Action: r.FormValue("action"), Name: r.FormValue("name"), RefreshIntervalSeconds: interval, Enabled: r.FormValue("enabled") != "false"}
+	item, published, err := a.rules.CreateUploadSubscription(r.Context(), input, header.Filename, content, admin.ID, requestID(r), remoteIP(r))
 	if err != nil {
-		writeError(w, r, 400, "GEOSITE_UPLOAD_FAILED", err.Error())
+		writeError(w, r, 400, "SUBSCRIPTION_UPLOAD_FAILED", err.Error())
 		return
 	}
-	writeData(w, r, 200, status)
+	writeData(w, r, 200, map[string]any{"subscription": item, "version": published})
+}
+func (a *App) updateSubscription(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var input struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	item, published, err := a.rules.SetSubscriptionEnabled(r.Context(), id, input.Enabled, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "SUBSCRIPTION_UPDATE_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, 200, map[string]any{"subscription": item, "version": published})
+}
+func (a *App) refreshSubscription(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	item, published, err := a.rules.RefreshSubscription(r.Context(), id, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "SUBSCRIPTION_REFRESH_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, 200, map[string]any{"subscription": item, "version": published})
+}
+func (a *App) deleteSubscription(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	published, err := a.rules.DeleteSubscription(r.Context(), id, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "SUBSCRIPTION_DELETE_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, 200, published)
 }
 func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -863,10 +928,9 @@ func chineseErrorMessage(code, message string) string {
 		"upstream configuration changed; refresh and retry":                                                     "上游配置已变更，请刷新后重试",
 		"ECS configuration changed; refresh and retry":                                                          "ECS 配置已变更，请刷新后重试",
 		"read settings failed":                                   "读取设置失败",
-		"geosite status is unavailable":                          "GeoSite 状态不可用",
-		"invalid geosite upload":                                 "GeoSite 上传请求无效",
-		"geosite file is required":                               "必须提供 GeoSite 文件",
-		"geosite file exceeds 20 MiB":                            "GeoSite 文件超过 20 MiB 限制",
+		"invalid subscription upload":                            "订阅上传请求无效",
+		"subscription file is required":                          "必须提供订阅文件",
+		"subscription file exceeds 20 MiB":                       "订阅文件超过 20 MiB 限制",
 		"invalid limit":                                          "limit 参数无效",
 		"list audit logs failed":                                 "读取审计日志失败",
 		"rule or version not found":                              "规则或规则版本不存在",
@@ -895,10 +959,9 @@ func chineseErrorMessage(code, message string) string {
 		"query retention days must be within 1..365":             "查询保留天数必须在 1 到 365 之间",
 		"cache TTL must be within 0..604800":                     "缓存 TTL 必须在 0 到 604800 之间",
 		"invalid upstream group":                                 "上游组无效",
-		"geosite source_url must be an HTTPS URL":                "GeoSite source_url 必须是 HTTPS URL",
-		"redirect must use HTTPS":                                "重定向必须使用 HTTPS",
-		"geosite file must contain 1..20971520 bytes":            "GeoSite 文件大小必须在 1 到 20971520 字节之间",
-		"geosite upload must be a .txt file":                     "GeoSite 上传文件必须是 .txt 文件",
+		"subscription source_url must be an HTTP(S) URL":         "订阅地址必须是 HTTP 或 HTTPS URL",
+		"subscription file must contain 1..20971520 bytes":       "订阅文件大小必须在 1 到 20971520 字节之间",
+		"subscription upload must be a .txt file":                "订阅上传文件必须是 .txt 文件",
 		"invalid event batch":                                    "查询事件批次无效",
 		"invalid event":                                          "查询事件无效",
 		"invalid event fields":                                   "查询事件字段无效",
@@ -935,10 +998,8 @@ func chineseErrorMessage(code, message string) string {
 		return "mosdns 服务不可用"
 	case "SETTINGS_APPLY_FAILED":
 		return "设置应用失败"
-	case "GEOSITE_UPDATE_FAILED":
-		return "GeoSite 更新失败"
-	case "GEOSITE_UPLOAD_FAILED":
-		return "GeoSite 上传失败"
+	case "SUBSCRIPTION_CREATE_FAILED", "SUBSCRIPTION_UPLOAD_FAILED", "SUBSCRIPTION_UPDATE_FAILED", "SUBSCRIPTION_REFRESH_FAILED", "SUBSCRIPTION_DELETE_FAILED":
+		return "订阅源操作失败"
 	default:
 		return "请求处理失败"
 	}

@@ -224,7 +224,7 @@ func validateEvent(e Event) error {
 	if e.QType == 0 || e.QClass == 0 || e.RCode < 0 || e.RCode > 23 || e.LatencyUS < 0 || e.AnswerCount < 0 || (e.AnswerMinTTLSeconds != nil && (*e.AnswerMinTTLSeconds < 0 || *e.AnswerMinTTLSeconds > 1<<32-1)) || e.Snapshot > uint64(^uint64(0)>>1) {
 		return errors.New("invalid event values")
 	}
-	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "local" && e.Route != "remote" && e.Route != "block") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule" && e.RouteSource != "geosite") {
+	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "local" && e.Route != "remote" && e.Route != "block") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule") {
 		return errors.New("invalid event route")
 	}
 	for _, field := range []struct {

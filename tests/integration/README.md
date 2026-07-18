@@ -30,4 +30,4 @@ docker compose -f deploy/docker-compose.integration.yml --profile integration up
 
 该 profile 仅发布 `5353/tcp` 与 `5353/udp`，不会占用生产 DNS 端口。镜像拉取若需代理，可设置 `ALL_PROXY=socks5://192.168.18.35:10808` 后执行命令。
 
-Compose 只映射 `53/tcp`、`53/udp` 和 controller `8080/tcp`。运行前必须在 `deploy/secrets/mosdns_control_token` 写入随机共享 token，并在 `deploy/mosdns/rules/geosite_cn.txt` 导入静态国内域名规则；不得提交这两个运行时数据文件。
+Compose 只映射 `53/tcp`、`53/udp` 和 controller `8080/tcp`。运行前必须在 `deploy/secrets/mosdns_control_token` 写入随机共享 token；不得提交该运行时 secret。

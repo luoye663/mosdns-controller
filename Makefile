@@ -108,7 +108,6 @@ binary-package: web-embed
 	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C controller build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/controller ./cmd/controller
 	bash deploy/render-mosdns-config.sh binary $(BINARY_PACKAGE_DIR)/etc/mosdns/config.yaml
 	bash deploy/render-controller-config.sh binary $(BINARY_PACKAGE_DIR)/etc/controller/config.yaml
-	install -m 0640 deploy/mosdns/rules/geosite_cn.txt $(BINARY_PACKAGE_DIR)/etc/mosdns/rules/geosite_cn.txt
 	install -m 0644 $(BINARY_DEPLOY_DIR)/mosdns.service $(BINARY_PACKAGE_DIR)/systemd/mosdns.service
 	install -m 0644 $(BINARY_DEPLOY_DIR)/mosdns-controller.service $(BINARY_PACKAGE_DIR)/systemd/mosdns-controller.service
 	install -m 0755 $(BINARY_DEPLOY_DIR)/install.sh $(BINARY_PACKAGE_DIR)/install.sh

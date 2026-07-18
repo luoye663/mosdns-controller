@@ -124,6 +124,7 @@ func serve(cfg config.Config, store *storage.Store, client mosdnsclient.Client, 
 	go serveHTTP(logger, "internal", internalServer, errCh)
 	shutdownSignal := signalContext()
 	go reconcilePeriodically(shutdownSignal, application, logger)
+	go refreshSubscriptionsPeriodically(shutdownSignal, application)
 	select {
 	case err := <-errCh:
 		logger.Error("controller stopped unexpectedly", "error", err)
@@ -145,6 +146,18 @@ func reconcilePeriodically(ctx context.Context, application *app.App, logger *sl
 			} else {
 				logger.Info("periodic reconcile completed", "state", state)
 			}
+		}
+	}
+}
+func refreshSubscriptionsPeriodically(ctx context.Context, application *app.App) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			application.RefreshSubscriptions(ctx)
 		}
 	}
 }

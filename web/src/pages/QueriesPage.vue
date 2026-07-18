@@ -70,7 +70,6 @@ function ruleLabel(rule: Rule) {
 }
 function routeSourceLabel(row: QueryEvent) {
   if (row.route_source === 'default') return '默认路由'
-  if (row.route_source === 'geosite') return '国内域名订阅'
   return ruleLabels.value[row.route_rule_id] ?? ruleLabels.value[row.access_rule_id] ?? '已删除规则'
 }
 function errorText(row: QueryEvent) { return row.error_text || row.error_code || (row.rcode !== 0 ? rcodeLabel(row.rcode) : '') }

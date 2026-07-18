@@ -20,7 +20,6 @@ services:
       - mosdns-state:/var/lib/mosdns
       - ./mosdns/config.yaml:/etc/mosdns/config.yaml:ro
 
-      - ./mosdns/rules:/etc/mosdns/rules:ro
     secrets:
       - mosdns_control_token
     networks:

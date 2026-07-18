@@ -9,17 +9,6 @@ api:
   http: "${MOSDNS_API_LISTEN}"
 
 plugins:
-  # 国内域名集合。内容由 controller 原子发布，DNS 请求路径只读取内存快照。
-  - tag: geosite_cn
-    type: dynamic_domain_set
-    args:
-      # 插件当前快照、上一个可恢复快照、首次导入的静态规则文件。
-      snapshot_file: "${MOSDNS_STATE_DIR}/geosite-cn.json"
-      backup_file: "${MOSDNS_STATE_DIR}/geosite-cn.json.bak"
-      initial_file: "${MOSDNS_RULES_DIR}/geosite_cn.txt"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      max_bytes: 20971520
-
   # 管理页面发布的 allow/block/local/remote/no_log 动态规则。
   - tag: dynamic_rules
     type: dynamic_rule_engine
@@ -59,7 +48,6 @@ plugins:
         route_local: 1101
         route_remote: 1102
         no_log: 1201
-        geosite_local: 1301
         cache_hit: 2101
 
   # local 与 remote 使用独立缓存，避免不同上游组的结果串用。
@@ -166,7 +154,7 @@ plugins:
       - exec: $remote_dns
       - exec: accept
 
-  # DNS 主入口：动态 block 必须先于任何 cache；规则路由优先于 geosite 默认路由。
+  # DNS 主入口：动态 block 必须先于任何 cache。
   - tag: main
     type: sequence
     args:
@@ -183,12 +171,6 @@ plugins:
       - matches:
           - mark 1102
         exec: goto route_remote
-      - matches:
-          - qname $geosite_cn
-        exec: mark 1301
-      - matches:
-          - qname $geosite_cn
-        exec: goto route_local
       - exec: goto route_remote
 
   # DNS UDP/TCP 监听地址；生产通常为 :53，集成测试使用 :5353。

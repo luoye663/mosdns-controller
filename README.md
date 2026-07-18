@@ -35,7 +35,7 @@ chmod 0444 deploy/secrets/mosdns_control_token
 
 mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。执行 `make configs` 会生成 Compose、本地和集成测试配置；`make binary-package` 会直接生成包内二进制配置。首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
 
-`deploy/mosdns/rules/geosite_cn.txt` 可导入静态国内域名规则；保留为空时，静态国内分类关闭，但 WebUI 的动态路由规则仍可用。
+国内、国外、白名单和黑名单域名集合均在“规则管理”的对应 tab 中作为订阅源或手工规则发布；URL 订阅可按源配置刷新间隔，TXT 上传会作为可独立启停和删除的本地源保存。
 
 ### 3. 构建并启动
 
@@ -121,11 +121,10 @@ make binary-copy BINARY_HOST=root@dns-host
 
 ```bash
 sudo ./install.sh
-sudoedit /etc/mosdns-manager/mosdns/config.yaml
 sudo systemctl start mosdns.service mosdns-controller.service
 ```
 
-安装脚本创建最小权限服务用户、运行数据目录和共享 token，并将 [mosdns.service](deploy/binary/mosdns.service) 与 [mosdns-controller.service](deploy/binary/mosdns-controller.service) 安装到 `/etc/systemd/system/`。先将 `<REMOTE_DOH_URL>` 替换为实际端点再启动；DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
+安装脚本创建最小权限服务用户、运行数据目录和共享 token，并将 [mosdns.service](deploy/binary/mosdns.service) 与 [mosdns-controller.service](deploy/binary/mosdns-controller.service) 安装到 `/etc/systemd/system/`。远程 DoH 默认使用 Cloudflare（`https://cloudflare-dns.com/dns-query`）；如需其他上游，可在启动前编辑 `/etc/mosdns-manager/mosdns/config.yaml`。DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
 
 首次启动后，访问 `http://<部署主机IP>:8080` 初始化管理员，并使用 `curl -fsS http://127.0.0.1:8080/health/ready`、`dig @127.0.0.1 example.com A` 与 `dig @127.0.0.1 example.com A +tcp` 验证服务。升级前备份 `/etc/mosdns-manager`、`/var/lib/mosdns` 和 `/var/lib/mosdns-controller`；详见 [升级说明](docs/upgrade.md) 与 [恢复说明](docs/recovery.md)。
 

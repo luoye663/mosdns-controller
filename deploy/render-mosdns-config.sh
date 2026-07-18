@@ -20,7 +20,7 @@ case "$profile" in
     export MOSDNS_API_LISTEN="127.0.0.1:19091" MOSDNS_STATE_DIR="../.local/mosdns" MOSDNS_RULES_DIR="../deploy/mosdns/rules" MOSDNS_TOKEN_FILE="../.local/mosdns_control_token" DNS_LISTEN="0.0.0.0:5353"
     export QUERY_AUDIT_ENDPOINT="http://127.0.0.1:18081/internal/v1/query-events/batch" QUERY_AUDIT_QUEUE_SIZE=1024 QUERY_AUDIT_BATCH_SIZE=32 QUERY_AUDIT_TIMEOUT="2s" QUERY_AUDIT_RETRIES=1 CACHE_SIZE=256
     export LOCAL_CONCURRENT=1 LOCAL_SOCKS5="" LOCAL_UPSTREAM_1_TAG="local-google" LOCAL_UPSTREAM_1_ADDR="https://dns.google/dns-query" LOCAL_UPSTREAM_2_TAG="local-cloudflare" LOCAL_UPSTREAM_2_ADDR="https://cloudflare-dns.com/dns-query"
-    export REMOTE_CONCURRENT=1 REMOTE_SOCKS5="" REMOTE_UPSTREAM_TAG="remote-cloudflare" REMOTE_UPSTREAM_ADDR="https://cloudflare-dns.com/dns-query"
+    export REMOTE_CONCURRENT=1 REMOTE_SOCKS5="" REMOTE_UPSTREAM_TAG="remote_gateway" REMOTE_UPSTREAM_ADDR="https://cloudflare-dns.com/dns-query"
     ;;
   integration)
     export MOSDNS_API_LISTEN="0.0.0.0:9091" MOSDNS_RULES_DIR="/etc/mosdns/rules" MOSDNS_TOKEN_FILE="/run/secrets/mosdns_control_token" DNS_LISTEN="0.0.0.0:5353"
@@ -32,7 +32,7 @@ case "$profile" in
     export MOSDNS_API_LISTEN="127.0.0.1:9091" MOSDNS_RULES_DIR="/etc/mosdns-manager/mosdns/rules" MOSDNS_TOKEN_FILE="/etc/mosdns-manager/mosdns_control_token" DNS_LISTEN="0.0.0.0:53"
     export QUERY_AUDIT_ENDPOINT="http://127.0.0.1:8081/internal/v1/query-events/batch" QUERY_AUDIT_QUEUE_SIZE=65536 QUERY_AUDIT_BATCH_SIZE=256 QUERY_AUDIT_TIMEOUT="2s" QUERY_AUDIT_RETRIES=1 CACHE_SIZE=4096
     export LOCAL_CONCURRENT=2 LOCAL_SOCKS5="" LOCAL_UPSTREAM_1_TAG="alidns_doh" LOCAL_UPSTREAM_1_ADDR="https://223.5.5.5/dns-query" LOCAL_UPSTREAM_2_TAG="dnspod_doh" LOCAL_UPSTREAM_2_ADDR="https://1.12.12.12/dns-query"
-    export REMOTE_CONCURRENT=1 REMOTE_SOCKS5="" REMOTE_UPSTREAM_TAG="remote_gateway" REMOTE_UPSTREAM_ADDR="<REMOTE_DOH_URL>"
+    export REMOTE_CONCURRENT=1 REMOTE_SOCKS5="" REMOTE_UPSTREAM_TAG="remote-cloudflare" REMOTE_UPSTREAM_ADDR="https://cloudflare-dns.com/dns-query"
     ;;
   *) echo "unknown mosdns configuration profile: $profile" >&2; exit 2 ;;
 esac

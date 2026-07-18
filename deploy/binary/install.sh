@@ -18,7 +18,6 @@ install -d -o mosdns-controller -g mosdns-manager -m 0750 /var/lib/mosdns-contro
 install -m 0755 "${package_dir}/bin/mosdns" /usr/local/bin/mosdns
 install -m 0755 "${package_dir}/bin/controller" /usr/local/bin/controller
 install -o root -g mosdns-manager -m 0640 "${package_dir}/etc/mosdns/config.yaml" /etc/mosdns-manager/mosdns/config.yaml
-install -o root -g mosdns-manager -m 0640 "${package_dir}/etc/mosdns/rules/geosite_cn.txt" /etc/mosdns-manager/mosdns/rules/geosite_cn.txt
 install -o root -g mosdns-manager -m 0640 "${package_dir}/etc/controller/config.yaml" /etc/mosdns-manager/controller.yaml
 install -m 0644 "${package_dir}/systemd/mosdns.service" /etc/systemd/system/mosdns.service
 install -m 0644 "${package_dir}/systemd/mosdns-controller.service" /etc/systemd/system/mosdns-controller.service
@@ -32,4 +31,4 @@ chmod 0440 /etc/mosdns-manager/mosdns_control_token
 
 systemctl daemon-reload
 systemctl enable mosdns.service mosdns-controller.service
-printf '%s\n' 'Installed. Set <REMOTE_DOH_URL> in /etc/mosdns-manager/mosdns/config.yaml, then start both services.'
+printf '%s\n' 'Installed. The default remote DoH upstream is Cloudflare. Start both services.'

@@ -29,8 +29,6 @@ type Client interface {
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
 	ECSStatus(context.Context, string) (ECSSnapshot, error)
 	ApplyECS(context.Context, string, ECSSnapshot) (ECSSnapshot, error)
-	GeositeStatus(context.Context) (DomainSetStatus, error)
-	ApplyGeosite(context.Context, DomainSetSnapshot) (DomainSetStatus, error)
 	AuditStatus(context.Context) (AuditStatus, error)
 }
 type UpstreamSnapshot struct {
@@ -56,17 +54,6 @@ type ECSSnapshot struct {
 	Mask6                  int    `json:"mask6"`
 	Preset4                string `json:"preset4,omitempty"`
 	Preset6                string `json:"preset6,omitempty"`
-}
-type DomainSetStatus struct {
-	Version   uint64    `json:"version"`
-	Checksum  string    `json:"checksum"`
-	RuleCount int       `json:"rule_count"`
-	LoadedAt  time.Time `json:"loaded_at"`
-}
-type DomainSetSnapshot struct {
-	Version                uint64 `json:"version"`
-	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
-	Rules                  string `json:"rules"`
 }
 type Status struct {
 	State           string `json:"state"`
@@ -206,14 +193,6 @@ func (c *HTTPClient) ApplyECS(ctx context.Context, group string, snapshot ECSSna
 	}
 	var value ECSSnapshot
 	return value, c.request(ctx, http.MethodPut, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/snapshot", snapshot, &value)
-}
-func (c *HTTPClient) GeositeStatus(ctx context.Context) (DomainSetStatus, error) {
-	var value DomainSetStatus
-	return value, c.request(ctx, http.MethodGet, "/plugins/geosite_cn/status", nil, &value)
-}
-func (c *HTTPClient) ApplyGeosite(ctx context.Context, snapshot DomainSetSnapshot) (DomainSetStatus, error) {
-	var value DomainSetStatus
-	return value, c.request(ctx, http.MethodPut, "/plugins/geosite_cn/snapshot", snapshot, &value)
 }
 func (c *HTTPClient) AuditStatus(ctx context.Context) (AuditStatus, error) {
 	var value AuditStatus

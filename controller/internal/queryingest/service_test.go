@@ -120,20 +120,6 @@ func TestPersistStoresMinimumAnswerTTL(t *testing.T) {
 	}
 }
 
-func TestPersistStoresGeositeRouteSource(t *testing.T) {
-	s := testService(t)
-	event := validEvent("geosite-source")
-	event.Route = "local"
-	event.RouteSource = "geosite"
-	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
-		t.Fatal(err)
-	}
-	page, err := s.Queries(context.Background(), Query{Limit: 1})
-	if err != nil || len(page.Items) != 1 || page.Items[0].RouteSource != "geosite" {
-		t.Fatalf("queried geosite event=%+v err=%v", page.Items, err)
-	}
-}
-
 func TestAnswerIPsRemainInBoundedMemoryOnly(t *testing.T) {
 	s := testService(t)
 	event := validEvent("answer-ips")
