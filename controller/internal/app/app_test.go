@@ -109,6 +109,28 @@ func TestBootstrapCreatesInitialAdminAndSession(t *testing.T) {
 	if len(setupRec.Result().Cookies()) != 1 {
 		t.Fatal("initial setup did not create a session cookie")
 	}
+	var setupResponse struct {
+		Data struct {
+			CSRFToken string `json:"csrf_token"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(setupRec.Body).Decode(&setupResponse); err != nil {
+		t.Fatal(err)
+	}
+	logout := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logout.AddCookie(setupRec.Result().Cookies()[0])
+	logout.Header.Set("X-CSRF-Token", setupResponse.Data.CSRFToken)
+	logoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(logoutRec, logout)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("logout=%d: %s", logoutRec.Code, logoutRec.Body.String())
+	}
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"admin","password":"password"}`))
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, login)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login after initial setup and logout=%d: %s", loginRec.Code, loginRec.Body.String())
+	}
 	repeated := httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewBufferString(`{"username":"other","password":"password"}`))
 	repeatedRec := httptest.NewRecorder()
 	handler.ServeHTTP(repeatedRec, repeated)
@@ -174,6 +196,35 @@ func TestRequestBodyLimit(t *testing.T) {
 	application.PublicHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d", rec.Code)
+	}
+}
+
+func TestErrorMessagesAreChinese(t *testing.T) {
+	tests := []struct {
+		code, message, want string
+	}{
+		{"AUTH_REQUIRED", "authentication required", "需要登录"},
+		{"VALIDATION_ERROR", "regexp exceeds 512 bytes", "正则表达式不能超过 512 字节"},
+		{"MOSDNS_UNAVAILABLE", "mosdns API GET /plugins/status: 503 Service Unavailable", "mosdns 服务不可用"},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			writeError(recorder, request, http.StatusBadRequest, test.code, test.message)
+			var response struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Error.Code != test.code || response.Error.Message != test.want {
+				t.Fatalf("error = %#v, want code=%q message=%q", response.Error, test.code, test.want)
+			}
+		})
 	}
 }
 

@@ -820,7 +820,118 @@ func writeData(w http.ResponseWriter, r *http.Request, status int, body any) {
 	writeJSON(w, status, map[string]any{"data": body, "request_id": r.Context().Value(requestIDKey)})
 }
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}, "request_id": r.Context().Value(requestIDKey)})
+	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": chineseErrorMessage(code, message)}, "request_id": r.Context().Value(requestIDKey)})
+}
+
+// chineseErrorMessage keeps error codes stable for API clients while ensuring
+// internal service and upstream errors are never exposed as English UI text.
+func chineseErrorMessage(code, message string) string {
+	if localized, ok := map[string]string{
+		"database is unavailable":                                       "数据库暂不可用",
+		"too many login attempts":                                       "登录尝试次数过多，请稍后再试",
+		"invalid username or password":                                  "用户名或密码错误",
+		"too many setup attempts":                                       "初始化尝试次数过多，请稍后再试",
+		"an administrator already exists":                               "管理员已存在",
+		"initial administrator was created but session creation failed": "初始管理员已创建，但会话创建失败",
+		"list rules failed":                                             "读取规则失败",
+		"rule limit exceeded":                                           "规则数量超出限制",
+		"list versions failed":                                          "读取规则版本失败",
+		"version not found":                                             "规则版本不存在",
+		"read version failed":                                           "读取规则版本失败",
+		"invalid internal token":                                        "内部令牌无效",
+		"query ingestion is overloaded":                                 "查询事件接收服务繁忙",
+		"invalid event identifier":                                      "事件标识无效",
+		"answer IPs are no longer available in memory":                  "应答 IP 已不在内存中",
+		"streaming is unavailable":                                      "流式传输不可用",
+		"read summary failed":                                           "读取汇总统计失败",
+		"read statistics failed":                                        "读取统计数据失败",
+		"read latency failed":                                           "读取延迟统计失败",
+		"list devices failed":                                           "读取设备列表失败",
+		"device not found":                                              "设备不存在",
+		"cache flush failed":                                            "缓存清理失败",
+		"upstream or ECS runtime configuration is unavailable; deploy matching mosdns binary and configuration": "上游或 ECS 运行时配置不可用，请部署匹配的 mosdns 二进制文件和配置",
+		"upstream configuration changed; refresh and retry":                                                     "上游配置已变更，请刷新后重试",
+		"ECS configuration changed; refresh and retry":                                                          "ECS 配置已变更，请刷新后重试",
+		"read settings failed":                                   "读取设置失败",
+		"geosite status is unavailable":                          "GeoSite 状态不可用",
+		"invalid geosite upload":                                 "GeoSite 上传请求无效",
+		"geosite file is required":                               "必须提供 GeoSite 文件",
+		"geosite file exceeds 20 MiB":                            "GeoSite 文件超过 20 MiB 限制",
+		"invalid limit":                                          "limit 参数无效",
+		"list audit logs failed":                                 "读取审计日志失败",
+		"rule or version not found":                              "规则或规则版本不存在",
+		"invalid identifier":                                     "标识符无效",
+		"authentication required":                                "需要登录",
+		"csrf token is invalid":                                  "CSRF 令牌无效",
+		"request body is too large":                              "请求体超过大小限制",
+		"invalid JSON request body":                              "JSON 请求体无效",
+		"internal server error":                                  "服务器内部错误",
+		"ids must not be empty":                                  "规则 ID 列表不能为空",
+		"unsupported batch operation":                            "不支持的批量操作",
+		"priority must be between 0 and 1000":                    "优先级必须在 0 到 1000 之间",
+		"comment exceeds 500 characters":                         "备注不能超过 500 个字符",
+		"invalid category/action":                                "规则类别或动作无效",
+		"regexp exceeds 512 bytes":                               "正则表达式不能超过 512 字节",
+		"duplicate rule pattern in category":                     "同一类别中存在重复的规则模式",
+		"regexp rule limit exceeded":                             "正则表达式规则数量超出限制",
+		"regexp is empty":                                        "正则表达式不能为空",
+		"invalid match type":                                     "匹配类型无效",
+		"invalid domain pattern":                                 "域名模式无效",
+		"invalid domain length":                                  "域名长度无效",
+		"invalid domain label":                                   "域名标签无效",
+		"at least one device field is required":                  "至少需要提供一个设备字段",
+		"display_name exceeds 128 characters":                    "设备显示名称不能超过 128 个字符",
+		"note exceeds 500 characters":                            "设备备注不能超过 500 个字符",
+		"query retention days must be within 1..365":             "查询保留天数必须在 1 到 365 之间",
+		"cache TTL must be within 0..604800":                     "缓存 TTL 必须在 0 到 604800 之间",
+		"invalid upstream group":                                 "上游组无效",
+		"geosite source_url must be an HTTPS URL":                "GeoSite source_url 必须是 HTTPS URL",
+		"redirect must use HTTPS":                                "重定向必须使用 HTTPS",
+		"geosite file must contain 1..20971520 bytes":            "GeoSite 文件大小必须在 1 到 20971520 字节之间",
+		"geosite upload must be a .txt file":                     "GeoSite 上传文件必须是 .txt 文件",
+		"invalid event batch":                                    "查询事件批次无效",
+		"invalid event":                                          "查询事件无效",
+		"invalid event fields":                                   "查询事件字段无效",
+		"invalid event values":                                   "查询事件字段值无效",
+		"invalid event route":                                    "查询事件路由无效",
+		"event field exceeds limit":                              "查询事件字段超过长度限制",
+		"too many answer IPs":                                    "应答 IP 数量超过限制",
+		"invalid answer IP":                                      "应答 IP 无效",
+		"invalid cursor":                                         "分页游标无效",
+		"invalid client_ip":                                      "client_ip 参数无效",
+		"invalid route":                                          "route 参数无效",
+		"invalid qname_match":                                    "qname_match 参数无效",
+		"invalid qtype":                                          "qtype 参数无效",
+		"invalid rcode":                                          "rcode 参数无效",
+		"invalid time range":                                     "时间范围无效",
+		"qname contains requires a time range of at most 7 days": "qname contains 筛选的时间范围不能超过 7 天",
+		"invalid statistic":                                      "统计类型无效",
+		"invalid credentials":                                    "凭据无效",
+		"password must be at least 8 characters":                 "密码至少需要 8 个字符",
+		"username must be 3-64 characters and password at least 8 characters": "用户名长度必须为 3 到 64 个字符，密码至少需要 8 个字符",
+		"runtime checksum does not match active version":                      "运行时校验和与当前生效版本不匹配",
+		"mosdns rejected snapshot":                                            "mosdns 拒绝了规则快照",
+		"mosdns returned a different checksum":                                "mosdns 返回的校验和不一致",
+		"mosdns retained previous snapshot":                                   "mosdns 保留了先前的规则快照",
+		"invalid apply response":                                              "mosdns 返回的发布结果无效",
+	}[message]; ok {
+		return localized
+	}
+
+	switch code {
+	case "VALIDATION_ERROR":
+		return "请求参数校验失败"
+	case "MOSDNS_UNAVAILABLE":
+		return "mosdns 服务不可用"
+	case "SETTINGS_APPLY_FAILED":
+		return "设置应用失败"
+	case "GEOSITE_UPDATE_FAILED":
+		return "GeoSite 更新失败"
+	case "GEOSITE_UPLOAD_FAILED":
+		return "GeoSite 上传失败"
+	default:
+		return "请求处理失败"
+	}
 }
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

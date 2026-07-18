@@ -443,12 +443,12 @@ func (s *Service) DatabaseStatus() DatabaseStatus {
 func (s *Service) SystemStatus(ctx context.Context) SystemStatus {
 	result := SystemStatus{Database: s.DatabaseStatus()}
 	if status, err := s.mosdns.Status(ctx); err != nil {
-		result.MosdnsError = "mosdns runtime is unavailable"
+		result.MosdnsError = "mosdns 运行时不可用"
 	} else {
 		result.Mosdns = &status
 	}
 	if status, err := s.mosdns.AuditStatus(ctx); err != nil {
-		result.AuditError = "query audit runtime is unavailable"
+		result.AuditError = "查询审计运行时不可用"
 	} else {
 		result.Audit = &status
 	}

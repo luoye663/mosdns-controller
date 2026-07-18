@@ -18,3 +18,5 @@ sudo systemctl start mosdns.service mosdns-controller.service
 ```
 
 必须先把 `<REMOTE_DOH_URL>` 替换为实际端点。`install.sh` 不会覆盖已有 token，但会覆盖二进制、配置、规则和 systemd 文件；升级前应备份 `/etc/mosdns-manager`、`/var/lib/mosdns` 和 `/var/lib/mosdns-controller`。
+
+管理员无法登录时，按[运维手册的重置密码流程](../../docs/operations.md#重置管理员密码)执行 `controller reset-password`。该命令从标准输入读取新密码，并会撤销该管理员已有的所有 Session。

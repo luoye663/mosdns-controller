@@ -5,10 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +36,7 @@ func main() {
 	configPath := flags.String("config", "", "controller YAML config path")
 	username := flags.String("username", "", "administrator username")
 	password := flags.String("password", "", "administrator password")
+	passwordStdin := flags.Bool("password-stdin", false, "read administrator password from standard input")
 	backupOutput := flags.String("output", "", "backup output path")
 	_ = flags.Parse(os.Args[1:])
 	cfg, err := config.Load(*configPath)
@@ -57,6 +60,18 @@ func main() {
 			fatal(err)
 		}
 		return
+	case "reset-password":
+		if *password != "" || !*passwordStdin {
+			fatal(errors.New("reset-password requires -password-stdin; do not pass passwords as command arguments"))
+		}
+		resetPassword, err := passwordFromStdin()
+		if err != nil {
+			fatal(err)
+		}
+		if err := auth.New(store, cfg.Web.SessionTTL).ResetPassword(ctx, *username, resetPassword); err != nil {
+			fatal(err)
+		}
+		return
 	case "healthcheck":
 		if err := store.DB().PingContext(ctx); err != nil {
 			fatal(err)
@@ -76,6 +91,17 @@ func main() {
 	default:
 		fatal(fmt.Errorf("unknown command %q", command))
 	}
+}
+
+func passwordFromStdin() (string, error) {
+	value, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	if len(value) > 4096 {
+		return "", errors.New("password input exceeds 4096 bytes")
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(string(value), "\n"), "\r"), nil
 }
 
 func serve(cfg config.Config, store *storage.Store, client mosdnsclient.Client, ingestToken string) {

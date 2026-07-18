@@ -20,6 +20,7 @@ import (
 const CookieName = "mosdns_session"
 
 var ErrInitialAdminExists = errors.New("an administrator already exists")
+var ErrAdminNotFound = errors.New("administrator not found")
 
 type Service struct {
 	store *storage.Store
@@ -178,6 +179,38 @@ func (s *Service) ChangePasswordKeepingSession(ctx context.Context, adminID int6
 	}
 	return tx.Commit()
 }
+
+// ResetPassword is for local recovery when the administrator cannot authenticate.
+// It revokes every existing session for the account.
+func (s *Service) ResetPassword(ctx context.Context, username, nextPassword string) error {
+	username, err := validateCredentials(username, nextPassword)
+	if err != nil {
+		return err
+	}
+	nextHash, err := hashPassword(nextPassword)
+	if err != nil {
+		return err
+	}
+	tx, err := s.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var adminID int64
+	if err = tx.QueryRowContext(ctx, `SELECT id FROM admins WHERE username=? COLLATE NOCASE`, username).Scan(&adminID); errors.Is(err, sql.ErrNoRows) {
+		return ErrAdminNotFound
+	} else if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at_ms=? WHERE id=?`, nextHash, time.Now().UnixMilli(), adminID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id=?`, adminID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func validateCredentials(username, password string) (string, error) {
 	username = strings.TrimSpace(username)
 	if len(username) < 3 || len(username) > 64 || len(password) < 8 {
