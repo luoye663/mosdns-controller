@@ -3,7 +3,7 @@ import { onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NFormItem, NInput, NInputNumber, NSwitch } from 'naive-ui'
 import { api, type GeositeStatus, type Settings } from '@/lib/api'
 
-const settings = ref<Settings>({ cache_enabled: true, query_retention_days: 1 })
+const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, query_retention_days: 1 })
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -30,8 +30,8 @@ onMounted(load)
     </header>
     <NAlert v-if="message" type="success" class="form-alert">{{ message }}</NAlert>
     <NAlert v-if="error" type="error" class="form-alert">{{ error }}</NAlert>
-    <NCard title="DNS 缓存" size="small" class="settings-card">
-      <NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem>
+    <div class="settings-grid"><NCard title="DNS 缓存" size="small" class="settings-card">
+      <NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem><NFormItem label="缓存 TTL（秒）"><NInputNumber v-model:value="settings.cache_ttl" :min="0" :max="604800" /></NFormItem><p class="field-hint">0 表示不延长缓存，响应有效期完全遵循上游 DNS 的 TTL。</p>
     </NCard>
     <NCard title="查询日志" size="small" class="settings-card">
       <NFormItem label="保留天数"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem>
@@ -45,6 +45,6 @@ onMounted(load)
         <div class="inline-controls"><NButton @click="chooseGeositeFile">选择 TXT</NButton><span class="muted">{{ geositeFile?.name || '未选择文件' }}</span><NButton type="primary" :disabled="!geositeFile" :loading="saving" @click="uploadGeosite">上传并应用</NButton></div>
       </div>
       <dl v-if="geosite" class="status-list"><dt>运行时版本</dt><dd>{{ geosite.version }}</dd><dt>规则数量</dt><dd>{{ geosite.rule_count }}</dd><dt>更新时间</dt><dd>{{ formatTime(geosite.loaded_at) }}</dd></dl>
-    </NCard>
+    </NCard></div>
   </section>
 </template>

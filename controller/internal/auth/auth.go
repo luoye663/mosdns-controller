@@ -146,6 +146,9 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 	return err
 }
 func (s *Service) ChangePassword(ctx context.Context, adminID int64, currentPassword, nextPassword string) error {
+	return s.ChangePasswordKeepingSession(ctx, adminID, currentPassword, nextPassword, "")
+}
+func (s *Service) ChangePasswordKeepingSession(ctx context.Context, adminID int64, currentPassword, nextPassword, session string) error {
 	if len(nextPassword) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
@@ -157,8 +160,23 @@ func (s *Service) ChangePassword(ctx context.Context, adminID int64, currentPass
 	if err != nil {
 		return err
 	}
-	_, err = s.store.DB().ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at_ms=? WHERE id=?`, nextHash, time.Now().UnixMilli(), adminID)
-	return err
+	tx, err := s.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at_ms=? WHERE id=?`, nextHash, time.Now().UnixMilli(), adminID); err != nil {
+		return err
+	}
+	if session == "" {
+		_, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id=?`, adminID)
+	} else {
+		_, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id=? AND token_hash<>?`, adminID, digest(session))
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func validateCredentials(username, password string) (string, error) {
 	username = strings.TrimSpace(username)

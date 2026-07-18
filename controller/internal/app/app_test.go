@@ -126,6 +126,25 @@ func TestPasswordMinimumLengthIsEight(t *testing.T) {
 		t.Fatal("short password accepted")
 	}
 }
+func TestChangePasswordKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
+	application := testApp(t)
+	if err := application.auth.CreateAdmin(context.Background(), "admin", "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	for _, token := range []string{"current", "other"} {
+		if _, err := application.store.DB().Exec(`INSERT INTO sessions(token_hash,admin_id,csrf_hash,created_at_ms,last_seen_at_ms,expires_at_ms) VALUES(?,?,?,?,?,?)`, authDigest(token), 1, authDigest("csrf"), now, now, now+60_000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := application.auth.ChangePasswordKeepingSession(context.Background(), 1, "old-password", "new-password", "current"); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM sessions WHERE admin_id=1`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("sessions=%d err=%v", count, err)
+	}
+}
 func TestExpiredSessionIsRejected(t *testing.T) {
 	application := testApp(t)
 	now := time.Now().UnixMilli()

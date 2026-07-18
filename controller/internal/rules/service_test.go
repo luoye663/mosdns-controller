@@ -43,11 +43,18 @@ func (f *fakeMosdns) Flush(_ context.Context, tag string) error {
 	return nil
 }
 func (f *fakeMosdns) SetCacheEnabled(context.Context, bool) error { return nil }
+func (f *fakeMosdns) SetCacheTTL(context.Context, int) error      { return nil }
 func (f *fakeMosdns) UpstreamStatus(context.Context, string) (mosdnsclient.UpstreamSnapshot, error) {
 	return mosdnsclient.UpstreamSnapshot{}, nil
 }
 func (f *fakeMosdns) ApplyUpstream(context.Context, string, mosdnsclient.UpstreamSnapshot) (mosdnsclient.UpstreamSnapshot, error) {
 	return mosdnsclient.UpstreamSnapshot{}, nil
+}
+func (f *fakeMosdns) ECSStatus(context.Context, string) (mosdnsclient.ECSSnapshot, error) {
+	return mosdnsclient.ECSSnapshot{}, nil
+}
+func (f *fakeMosdns) ApplyECS(context.Context, string, mosdnsclient.ECSSnapshot) (mosdnsclient.ECSSnapshot, error) {
+	return mosdnsclient.ECSSnapshot{}, nil
 }
 func (f *fakeMosdns) GeositeStatus(context.Context) (mosdnsclient.DomainSetStatus, error) {
 	return mosdnsclient.DomainSetStatus{}, nil

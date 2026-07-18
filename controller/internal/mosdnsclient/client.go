@@ -24,8 +24,11 @@ type Client interface {
 	Match(context.Context, string) (any, error)
 	Flush(context.Context, string) error
 	SetCacheEnabled(context.Context, bool) error
+	SetCacheTTL(context.Context, int) error
 	UpstreamStatus(context.Context, string) (UpstreamSnapshot, error)
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
+	ECSStatus(context.Context, string) (ECSSnapshot, error)
+	ApplyECS(context.Context, string, ECSSnapshot) (ECSSnapshot, error)
 	GeositeStatus(context.Context) (DomainSetStatus, error)
 	ApplyGeosite(context.Context, DomainSetSnapshot) (DomainSetStatus, error)
 	AuditStatus(context.Context) (AuditStatus, error)
@@ -44,6 +47,15 @@ type Upstream struct {
 	Addr     string `json:"addr"`
 	Priority int    `json:"priority"`
 	Weight   int    `json:"weight"`
+}
+type ECSSnapshot struct {
+	Version                uint64 `json:"version"`
+	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
+	Mode                   string `json:"mode"`
+	Mask4                  int    `json:"mask4"`
+	Mask6                  int    `json:"mask6"`
+	Preset4                string `json:"preset4,omitempty"`
+	Preset6                string `json:"preset6,omitempty"`
 }
 type DomainSetStatus struct {
 	Version   uint64    `json:"version"`
@@ -153,6 +165,20 @@ func (c *HTTPClient) SetCacheEnabled(ctx context.Context, enabled bool) error {
 	}
 	return nil
 }
+func (c *HTTPClient) SetCacheTTL(ctx context.Context, ttl int) error {
+	for _, tag := range []string{"cache_local", "cache_remote"} {
+		var result struct {
+			TTL int `json:"ttl"`
+		}
+		if err := c.request(ctx, http.MethodPut, "/plugins/"+tag+"/ttl", map[string]int{"ttl": ttl}, &result); err != nil {
+			return err
+		}
+		if result.TTL != ttl {
+			return errors.New("cache TTL was not applied")
+		}
+	}
+	return nil
+}
 func (c *HTTPClient) UpstreamStatus(ctx context.Context, group string) (UpstreamSnapshot, error) {
 	if group != "local_dns" && group != "remote_dns" {
 		return UpstreamSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
@@ -166,6 +192,20 @@ func (c *HTTPClient) ApplyUpstream(ctx context.Context, group string, snapshot U
 	}
 	var value UpstreamSnapshot
 	return value, c.request(ctx, http.MethodPut, "/plugins/"+group+"/snapshot", snapshot, &value)
+}
+func (c *HTTPClient) ECSStatus(ctx context.Context, group string) (ECSSnapshot, error) {
+	if group != "local_dns" && group != "remote_dns" {
+		return ECSSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
+	}
+	var value ECSSnapshot
+	return value, c.request(ctx, http.MethodGet, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/status", nil, &value)
+}
+func (c *HTTPClient) ApplyECS(ctx context.Context, group string, snapshot ECSSnapshot) (ECSSnapshot, error) {
+	if group != "local_dns" && group != "remote_dns" {
+		return ECSSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
+	}
+	var value ECSSnapshot
+	return value, c.request(ctx, http.MethodPut, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/snapshot", snapshot, &value)
 }
 func (c *HTTPClient) GeositeStatus(ctx context.Context) (DomainSetStatus, error) {
 	var value DomainSetStatus

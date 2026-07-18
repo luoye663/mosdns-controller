@@ -63,6 +63,14 @@ plugins:
       dump_interval: 600
       auth_token_file: "/run/secrets/mosdns_control_token"
 
+  - tag: ecs_local
+    type: dynamic_ecs
+    args:
+      snapshot_file: "/var/lib/mosdns/ecs-local.json"
+      backup_file: "/var/lib/mosdns/ecs-local.json.bak"
+      auth_token_file: "/run/secrets/mosdns_control_token"
+      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
+
   - tag: cache_remote
     type: cache
     args:
@@ -71,6 +79,14 @@ plugins:
       dump_file: "/var/lib/mosdns/cache-remote.dump"
       dump_interval: 600
       auth_token_file: "/run/secrets/mosdns_control_token"
+
+  - tag: ecs_remote
+    type: dynamic_ecs
+    args:
+      snapshot_file: "/var/lib/mosdns/ecs-remote.json"
+      backup_file: "/var/lib/mosdns/ecs-remote.json.bak"
+      auth_token_file: "/run/secrets/mosdns_control_token"
+      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
 
   - tag: local_dns
     type: dynamic_forward
@@ -104,6 +120,7 @@ plugins:
     type: sequence
     args:
       - exec: mark 1101
+      - exec: $ecs_local
       - exec: $cache_local
       - matches:
           - has_resp
@@ -118,6 +135,7 @@ plugins:
     type: sequence
     args:
       - exec: mark 1102
+      - exec: $ecs_remote
       - exec: $cache_remote
       - matches:
           - has_resp

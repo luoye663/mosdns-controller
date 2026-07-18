@@ -95,6 +95,7 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Post("/system/cache/flush", a.requireCSRF(a.flushCaches))
 			protected.Get("/upstreams", a.upstreams)
 			protected.Put("/upstreams/{group}", a.requireCSRF(a.updateUpstream))
+			protected.Put("/upstreams/{group}/ecs", a.requireCSRF(a.updateECS))
 			protected.Get("/settings", a.settings)
 			protected.Put("/settings", a.requireCSRF(a.updateSettings))
 			protected.Get("/geosite", a.geositeStatus)
@@ -209,9 +210,12 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
-	if err := a.auth.ChangePassword(r.Context(), admin.ID, input.CurrentPassword, input.NewPassword); err != nil {
+	if err := a.auth.ChangePasswordKeepingSession(r.Context(), admin.ID, input.CurrentPassword, input.NewPassword, sessionToken(r)); err != nil {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
+	}
+	if err := a.ops.Audit(r.Context(), admin.ID, "update", "password", strconv.FormatInt(admin.ID, 10), requestID(r), remoteIP(r), "success", ""); err != nil {
+		a.logger.Error("audit password change", "error", err)
 	}
 	writeData(w, r, http.StatusOK, map[string]bool{"changed": true})
 }
@@ -599,6 +603,23 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request) {
 	updated, err := a.ops.UpdateUpstream(r.Context(), chi.URLParam(r, "group"), snapshot, admin.ID, requestID(r), remoteIP(r))
 	if errors.Is(err, mosdnsclient.ErrConflict) {
 		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream configuration changed; refresh and retry")
+		return
+	}
+	if err != nil {
+		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	writeData(w, r, 200, updated)
+}
+func (a *App) updateECS(w http.ResponseWriter, r *http.Request) {
+	var snapshot mosdnsclient.ECSSnapshot
+	if !decodeJSON(w, r, &snapshot) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	updated, err := a.ops.UpdateECS(r.Context(), chi.URLParam(r, "group"), snapshot, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "ECS configuration changed; refresh and retry")
 		return
 	}
 	if err != nil {

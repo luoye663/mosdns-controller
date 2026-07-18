@@ -1,20 +1,23 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NFormItem, NInput, NInputNumber, NSelect } from 'naive-ui'
-import { api, type UpstreamSnapshot } from '@/lib/api'
+import { api, type ECSSnapshot, type UpstreamSnapshot } from '@/lib/api'
 
 const local = ref<UpstreamSnapshot | null>(null)
 const remote = ref<UpstreamSnapshot | null>(null)
+const localECS = ref<ECSSnapshot | null>(null)
+const remoteECS = ref<ECSSnapshot | null>(null)
 const loading = ref(false)
 const saving = ref<'local_dns' | 'remote_dns' | ''>('')
 const error = ref('')
 const message = ref('')
 
 function clone(snapshot: UpstreamSnapshot): UpstreamSnapshot { return { ...snapshot, upstreams: snapshot.upstreams.map((item) => ({ ...item })) } }
-async function load() { loading.value = true; error.value = ''; try { const data = await api.upstreams(); local.value = clone(data.local); remote.value = clone(data.remote) } catch (e) { error.value = e instanceof Error ? e.message : '无法读取上游配置' } finally { loading.value = false } }
+function cloneECS(snapshot: ECSSnapshot): ECSSnapshot { return { ...snapshot } }
+async function load() { loading.value = true; error.value = ''; try { const data = await api.upstreams(); local.value = clone(data.local); remote.value = clone(data.remote); localECS.value = cloneECS(data.local_ecs); remoteECS.value = cloneECS(data.remote_ecs) } catch (e) { error.value = e instanceof Error ? e.message : '无法读取上游配置' } finally { loading.value = false } }
 function add(snapshot: UpstreamSnapshot) { snapshot.upstreams.push({ tag: `upstream_${snapshot.upstreams.length + 1}`, addr: 'https://', priority: 100, weight: 1 }) }
 function remove(snapshot: UpstreamSnapshot, index: number) { if (snapshot.upstreams.length > 1) snapshot.upstreams.splice(index, 1) }
-async function save(group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) { saving.value = group; error.value = ''; message.value = ''; try { const updated = await api.updateUpstream(group, { ...clone(snapshot), version: snapshot.version + 1, expected_current_version: snapshot.version }); if (group === 'local_dns') local.value = clone(updated); else remote.value = clone(updated); message.value = `${group === 'local_dns' ? '本地' : '远程'}上游已热加载，对应缓存已清空` } catch (e) { error.value = e instanceof Error ? e.message : '保存上游配置失败' } finally { saving.value = '' } }
+async function save(group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot, ecs: ECSSnapshot) { saving.value = group; error.value = ''; message.value = ''; try { const [updated, updatedECS] = await Promise.all([api.updateUpstream(group, { ...clone(snapshot), version: snapshot.version + 1, expected_current_version: snapshot.version }), api.updateECS(group, { ...cloneECS(ecs), version: ecs.version + 1, expected_current_version: ecs.version })]); if (group === 'local_dns') { local.value = clone(updated); localECS.value = cloneECS(updatedECS) } else { remote.value = clone(updated); remoteECS.value = cloneECS(updatedECS) }; message.value = `${group === 'local_dns' ? '本地' : '远程'}上游与 ECS 已热加载，对应缓存已清空` } catch (e) { error.value = e instanceof Error ? e.message : '保存上游配置失败' } finally { saving.value = '' } }
 onMounted(load)
 </script>
 
@@ -23,10 +26,9 @@ onMounted(load)
     <NAlert v-if="message" type="success" class="form-alert">{{ message }}</NAlert><NAlert v-if="error" type="error" class="form-alert">{{ error }}</NAlert>
     <NAlert type="info" class="form-alert">竞速模式随机选择端点并采用最快有效响应；加权模式按权重决定入选概率；主备模式按优先级从小到大处理，同优先级内竞速，连接错误、超时或 SERVFAIL 才切换到下一优先级。标签仅用于识别和查询审计。</NAlert>
     <div class="upstream-grid">
-      <NCard v-for="item in [{ group: 'local_dns' as const, title: '本地上游', snapshot: local }, { group: 'remote_dns' as const, title: '远程上游', snapshot: remote }]" :key="item.group" :title="item.title" size="small">
-        <template v-if="item.snapshot"><div class="upstream-settings"><NFormItem label="调度模式"><NSelect v-model:value="item.snapshot.mode" :options="[{ label: '竞速', value: 'race' }, { label: '加权选择', value: 'weighted' }, { label: '主备优先级', value: 'failover' }]" /></NFormItem><NFormItem label="并发查询"><NInputNumber v-model:value="item.snapshot.concurrent" :min="1" :max="3" /></NFormItem><NFormItem label="SOCKS5 代理"><NInput v-model:value="item.snapshot.socks5" placeholder="host:port" /></NFormItem></div>
-          <div class="table-wrap upstream-table-wrap"><table><thead><tr><th>标签</th><th>DNS 地址</th><th>优先级</th><th>权重</th><th></th></tr></thead><tbody><tr v-for="(upstream, index) in item.snapshot.upstreams" :key="index"><td><NInput v-model:value="upstream.tag" /></td><td><NInput v-model:value="upstream.addr" placeholder="https://dns.example/dns-query" /></td><td><NInputNumber v-model:value="upstream.priority" :min="1" :max="1000" /></td><td><NInputNumber v-model:value="upstream.weight" :min="1" :max="100" /></td><td><NButton type="error" secondary :disabled="item.snapshot.upstreams.length === 1" @click="remove(item.snapshot, index)">移除</NButton></td></tr></tbody></table></div>
-          <div class="inline-controls"><NButton @click="add(item.snapshot)">添加上游</NButton><NButton type="primary" :loading="saving === item.group" @click="save(item.group, item.snapshot)">保存并热加载</NButton></div></template>
+      <NCard v-for="item in [{ group: 'local_dns' as const, title: '本地上游', snapshot: local, ecs: localECS }, { group: 'remote_dns' as const, title: '远程上游', snapshot: remote, ecs: remoteECS }]" :key="item.group" :title="item.title" size="small">
+        <template v-if="item.snapshot && item.ecs"><div class="upstream-settings"><NFormItem label="调度模式"><NSelect v-model:value="item.snapshot.mode" :options="[{ label: '竞速', value: 'race' }, { label: '加权选择', value: 'weighted' }, { label: '主备优先级', value: 'failover' }]" /></NFormItem><NFormItem label="并发查询"><NInputNumber v-model:value="item.snapshot.concurrent" :min="1" :max="3" /></NFormItem><NFormItem label="SOCKS5 代理"><NInput v-model:value="item.snapshot.socks5" placeholder="host:port" /></NFormItem></div><div class="upstream-settings"><NFormItem label="ECS"><NSelect v-model:value="item.ecs.mode" :options="[{ label: '关闭', value: 'off' }, { label: '客户端网段', value: 'client_subnet' }, { label: '固定网段', value: 'fixed_subnet' }]" /></NFormItem><NFormItem label="IPv4 掩码"><NInputNumber v-model:value="item.ecs.mask4" :min="1" :max="32" :disabled="item.ecs.mode !== 'client_subnet'" /></NFormItem><NFormItem label="IPv6 掩码"><NInputNumber v-model:value="item.ecs.mask6" :min="1" :max="128" :disabled="item.ecs.mode !== 'client_subnet'" /></NFormItem><NFormItem v-if="item.ecs.mode === 'fixed_subnet'" label="固定 IPv4 网段"><NInput v-model:value="item.ecs.preset4" placeholder="203.0.113.0/24" /></NFormItem><NFormItem v-if="item.ecs.mode === 'fixed_subnet'" label="固定 IPv6 网段"><NInput v-model:value="item.ecs.preset6" placeholder="2001:db8::/48" /></NFormItem></div>
+          <div class="inline-controls upstream-actions"><NButton @click="add(item.snapshot)">添加上游</NButton><NButton type="primary" :loading="saving === item.group" @click="save(item.group, item.snapshot, item.ecs)">保存并热加载</NButton></div><div class="table-wrap upstream-table-wrap"><table><thead><tr><th>标签</th><th>DNS 地址</th><th>优先级</th><th>权重</th><th></th></tr></thead><tbody><tr v-for="(upstream, index) in item.snapshot.upstreams" :key="index"><td><NInput v-model:value="upstream.tag" /></td><td><NInput v-model:value="upstream.addr" placeholder="https://dns.example/dns-query" /></td><td><NInputNumber v-model:value="upstream.priority" :min="1" :max="1000" /></td><td><NInputNumber v-model:value="upstream.weight" :min="1" :max="100" /></td><td><NButton type="error" secondary :disabled="item.snapshot.upstreams.length === 1" @click="remove(item.snapshot, index)">移除</NButton></td></tr></tbody></table></div></template>
         <p v-else class="muted">{{ loading ? '正在读取配置...' : '配置不可用' }}</p>
       </NCard>
     </div>

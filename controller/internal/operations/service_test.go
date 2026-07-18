@@ -16,6 +16,8 @@ type fakeMosdns struct {
 	statusErr    error
 	upstreams    map[string]mosdnsclient.UpstreamSnapshot
 	cacheEnabled bool
+	cacheTTL     int
+	ecs          map[string]mosdnsclient.ECSSnapshot
 	geosite      mosdnsclient.DomainSetStatus
 }
 
@@ -40,6 +42,7 @@ func (f *fakeMosdns) SetCacheEnabled(_ context.Context, enabled bool) error {
 	f.cacheEnabled = enabled
 	return nil
 }
+func (f *fakeMosdns) SetCacheTTL(_ context.Context, ttl int) error { f.cacheTTL = ttl; return nil }
 func (f *fakeMosdns) UpstreamStatus(_ context.Context, group string) (mosdnsclient.UpstreamSnapshot, error) {
 	if f.upstreams == nil {
 		f.upstreams = map[string]mosdnsclient.UpstreamSnapshot{}
@@ -55,6 +58,23 @@ func (f *fakeMosdns) ApplyUpstream(_ context.Context, group string, snapshot mos
 		return mosdnsclient.UpstreamSnapshot{}, mosdnsclient.ErrConflict
 	}
 	f.upstreams[group] = snapshot
+	return snapshot, nil
+}
+func (f *fakeMosdns) ECSStatus(_ context.Context, group string) (mosdnsclient.ECSSnapshot, error) {
+	if f.ecs == nil {
+		f.ecs = map[string]mosdnsclient.ECSSnapshot{}
+	}
+	return f.ecs[group], nil
+}
+func (f *fakeMosdns) ApplyECS(_ context.Context, group string, snapshot mosdnsclient.ECSSnapshot) (mosdnsclient.ECSSnapshot, error) {
+	if f.ecs == nil {
+		f.ecs = map[string]mosdnsclient.ECSSnapshot{}
+	}
+	current := f.ecs[group]
+	if snapshot.ExpectedCurrentVersion != current.Version {
+		return mosdnsclient.ECSSnapshot{}, mosdnsclient.ErrConflict
+	}
+	f.ecs[group] = snapshot
 	return snapshot, nil
 }
 func (f *fakeMosdns) GeositeStatus(context.Context) (mosdnsclient.DomainSetStatus, error) {
@@ -162,11 +182,11 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, QueryRetentionDays: 3}, 1, "req-settings", "192.0.2.10"); err != nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3}, 1, "req-settings", "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := s.Settings(context.Background())
-	if err != nil || settings.CacheEnabled || settings.QueryRetentionDays != 3 || fake.cacheEnabled {
+	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.QueryRetentionDays != 3 || fake.cacheEnabled || fake.cacheTTL != 60 {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
 	}
 }

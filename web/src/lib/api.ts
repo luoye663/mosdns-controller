@@ -10,7 +10,8 @@ export interface Device { id: number; ip: string; mac: string; hostname: string;
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
 export interface Upstream { tag: string; addr: string; priority: number; weight: number }
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
-export interface Settings { cache_enabled: boolean; query_retention_days: number }
+export interface ECSSnapshot { version: number; expected_current_version: number; mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }
+export interface Settings { cache_enabled: boolean; cache_ttl: number; query_retention_days: number }
 export interface GeositeStatus { source_url: string; version: number; checksum: string; rule_count: number; loaded_at: string }
 export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; cache_hit_count: number }
 export interface LatencyPoint { hour_start_ms: number; query_count: number; average_latency_us: number; max_latency_us: number }
@@ -43,6 +44,7 @@ export const api = {
   bootstrap: (username: string, password: string) => request<{ csrf_token: string }>('/auth/bootstrap', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request<{ id: number; username: string }>('/auth/me'),
   logout: () => request<{ logged_out: boolean }>('/auth/logout', { method: 'POST' }),
+  changePassword: (currentPassword: string, newPassword: string) => request<{ changed: boolean }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
   summary: () => request<DashboardSummary>('/stats/summary'),
   statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : `/stats/${kind}`),
   latency: () => request<{ items: LatencyPoint[] }>('/stats/latency'),
@@ -62,8 +64,9 @@ export const api = {
   updateDevice: (id: number, patch: { display_name?: string; note?: string }) => request<Device>(`/devices/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   systemStatus: () => request<SystemStatus>('/system/status'),
   flushCaches: () => request<{ flushed: boolean }>('/system/cache/flush', { method: 'POST', body: '{}' }),
-  upstreams: () => request<{ local: UpstreamSnapshot; remote: UpstreamSnapshot }>('/upstreams'),
+  upstreams: () => request<{ local: UpstreamSnapshot; remote: UpstreamSnapshot; local_ecs: ECSSnapshot; remote_ecs: ECSSnapshot }>('/upstreams'),
   updateUpstream: (group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) => request<UpstreamSnapshot>(`/upstreams/${group}`, { method: 'PUT', body: JSON.stringify(snapshot) }),
+  updateECS: (group: 'local_dns' | 'remote_dns', snapshot: ECSSnapshot) => request<ECSSnapshot>(`/upstreams/${group}/ecs`, { method: 'PUT', body: JSON.stringify(snapshot) }),
   settings: () => request<Settings>('/settings'),
   updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   geositeStatus: () => request<GeositeStatus>('/geosite'),

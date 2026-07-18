@@ -61,11 +61,14 @@ type SystemStatus struct {
 	AuditError           string                    `json:"audit_error,omitempty"`
 }
 type Upstreams struct {
-	Local  mosdnsclient.UpstreamSnapshot `json:"local"`
-	Remote mosdnsclient.UpstreamSnapshot `json:"remote"`
+	Local     mosdnsclient.UpstreamSnapshot `json:"local"`
+	Remote    mosdnsclient.UpstreamSnapshot `json:"remote"`
+	LocalECS  mosdnsclient.ECSSnapshot      `json:"local_ecs"`
+	RemoteECS mosdnsclient.ECSSnapshot      `json:"remote_ecs"`
 }
 type Settings struct {
 	CacheEnabled       bool `json:"cache_enabled"`
+	CacheTTL           int  `json:"cache_ttl"`
 	QueryRetentionDays int  `json:"query_retention_days"`
 }
 type GeositeStatus struct {
@@ -184,7 +187,7 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 }
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7}
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','query_retention_days')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days')`)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -207,6 +210,12 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 				return Settings{}, err
 			}
 			settings.QueryRetentionDays = parsed
+		case "cache_ttl":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Settings{}, err
+			}
+			settings.CacheTTL = parsed
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -214,6 +223,9 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	}
 	if settings.QueryRetentionDays < 1 || settings.QueryRetentionDays > 365 {
 		return Settings{}, errors.New("query retention days must be within 1..365")
+	}
+	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
+		return Settings{}, errors.New("cache TTL must be within 0..604800")
 	}
 	return settings, nil
 }
@@ -227,11 +239,17 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled)
+	if err := s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled); err != nil {
+		return err
+	}
+	return s.mosdns.SetCacheTTL(ctx, settings.CacheTTL)
 }
 func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID int64, requestID, clientIP string) error {
 	if settings.QueryRetentionDays < 1 || settings.QueryRetentionDays > 365 {
 		return errors.New("query retention days must be within 1..365")
+	}
+	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
+		return errors.New("cache TTL must be within 0..604800")
 	}
 	current, err := s.Settings(ctx)
 	if err != nil {
@@ -239,6 +257,11 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	if current.CacheEnabled != settings.CacheEnabled {
 		if err := s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled); err != nil {
+			return err
+		}
+	}
+	if current.CacheTTL != settings.CacheTTL {
+		if err := s.mosdns.SetCacheTTL(ctx, settings.CacheTTL); err != nil {
 			return err
 		}
 	}
@@ -256,7 +279,7 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}} {
+	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, item.key, item.value, now); err != nil {
 			return err
 		}
@@ -275,7 +298,43 @@ func (s *Service) Upstreams(ctx context.Context) (Upstreams, error) {
 	if err != nil {
 		return Upstreams{}, err
 	}
-	return Upstreams{Local: local, Remote: remote}, nil
+	localECS, err := s.mosdns.ECSStatus(ctx, "local_dns")
+	if err != nil {
+		return Upstreams{}, err
+	}
+	remoteECS, err := s.mosdns.ECSStatus(ctx, "remote_dns")
+	if err != nil {
+		return Upstreams{}, err
+	}
+	return Upstreams{Local: local, Remote: remote, LocalECS: localECS, RemoteECS: remoteECS}, nil
+}
+func (s *Service) UpdateECS(ctx context.Context, group string, snapshot mosdnsclient.ECSSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.ECSSnapshot, error) {
+	if group != "local_dns" && group != "remote_dns" {
+		return mosdnsclient.ECSSnapshot{}, errors.New("invalid upstream group")
+	}
+	updated, err := s.mosdns.ApplyECS(ctx, group, snapshot)
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		current, statusErr := s.mosdns.ECSStatus(ctx, group)
+		if statusErr == nil && current.Version == snapshot.Version {
+			updated, err = current, nil
+		}
+	}
+	result, code := "success", ""
+	if err != nil {
+		result, code = "failed", "ECS_APPLY_FAILED"
+	} else {
+		cache := "cache_remote"
+		if group == "local_dns" {
+			cache = "cache_local"
+		}
+		if flushErr := s.mosdns.Flush(ctx, cache); flushErr != nil {
+			err, result, code = flushErr, "failed", "CACHE_FLUSH_FAILED"
+		}
+	}
+	if auditErr := s.Audit(ctx, adminID, "update", "ecs", group, requestID, clientIP, result, code); auditErr != nil && err == nil {
+		err = auditErr
+	}
+	return updated, err
 }
 func (s *Service) UpdateUpstream(ctx context.Context, group string, snapshot mosdnsclient.UpstreamSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.UpstreamSnapshot, error) {
 	if group != "local_dns" && group != "remote_dns" {
