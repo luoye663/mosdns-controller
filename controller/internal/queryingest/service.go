@@ -34,26 +34,27 @@ type Event struct {
 	EventID       string `json:"event_id"`
 	TimestampMS   int64  `json:"timestamp_unix_ms"`
 	// ProcessStartedAtMS 由 mosdns 生成，用于跨进程追踪；当前 SQLite 查询表不需要单独索引该值。
-	ProcessStartedAtMS int64    `json:"process_started_at_unix_ms"`
-	ClientIP           string   `json:"client_ip"`
-	Protocol           string   `json:"protocol"`
-	QName              string   `json:"qname"`
-	QType              uint16   `json:"qtype"`
-	QClass             uint16   `json:"qclass"`
-	RCode              int      `json:"rcode"`
-	Route              string   `json:"route"`
-	RouteSource        string   `json:"route_source"`
-	UpstreamGroup      string   `json:"upstream_group"`
-	UpstreamTag        string   `json:"upstream_tag"`
-	CacheHit           bool     `json:"cache_hit"`
-	Snapshot           uint64   `json:"snapshot_version"`
-	AccessRuleID       int64    `json:"access_rule_id"`
-	RouteRuleID        int64    `json:"route_rule_id"`
-	AnswerCount        int      `json:"answer_count"`
-	AnswerIPs          []string `json:"answer_ips"`
-	LatencyUS          int64    `json:"latency_us"`
-	ErrorCode          string   `json:"error_code"`
-	ErrorText          string   `json:"error_text"`
+	ProcessStartedAtMS  int64    `json:"process_started_at_unix_ms"`
+	ClientIP            string   `json:"client_ip"`
+	Protocol            string   `json:"protocol"`
+	QName               string   `json:"qname"`
+	QType               uint16   `json:"qtype"`
+	QClass              uint16   `json:"qclass"`
+	RCode               int      `json:"rcode"`
+	Route               string   `json:"route"`
+	RouteSource         string   `json:"route_source"`
+	UpstreamGroup       string   `json:"upstream_group"`
+	UpstreamTag         string   `json:"upstream_tag"`
+	CacheHit            bool     `json:"cache_hit"`
+	Snapshot            uint64   `json:"snapshot_version"`
+	AccessRuleID        int64    `json:"access_rule_id"`
+	RouteRuleID         int64    `json:"route_rule_id"`
+	AnswerCount         int      `json:"answer_count"`
+	AnswerMinTTLSeconds *int     `json:"answer_min_ttl_seconds"`
+	AnswerIPs           []string `json:"answer_ips"`
+	LatencyUS           int64    `json:"latency_us"`
+	ErrorCode           string   `json:"error_code"`
+	ErrorText           string   `json:"error_text"`
 }
 
 type Batch struct {
@@ -77,28 +78,29 @@ type Page struct {
 	NextCursor string        `json:"next_cursor,omitempty"`
 }
 type StoredEvent struct {
-	ID            int64  `json:"id"`
-	EventID       string `json:"event_id"`
-	TimestampMS   int64  `json:"timestamp_unix_ms"`
-	ClientIP      string `json:"client_ip"`
-	Protocol      string `json:"protocol"`
-	QName         string `json:"qname"`
-	QType         int    `json:"qtype"`
-	QClass        int    `json:"qclass"`
-	RCode         int    `json:"rcode"`
-	Route         string `json:"route"`
-	RouteSource   string `json:"route_source"`
-	UpstreamGroup string `json:"upstream_group"`
-	UpstreamTag   string `json:"upstream_tag"`
-	CacheHit      bool   `json:"cache_hit"`
-	Snapshot      uint64 `json:"snapshot_version"`
-	AccessRuleID  int64  `json:"access_rule_id"`
-	RouteRuleID   int64  `json:"route_rule_id"`
-	AnswerCount   int    `json:"answer_count"`
-	LatencyUS     int64  `json:"latency_us"`
-	ErrorCode     string `json:"error_code"`
-	ErrorText     string `json:"error_text"`
-	DeviceName    string `json:"device_name"`
+	ID                  int64  `json:"id"`
+	EventID             string `json:"event_id"`
+	TimestampMS         int64  `json:"timestamp_unix_ms"`
+	ClientIP            string `json:"client_ip"`
+	Protocol            string `json:"protocol"`
+	QName               string `json:"qname"`
+	QType               int    `json:"qtype"`
+	QClass              int    `json:"qclass"`
+	RCode               int    `json:"rcode"`
+	Route               string `json:"route"`
+	RouteSource         string `json:"route_source"`
+	UpstreamGroup       string `json:"upstream_group"`
+	UpstreamTag         string `json:"upstream_tag"`
+	CacheHit            bool   `json:"cache_hit"`
+	Snapshot            uint64 `json:"snapshot_version"`
+	AccessRuleID        int64  `json:"access_rule_id"`
+	RouteRuleID         int64  `json:"route_rule_id"`
+	AnswerCount         int    `json:"answer_count"`
+	AnswerMinTTLSeconds *int   `json:"answer_min_ttl_seconds"`
+	LatencyUS           int64  `json:"latency_us"`
+	ErrorCode           string `json:"error_code"`
+	ErrorText           string `json:"error_text"`
+	DeviceName          string `json:"device_name"`
 }
 
 type Subscriber struct {
@@ -219,7 +221,7 @@ func validateEvent(e Event) error {
 	if _, err := netip.ParseAddr(e.ClientIP); err != nil || len(e.QName) == 0 || len(e.QName) > 253 || strings.ToLower(strings.TrimSuffix(e.QName, ".")) != e.QName {
 		return errors.New("invalid event fields")
 	}
-	if e.QType == 0 || e.QClass == 0 || e.RCode < 0 || e.RCode > 23 || e.LatencyUS < 0 || e.AnswerCount < 0 || e.Snapshot > uint64(^uint64(0)>>1) {
+	if e.QType == 0 || e.QClass == 0 || e.RCode < 0 || e.RCode > 23 || e.LatencyUS < 0 || e.AnswerCount < 0 || (e.AnswerMinTTLSeconds != nil && (*e.AnswerMinTTLSeconds < 0 || *e.AnswerMinTTLSeconds > 1<<32-1)) || e.Snapshot > uint64(^uint64(0)>>1) {
 		return errors.New("invalid event values")
 	}
 	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "local" && e.Route != "remote" && e.Route != "block") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule" && e.RouteSource != "geosite") {
@@ -294,7 +296,7 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 	stored := make([]StoredEvent, 0, len(events))
 	now := time.Now().UnixMilli()
 	for _, e := range events {
-		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,answer_count,latency_us,error_code,error_text,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, e.UpstreamTag, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.AnswerCount, e.LatencyUS, e.ErrorCode, e.ErrorText, now)
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,answer_count,answer_min_ttl_seconds,latency_us,error_code,error_text,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, e.UpstreamTag, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.AnswerCount, e.AnswerMinTTLSeconds, e.LatencyUS, e.ErrorCode, e.ErrorText, now)
 		if err != nil {
 			return nil, err
 		}
@@ -367,7 +369,7 @@ func boolInt(v bool) int {
 	return 0
 }
 func fromEvent(e Event) StoredEvent {
-	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerCount: e.AnswerCount, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText}
+	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerCount: e.AnswerCount, AnswerMinTTLSeconds: e.AnswerMinTTLSeconds, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText}
 }
 
 func (s *Service) Subscribe(q Query, _ string) (Subscriber, error) {
@@ -454,7 +456,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 		args = append(args, ts, ts, id)
 	}
 	args = append(args, q.Limit+1)
-	rows, err := s.db.QueryContext(ctx, `SELECT q.id,q.event_id,q.timestamp_unix_ms,q.client_ip,q.protocol,q.qname,q.qtype,q.qclass,COALESCE(q.rcode,0),q.route,q.route_source,COALESCE(q.upstream_group,''),COALESCE(q.upstream_tag,''),q.cache_hit,q.snapshot_version,COALESCE(q.access_rule_id,0),COALESCE(q.route_rule_id,0),q.answer_count,q.latency_us,COALESCE(q.error_code,''),COALESCE(q.error_text,''),COALESCE(NULLIF(d.display_name,''),d.hostname,'') FROM dns_queries q LEFT JOIN devices d ON d.ip=q.client_ip WHERE `+strings.Join(where, " AND ")+` ORDER BY q.timestamp_unix_ms DESC,q.id DESC LIMIT ?`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT q.id,q.event_id,q.timestamp_unix_ms,q.client_ip,q.protocol,q.qname,q.qtype,q.qclass,COALESCE(q.rcode,0),q.route,q.route_source,COALESCE(q.upstream_group,''),COALESCE(q.upstream_tag,''),q.cache_hit,q.snapshot_version,COALESCE(q.access_rule_id,0),COALESCE(q.route_rule_id,0),q.answer_count,q.answer_min_ttl_seconds,q.latency_us,COALESCE(q.error_code,''),COALESCE(q.error_text,''),COALESCE(NULLIF(d.display_name,''),d.hostname,'') FROM dns_queries q LEFT JOIN devices d ON d.ip=q.client_ip WHERE `+strings.Join(where, " AND ")+` ORDER BY q.timestamp_unix_ms DESC,q.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return Page{}, err
 	}
@@ -464,7 +466,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 	for rows.Next() {
 		var e StoredEvent
 		var hit int
-		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerCount, &e.LatencyUS, &e.ErrorCode, &e.ErrorText, &e.DeviceName); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerCount, &e.AnswerMinTTLSeconds, &e.LatencyUS, &e.ErrorCode, &e.ErrorText, &e.DeviceName); err != nil {
 			return Page{}, err
 		}
 		e.CacheHit = hit == 1

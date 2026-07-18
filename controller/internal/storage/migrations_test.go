@@ -56,6 +56,9 @@ func TestMigrateV1DatabaseAddsUpstreamTag(t *testing.T) {
 	if columnCount != 1 || migrationCount != 1 {
 		t.Fatalf("upstream_tag column=%d migration 2=%d, want 1,1", columnCount, migrationCount)
 	}
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='answer_min_ttl_seconds'`).Scan(&columnCount); err != nil || columnCount != 1 {
+		t.Fatalf("answer_min_ttl_seconds column=%d err=%v, want 1,nil", columnCount, err)
+	}
 }
 
 func TestBackupCreatesConsistentSQLiteFile(t *testing.T) {

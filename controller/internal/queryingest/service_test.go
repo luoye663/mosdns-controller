@@ -103,6 +103,23 @@ func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
 	}
 }
 
+func TestPersistStoresMinimumAnswerTTL(t *testing.T) {
+	s := testService(t)
+	event := validEvent("answer-min-ttl")
+	event.AnswerMinTTLSeconds = intPtr(60)
+	stored, err := s.persist(context.Background(), []Event{event})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].AnswerMinTTLSeconds == nil || *stored[0].AnswerMinTTLSeconds != 60 {
+		t.Fatalf("stored minimum answer TTL = %+v", stored)
+	}
+	page, err := s.Queries(context.Background(), Query{Limit: 1})
+	if err != nil || len(page.Items) != 1 || page.Items[0].AnswerMinTTLSeconds == nil || *page.Items[0].AnswerMinTTLSeconds != 60 {
+		t.Fatalf("queried minimum answer TTL = %+v err=%v", page.Items, err)
+	}
+}
+
 func TestPersistStoresGeositeRouteSource(t *testing.T) {
 	s := testService(t)
 	event := validEvent("geosite-source")
@@ -214,6 +231,7 @@ func TestSubscribeOnlyReceivesEventsPublishedAfterSubscription(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+func intPtr(value int) *int    { return &value }
 
 func TestPersistRollbackDoesNotLeavePartialAggregation(t *testing.T) {
 	s := testService(t)

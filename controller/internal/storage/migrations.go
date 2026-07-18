@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -72,4 +72,9 @@ var migrationV4 = []string{
 	`CREATE INDEX idx_dns_queries_rcode_time ON dns_queries(rcode,timestamp_unix_ms DESC,id DESC)`,
 	`CREATE INDEX idx_dns_queries_cache_time ON dns_queries(cache_hit,timestamp_unix_ms DESC,id DESC)`,
 	`CREATE INDEX idx_dns_queries_upstream_tag_time ON dns_queries(upstream_tag,timestamp_unix_ms DESC,id DESC)`,
+}
+
+// migrationV5 stores the smallest TTL in the final DNS Answer section.
+var migrationV5 = []string{
+	`ALTER TABLE dns_queries ADD COLUMN answer_min_ttl_seconds INTEGER`,
 }
