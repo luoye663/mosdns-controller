@@ -9,7 +9,7 @@ import (
 
 // static 是构建阶段复制 WebUI dist 后的嵌入目录。
 //
-//go:embed static/*
+//go:embed all:static placeholder.html
 var files embed.FS
 
 func Handler() http.Handler {
@@ -23,8 +23,11 @@ func Handler() http.Handler {
 		if path := strings.TrimPrefix(r.URL.Path, "/"); path == "" || !strings.Contains(path, ".") {
 			index, err := fs.ReadFile(sub, "index.html")
 			if err != nil {
-				http.Error(w, "web entry is unavailable", http.StatusInternalServerError)
-				return
+				index, err = files.ReadFile("placeholder.html")
+				if err != nil {
+					http.Error(w, "web entry is unavailable", http.StatusInternalServerError)
+					return
+				}
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write(index)

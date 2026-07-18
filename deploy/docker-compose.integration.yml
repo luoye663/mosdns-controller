@@ -37,6 +37,7 @@ services:
     volumes:
       - mosdns-integration-state:/var/lib/mosdns
       - ./mosdns/config.integration.yaml:/etc/mosdns/config.integration.yaml:ro
+      - ./mosdns/rules:/etc/mosdns/rules:ro
       - ./secrets:/run/secrets:ro
     networks: [integration]
 

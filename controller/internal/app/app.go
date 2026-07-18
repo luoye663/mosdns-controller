@@ -589,7 +589,8 @@ func (a *App) flushCaches(w http.ResponseWriter, r *http.Request) {
 func (a *App) upstreams(w http.ResponseWriter, r *http.Request) {
 	items, err := a.ops.Upstreams(r.Context())
 	if err != nil {
-		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", "upstream configuration is unavailable")
+		a.logger.Warn("read upstream or ECS configuration", "error", err)
+		writeError(w, r, 502, "MOSDNS_UNAVAILABLE", "upstream or ECS runtime configuration is unavailable; deploy matching mosdns binary and configuration")
 		return
 	}
 	writeData(w, r, 200, items)

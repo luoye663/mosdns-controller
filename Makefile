@@ -2,6 +2,8 @@ MOSDNS_BASE := v5.3.4
 LOCAL_DIR := .local
 LOCAL_TOKEN := $(LOCAL_DIR)/mosdns_control_token
 LOCAL_MOSDNS_CONFIG := deploy/local/mosdns.yaml
+COMPOSE_MOSDNS_CONFIG := deploy/mosdns/config.yaml
+INTEGRATION_MOSDNS_CONFIG := deploy/mosdns/config.integration.yaml
 LOCAL_CONTROLLER_CONFIG := deploy/local/controller.yaml
 BINARY_DEPLOY_DIR := deploy/binary
 BINARY_PACKAGE_DIR := $(BINARY_DEPLOY_DIR)/package
@@ -9,7 +11,7 @@ BINARY_GOOS ?= $(shell go env GOOS)
 BINARY_GOARCH ?= $(shell go env GOARCH)
 BINARY_ARCHIVE := $(BINARY_DEPLOY_DIR)/mosdns-manager-$(BINARY_GOOS)-$(BINARY_GOARCH).tar.gz
 
-.PHONY: build test race lint web-build web-embed compose-up compose-down local-init local-mosdns local-controller local-up local-create-admin local-clean binary-package binary-copy binary-clean
+.PHONY: build test race lint web-build web-embed configs compose-up compose-down local-init local-mosdns local-controller local-up local-create-admin local-clean binary-package binary-copy binary-clean
 
 build: web-embed
 	go -C mosdns build ./...
@@ -39,11 +41,21 @@ web-build: web-embed
 # controller 通过 go:embed 提供生产 WebUI；本地 Go 构建前必须同步最新 dist。
 web-embed:
 	npm --prefix web run build
-	rm -rf controller/internal/web/static
-	mkdir -p controller/internal/web/static
+	rm -rf controller/internal/web/static/*
 	cp -R web/dist/. controller/internal/web/static/
 
-compose-up:
+configs: $(COMPOSE_MOSDNS_CONFIG) $(LOCAL_MOSDNS_CONFIG) $(INTEGRATION_MOSDNS_CONFIG)
+
+$(COMPOSE_MOSDNS_CONFIG): deploy/mosdns/config.yaml.tmpl deploy/render-mosdns-config.sh
+	bash deploy/render-mosdns-config.sh compose $@
+
+$(LOCAL_MOSDNS_CONFIG): deploy/mosdns/config.yaml.tmpl deploy/render-mosdns-config.sh
+	bash deploy/render-mosdns-config.sh local $@
+
+$(INTEGRATION_MOSDNS_CONFIG): deploy/mosdns/config.yaml.tmpl deploy/render-mosdns-config.sh
+	bash deploy/render-mosdns-config.sh integration $@
+
+compose-up: $(COMPOSE_MOSDNS_CONFIG)
 	docker compose -f deploy/docker-compose.yml up --build
 
 compose-down:
@@ -56,14 +68,14 @@ local-init:
 	chmod 600 $(LOCAL_TOKEN)
 
 # 请在独立终端执行 make local-mosdns 和 make local-controller，或执行 make local-up。
-local-mosdns: local-init
+local-mosdns: local-init $(LOCAL_MOSDNS_CONFIG)
 	go -C mosdns run . start -c ../$(LOCAL_MOSDNS_CONFIG)
 
 # 运行 controller
 local-controller: local-init
 	go -C controller run ./cmd/controller serve -config ../$(LOCAL_CONTROLLER_CONFIG)
 
-local-up: local-init web-embed
+local-up: local-init web-embed $(LOCAL_MOSDNS_CONFIG)
 	@set -e; \
 	go -C mosdns run . start -c ../$(LOCAL_MOSDNS_CONFIG) & mosdns_pid=$$!; \
 	go -C controller run ./cmd/controller serve -config ../$(LOCAL_CONTROLLER_CONFIG) & controller_pid=$$!; \
@@ -87,7 +99,7 @@ binary-package: web-embed
 	install -d $(BINARY_PACKAGE_DIR)/bin $(BINARY_PACKAGE_DIR)/etc/mosdns/rules $(BINARY_PACKAGE_DIR)/etc/controller $(BINARY_PACKAGE_DIR)/systemd
 	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C mosdns build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/mosdns .
 	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C controller build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/controller ./cmd/controller
-	install -m 0640 $(BINARY_DEPLOY_DIR)/mosdns.yaml $(BINARY_PACKAGE_DIR)/etc/mosdns/config.yaml
+	bash deploy/render-mosdns-config.sh binary $(BINARY_PACKAGE_DIR)/etc/mosdns/config.yaml
 	install -m 0640 $(BINARY_DEPLOY_DIR)/controller.yaml $(BINARY_PACKAGE_DIR)/etc/controller/config.yaml
 	install -m 0640 deploy/mosdns/rules/geosite_cn.txt $(BINARY_PACKAGE_DIR)/etc/mosdns/rules/geosite_cn.txt
 	install -m 0644 $(BINARY_DEPLOY_DIR)/mosdns.service $(BINARY_PACKAGE_DIR)/systemd/mosdns.service

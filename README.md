@@ -33,7 +33,7 @@ chmod 0444 deploy/secrets/mosdns_control_token
 
 `deploy/secrets/` 保持为 `0700`，token 文件可供容器内的非 root 服务读取，但普通宿主机用户不能访问该目录。不要将 token 写入 Compose 文件或提交到 Git。
 
-编辑 `deploy/mosdns/config.yaml`，将 `<REMOTE_DOH_URL>` 替换为实际远程 DoH 端点。该初始值仅用于首次启动；保留占位符会导致 mosdns 无法启动。首次启动后，在 WebUI 的“上游 DNS”页面管理本地和远程上游，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
+mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。执行 `make configs` 会生成 Compose、本地和集成测试配置；`make binary-package` 会直接生成包内二进制配置。首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
 
 `deploy/mosdns/rules/geosite_cn.txt` 可导入静态国内域名规则；保留为空时，静态国内分类关闭，但 WebUI 的动态路由规则仍可用。
 
@@ -176,7 +176,7 @@ go -C controller build -o ../bin/controller ./cmd/controller
 
 ### 本地运行完整服务
 
-`deploy/local/` 提供不依赖 Docker 的开发配置。它只监听本机回环地址，端口为 DNS `5353`、WebUI/API `18080`、内部 ingest `18081`、mosdns API `19091`，所有本地数据均写入被 Git 忽略的 `.local/`。配置中的公开 DoH 仅用于开发功能验证，不应用于生产；其 `forward` 已配置 SOCKS5 `192.168.18.35:10808`，如本机代理地址不同，请修改 `deploy/local/mosdns.yaml` 中两个 `socks5` 值。
+`deploy/local/` 提供不依赖 Docker 的开发配置。它只监听本机回环地址，端口为 DNS `5353`、WebUI/API `18080`、内部 ingest `18081`、mosdns API `19091`，所有本地数据均写入被 Git 忽略的 `.local/`。配置中的公开 DoH 仅用于开发功能验证，不应用于生产。
 
 先执行初始化，然后在两个终端分别运行以下命令：
 
@@ -203,6 +203,7 @@ mkdir -p deploy/secrets
 chmod 0700 deploy/secrets
 openssl rand -hex 32 > deploy/secrets/mosdns_control_token
 chmod 0444 deploy/secrets/mosdns_control_token
+make configs
 docker compose -f deploy/docker-compose.integration.yml --profile integration up --build
 ```
 
@@ -217,7 +218,7 @@ go -C mosdns test -v ./tests/integration
 ## 配置、数据与运维
 
 - 生产 Compose：`deploy/docker-compose.yml`。
-- mosdns 配置：`deploy/mosdns/config.yaml`。
+- mosdns 配置模板：`deploy/mosdns/config.yaml.tmpl`；运行配置由 `make configs` 生成。
 - controller 配置：`deploy/controller/config.yaml`。
 - 持久化数据：Compose 命名卷 `mosdns-state`（快照和缓存）与 `controller-state`（SQLite）。
 - 密钥目录：`deploy/secrets/`，只保留 `.gitkeep`，实际 token 被 Git 忽略。

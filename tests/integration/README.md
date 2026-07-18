@@ -24,6 +24,7 @@ docker compose -f deploy/docker-compose.yml up
 使用两个 CoreDNS mock upstream 的 Compose integration profile：
 
 ```bash
+make configs
 docker compose -f deploy/docker-compose.integration.yml --profile integration up --build
 ```
 

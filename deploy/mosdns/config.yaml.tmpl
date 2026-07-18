@@ -1,0 +1,205 @@
+# 本模板由 deploy/render-mosdns-config.sh 按 compose、local、integration、binary profile 渲染。
+# ${...} 为渲染变量；$plugin_tag 为 mosdns sequence 的插件引用，渲染时保持原样。
+
+log:
+  level: info
+
+# mosdns 插件 HTTP API 监听地址。生产 Compose 仅在内部网络暴露，不映射到宿主机。
+api:
+  http: "${MOSDNS_API_LISTEN}"
+
+plugins:
+  # 国内域名集合。内容由 controller 原子发布，DNS 请求路径只读取内存快照。
+  - tag: geosite_cn
+    type: dynamic_domain_set
+    args:
+      # 插件当前快照、上一个可恢复快照、首次导入的静态规则文件。
+      snapshot_file: "${MOSDNS_STATE_DIR}/geosite-cn.json"
+      backup_file: "${MOSDNS_STATE_DIR}/geosite-cn.json.bak"
+      initial_file: "${MOSDNS_RULES_DIR}/geosite_cn.txt"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      max_bytes: 20971520
+
+  # 管理页面发布的 allow/block/local/remote/no_log 动态规则。
+  - tag: dynamic_rules
+    type: dynamic_rule_engine
+    args:
+      snapshot_file: "${MOSDNS_STATE_DIR}/dynamic-rules.json"
+      backup_file: "${MOSDNS_STATE_DIR}/dynamic-rules.json.bak"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      # 规则、正则和 API 请求体安全上限。
+      max_rules: 200000
+      max_regexp_rules: 500
+      max_request_body_bytes: 67108864
+      fail_open_on_snapshot_error: true
+      marks:
+        access_block: 1001
+        route_local: 1101
+        route_remote: 1102
+        no_log: 1201
+
+  # DNS 后置审计。事件异步发送至 controller，队列满时丢弃而不阻塞 DNS。
+  - tag: query_audit
+    type: query_audit
+    args:
+      # controller ingest 地址、队列容量、批量大小、发送超时和重试次数。
+      endpoint: "${QUERY_AUDIT_ENDPOINT}"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      queue_size: ${QUERY_AUDIT_QUEUE_SIZE}
+      batch_size: ${QUERY_AUDIT_BATCH_SIZE}
+      flush_interval: "250ms"
+      request_timeout: "${QUERY_AUDIT_TIMEOUT}"
+      max_retries: ${QUERY_AUDIT_RETRIES}
+      # 是否在审计事件中发送应答；默认关闭以减少隐私数据。
+      include_answers: ${QUERY_AUDIT_INCLUDE_ANSWERS}
+      include_error_text: true
+      max_error_text_bytes: 256
+      marks:
+        access_block: 1001
+        route_local: 1101
+        route_remote: 1102
+        no_log: 1201
+        geosite_local: 1301
+        cache_hit: 2101
+
+  # local 与 remote 使用独立缓存，避免不同上游组的结果串用。
+  - tag: cache_local
+    type: cache
+    args:
+      # 最大条目数；lazy_cache_ttl 为 0 时严格遵循上游 TTL。
+      size: ${CACHE_SIZE}
+      lazy_cache_ttl: 0
+      # cache dump 持久化路径和周期；auth token 保护 cache runtime API。
+      dump_file: "${MOSDNS_STATE_DIR}/cache-local.dump"
+      dump_interval: ${CACHE_DUMP_INTERVAL}
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+
+  # 本地上游 ECS。默认关闭；WebUI 可热更新客户端网段或固定 IPv4/IPv6 网段。
+  - tag: ecs_local
+    type: dynamic_ecs
+    args:
+      snapshot_file: "${MOSDNS_STATE_DIR}/ecs-local.json"
+      backup_file: "${MOSDNS_STATE_DIR}/ecs-local.json.bak"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
+
+  # 远程上游专用缓存。
+  - tag: cache_remote
+    type: cache
+    args:
+      size: ${CACHE_SIZE}
+      lazy_cache_ttl: 0
+      dump_file: "${MOSDNS_STATE_DIR}/cache-remote.dump"
+      dump_interval: ${CACHE_DUMP_INTERVAL}
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+
+  # 远程上游 ECS，与本地上游独立配置和持久化。
+  - tag: ecs_remote
+    type: dynamic_ecs
+    args:
+      snapshot_file: "${MOSDNS_STATE_DIR}/ecs-remote.json"
+      backup_file: "${MOSDNS_STATE_DIR}/ecs-remote.json.bak"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
+
+  # local 上游组。snapshot 由 WebUI 热发布，initial 仅首次启动时使用。
+  - tag: local_dns
+    type: dynamic_forward
+    args:
+      snapshot_file: "${MOSDNS_STATE_DIR}/local-upstreams.json"
+      backup_file: "${MOSDNS_STATE_DIR}/local-upstreams.json.bak"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      initial:
+        version: 1
+        concurrent: ${LOCAL_CONCURRENT}
+        # 并发上游数和可选 SOCKS5 代理；空字符串表示不使用代理。
+        socks5: "${LOCAL_SOCKS5}"
+        upstreams:
+          - tag: ${LOCAL_UPSTREAM_1_TAG}
+            addr: "${LOCAL_UPSTREAM_1_ADDR}"
+          - tag: ${LOCAL_UPSTREAM_2_TAG}
+            addr: "${LOCAL_UPSTREAM_2_ADDR}"
+
+  # remote 上游组，与 local 组独立快照、调度和缓存。
+  - tag: remote_dns
+    type: dynamic_forward
+    args:
+      snapshot_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json"
+      backup_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json.bak"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      initial:
+        version: 1
+        concurrent: ${REMOTE_CONCURRENT}
+        socks5: "${REMOTE_SOCKS5}"
+        upstreams:
+          - tag: ${REMOTE_UPSTREAM_TAG}
+            addr: "${REMOTE_UPSTREAM_ADDR}"
+
+  # 路由 sequence：先写入 ECS，再查询对应 cache，未命中后才访问上游。
+  - tag: route_local
+    type: sequence
+    args:
+      - exec: mark 1101
+      - exec: $ecs_local
+      - exec: $cache_local
+      - matches:
+          - has_resp
+        exec: mark 2101
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $local_dns
+      - exec: accept
+
+  - tag: route_remote
+    type: sequence
+    args:
+      - exec: mark 1102
+      - exec: $ecs_remote
+      - exec: $cache_remote
+      - matches:
+          - has_resp
+        exec: mark 2101
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $remote_dns
+      - exec: accept
+
+  # DNS 主入口：动态 block 必须先于任何 cache；规则路由优先于 geosite 默认路由。
+  - tag: main
+    type: sequence
+    args:
+      # 后置审计必须在最前，才能观察后续 goto、accept 与 reject 的结果。
+      - exec: $query_audit
+      - exec: $dynamic_rules
+      # block 必须先于 cache，新增黑名单会立即生效。
+      - matches:
+          - mark 1001
+        exec: reject 3
+      - matches:
+          - mark 1101
+        exec: goto route_local
+      - matches:
+          - mark 1102
+        exec: goto route_remote
+      - matches:
+          - qname $geosite_cn
+        exec: mark 1301
+      - matches:
+          - qname $geosite_cn
+        exec: goto route_local
+      - exec: goto route_remote
+
+  # DNS UDP/TCP 监听地址；生产通常为 :53，集成测试使用 :5353。
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: main
+      listen: "${DNS_LISTEN}"
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: main
+      listen: "${DNS_LISTEN}"

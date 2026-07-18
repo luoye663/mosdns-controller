@@ -15,8 +15,14 @@ web/*.tsbuildinfo
 .local/
 .DS_Store
 
-controller/internal/web/static
+controller/internal/web/static/*
+!controller/internal/web/static/.gitkeep
 
 # 原生二进制部署包由 make binary-package 生成。
-deploy/binary/package/
+deploy/binary/package/*
 deploy/binary/*.tar.gz
+
+# mosdns runtime configurations are generated from deploy/mosdns/config.yaml.tmpl.
+deploy/mosdns/config.yaml
+deploy/mosdns/config.integration.yaml
+deploy/local/mosdns.yaml
