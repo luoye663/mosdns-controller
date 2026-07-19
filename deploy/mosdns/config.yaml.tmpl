@@ -66,6 +66,7 @@ plugins:
         subscription_local: 1301
         subscription_remote: 1302
         subscription_block: 1303
+        subscription_allow: 1304
         cache_hit: 2101
 
   # local 与 remote 使用独立缓存，避免不同上游组的结果串用。
@@ -211,6 +212,9 @@ plugins:
         exec: goto subscription_routes
       - matches:
           - qname $subscription_allow
+        exec: mark 1304
+      - matches:
+          - mark 1304
         exec: goto subscription_routes
       - matches:
           - qname $subscription_block

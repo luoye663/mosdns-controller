@@ -69,6 +69,7 @@ function ruleLabel(rule: Rule) {
   } as Record<string, string>)[`${rule.category}:${rule.action}`] ?? '动态规则'
 }
 function routeSourceLabel(row: QueryEvent) {
+	if (row.subscription_categories?.length) return row.subscription_categories.map((category) => ({ allow: '白名单订阅集合', block: '黑名单订阅集合', local: '强制国内订阅集合', remote: '强制国外订阅集合' } as Record<string, string>)[category] ?? category).join(' · ')
   if (row.route_source === 'default') return '默认路由'
 	if (row.route_source === 'subscription') return '订阅集合'
 	if (row.subscription_source_id) return `${row.subscription_source_name || '订阅源'} #${row.subscription_source_id}`
