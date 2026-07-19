@@ -404,12 +404,12 @@ func (a *App) answerIPs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid event identifier")
 		return
 	}
-	ips, ok := a.ingest.AnswerIPs(eventID)
+	diagnostics, ok := a.ingest.AnswerDiagnostics(eventID)
 	if !ok {
-		writeError(w, r, http.StatusNotFound, "ANSWER_IPS_UNAVAILABLE", "answer IPs are no longer available in memory")
+		writeError(w, r, http.StatusNotFound, "ANSWER_DIAGNOSTICS_UNAVAILABLE", "answer diagnostics are no longer available in memory")
 		return
 	}
-	writeData(w, r, http.StatusOK, map[string][]string{"answer_ips": ips})
+	writeData(w, r, http.StatusOK, diagnostics)
 }
 
 // queryStream 的写入在 HTTP goroutine 内完成；broadcaster 从不等待该 goroutine。
@@ -916,7 +916,7 @@ func chineseErrorMessage(code, message string) string {
 		"invalid internal token":                                        "内部令牌无效",
 		"query ingestion is overloaded":                                 "查询事件接收服务繁忙",
 		"invalid event identifier":                                      "事件标识无效",
-		"answer IPs are no longer available in memory":                  "应答 IP 已不在内存中",
+		"answer diagnostics are no longer available in memory":          "应答诊断数据已不在内存中",
 		"streaming is unavailable":                                      "流式传输不可用",
 		"read summary failed":                                           "读取汇总统计失败",
 		"read statistics failed":                                        "读取统计数据失败",
@@ -970,6 +970,9 @@ func chineseErrorMessage(code, message string) string {
 		"event field exceeds limit":                              "查询事件字段超过长度限制",
 		"too many answer IPs":                                    "应答 IP 数量超过限制",
 		"invalid answer IP":                                      "应答 IP 无效",
+		"too many answer records":                                "应答记录数量超过限制",
+		"invalid answer record":                                  "应答记录无效",
+		"answer records exceed size limit":                       "应答记录超过大小限制",
 		"invalid cursor":                                         "分页游标无效",
 		"invalid client_ip":                                      "client_ip 参数无效",
 		"invalid route":                                          "route 参数无效",

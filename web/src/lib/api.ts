@@ -5,6 +5,7 @@ export interface Rule { id: number; category: string; action: string; match_type
 export type RuleInput = Omit<Rule, 'id' | 'updated_at_ms'>
 export interface Version { version: number; checksum: string; status: string; rule_count: number; created_at_ms: number; error_code?: string }
 export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; device_name: string; protocol: string; qname: string; qtype: number; qclass: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; snapshot_version: number; access_rule_id: number; route_rule_id: number; subscription_source_id: number; subscription_source_name: string; subscription_categories: string[]; answer_count: number; answer_min_ttl_seconds: number | null; latency_us: number; error_code: string; error_text: string }
+export interface AnswerDiagnostics { answer_ips: string[]; answer_records: string[] }
 export type QueryParams = Record<string, string | number | boolean | undefined>
 export interface Device { id: number; ip: string; mac: string; hostname: string; display_name: string; note: string; source: string; first_seen_at_ms: number; last_seen_at_ms: number; query_count_24h: number }
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
@@ -63,7 +64,7 @@ export const api = {
   statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : `/stats/${kind}`),
   latency: () => request<{ items: LatencyPoint[] }>('/stats/latency'),
   queries: (params: QueryParams) => request<{ items: QueryEvent[]; next_cursor?: string }>(`/queries?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
-  answerIPs: (eventID: string) => request<{ answer_ips: string[] }>(`/queries/${encodeURIComponent(eventID)}/answer-ips`),
+  answerDiagnostics: (eventID: string) => request<AnswerDiagnostics>(`/queries/${encodeURIComponent(eventID)}/answer-ips`),
   rules: () => request<{ items: Rule[] }>('/rules'),
   createRule: (rule: RuleInput) => request<Version>('/rules', { method: 'POST', body: JSON.stringify(rule) }),
   updateRule: (id: number, rule: Rule) => request<Version>(`/rules/${id}`, { method: 'PATCH', body: JSON.stringify(rule) }),

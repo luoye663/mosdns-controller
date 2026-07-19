@@ -120,23 +120,27 @@ func TestPersistStoresMinimumAnswerTTL(t *testing.T) {
 	}
 }
 
-func TestAnswerIPsRemainInBoundedMemoryOnly(t *testing.T) {
+func TestAnswerDiagnosticsRemainInBoundedMemoryOnly(t *testing.T) {
 	s := testService(t)
-	event := validEvent("answer-ips")
+	event := validEvent("answer-diagnostics")
 	event.AnswerIPs = []string{"192.0.2.1", "2001:db8::1"}
+	event.AnswerRecords = []string{"example.com. 60 IN A 192.0.2.1", "example.com. 60 IN AAAA 2001:db8::1"}
 	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
 		t.Fatal(err)
 	}
-	ips, ok := s.AnswerIPs(event.EventID)
-	if !ok || len(ips) != 2 || ips[0] != "192.0.2.1" || ips[1] != "2001:db8::1" {
-		t.Fatalf("cached answer IPs = %#v, exists=%t", ips, ok)
+	diagnostics, ok := s.AnswerDiagnostics(event.EventID)
+	if !ok || len(diagnostics.AnswerIPs) != 2 || diagnostics.AnswerIPs[0] != "192.0.2.1" || diagnostics.AnswerIPs[1] != "2001:db8::1" || len(diagnostics.AnswerRecords) != 2 {
+		t.Fatalf("cached answer diagnostics = %#v, exists=%t", diagnostics, ok)
 	}
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='answer_ips'`).Scan(&count); err != nil {
+	var ipColumns, recordColumns int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='answer_ips'`).Scan(&ipColumns); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatal("answer IPs must not be persisted")
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='answer_records'`).Scan(&recordColumns); err != nil {
+		t.Fatal(err)
+	}
+	if ipColumns != 0 || recordColumns != 0 {
+		t.Fatal("answer diagnostics must not be persisted")
 	}
 }
 
@@ -146,9 +150,20 @@ func TestAnswerIPsReturnsEmptyArrayForAnswerWithoutAddress(t *testing.T) {
 	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
 		t.Fatal(err)
 	}
-	ips, ok := s.AnswerIPs(event.EventID)
-	if !ok || ips == nil || len(ips) != 0 {
-		t.Fatalf("cached answer IPs = %#v, exists=%t", ips, ok)
+	diagnostics, ok := s.AnswerDiagnostics(event.EventID)
+	if !ok || diagnostics.AnswerIPs == nil || diagnostics.AnswerRecords == nil || len(diagnostics.AnswerIPs) != 0 || len(diagnostics.AnswerRecords) != 0 {
+		t.Fatalf("cached answer diagnostics = %#v, exists=%t", diagnostics, ok)
+	}
+}
+
+func TestValidateEventRejectsOversizedAnswerDiagnostics(t *testing.T) {
+	event := validEvent("oversized-answer-diagnostics")
+	event.AnswerRecords = make([]string, maxAnswerRecords+1)
+	for i := range event.AnswerRecords {
+		event.AnswerRecords[i] = "example.com. 60 IN A 192.0.2.1"
+	}
+	if err := validateEvent(event); err == nil {
+		t.Fatal("oversized answer records were accepted")
 	}
 }
 

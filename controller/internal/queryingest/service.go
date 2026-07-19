@@ -21,10 +21,14 @@ import (
 )
 
 const (
-	maxBatchEvents = 500
-	queueCapacity  = 65_536
-	batchInterval  = 500 * time.Millisecond
-	batchSize      = 500
+	maxBatchEvents        = 500
+	queueCapacity         = 65_536
+	batchInterval         = 500 * time.Millisecond
+	batchSize             = 500
+	maxAnswerIPs          = 16
+	maxAnswerRecords      = 32
+	maxAnswerRecordBytes  = 1024
+	maxAnswerRecordsBytes = 16 * 1024
 )
 
 var latencyBucketBoundsUS = [...]int64{1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000, 10_000_000}
@@ -56,6 +60,7 @@ type Event struct {
 	AnswerCount            int      `json:"answer_count"`
 	AnswerMinTTLSeconds    *int     `json:"answer_min_ttl_seconds"`
 	AnswerIPs              []string `json:"answer_ips"`
+	AnswerRecords          []string `json:"answer_records"`
 	LatencyUS              int64    `json:"latency_us"`
 	ErrorCode              string   `json:"error_code"`
 	ErrorText              string   `json:"error_text"`
@@ -115,6 +120,12 @@ type Subscriber struct {
 	close func()
 }
 
+// AnswerDiagnostics is short-lived response data that is intentionally never persisted.
+type AnswerDiagnostics struct {
+	AnswerIPs     []string `json:"answer_ips"`
+	AnswerRecords []string `json:"answer_records"`
+}
+
 type subscription struct {
 	ch    chan StoredEvent
 	query Query
@@ -132,24 +143,24 @@ type metrics struct {
 	subscribers                                        prometheus.Gauge
 }
 type Service struct {
-	db             *sql.DB
-	token          []byte
-	queue          chan Event
-	enqueueMu      sync.Mutex
-	done           chan struct{}
-	wg             sync.WaitGroup
-	mu             sync.Mutex
-	nextSubscriber uint64
-	subscribers    map[uint64]subscription
-	answerIPs      map[string][]string
-	answerIPOrder  []string
-	metrics        metrics
-	dbPath         string
-	retentionDays  atomic.Int64
+	db                     *sql.DB
+	token                  []byte
+	queue                  chan Event
+	enqueueMu              sync.Mutex
+	done                   chan struct{}
+	wg                     sync.WaitGroup
+	mu                     sync.Mutex
+	nextSubscriber         uint64
+	subscribers            map[uint64]subscription
+	answerDiagnostics      map[string]AnswerDiagnostics
+	answerDiagnosticsOrder []string
+	metrics                metrics
+	dbPath                 string
+	retentionDays          atomic.Int64
 }
 
 func New(db *sql.DB, token string, dbPath string) *Service {
-	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), answerIPs: make(map[string][]string), answerIPOrder: make([]string, 0, 1024)}
+	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), answerDiagnostics: make(map[string]AnswerDiagnostics), answerDiagnosticsOrder: make([]string, 0, 1024)}
 	s.retentionDays.Store(7)
 	s.metrics = newMetrics()
 	s.wg.Add(2)
@@ -242,12 +253,25 @@ func validateEvent(e Event) error {
 			return errors.New("event field exceeds limit")
 		}
 	}
-	if len(e.AnswerIPs) > 16 {
+	if len(e.AnswerIPs) > maxAnswerIPs {
 		return errors.New("too many answer IPs")
 	}
 	for _, ip := range e.AnswerIPs {
 		if _, err := netip.ParseAddr(ip); err != nil {
 			return errors.New("invalid answer IP")
+		}
+	}
+	if len(e.AnswerRecords) > maxAnswerRecords {
+		return errors.New("too many answer records")
+	}
+	recordBytes := 0
+	for _, record := range e.AnswerRecords {
+		if len(record) == 0 || len(record) > maxAnswerRecordBytes {
+			return errors.New("invalid answer record")
+		}
+		recordBytes += len(record)
+		if recordBytes > maxAnswerRecordsBytes {
+			return errors.New("answer records exceed size limit")
 		}
 	}
 	return nil
@@ -330,7 +354,7 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	s.cacheAnswerIPs(inserted)
+	s.cacheAnswerDiagnostics(inserted)
 	for i := range stored {
 		// Live events use the same display name preference as paged query results.
 		_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(display_name,''),hostname,'') FROM devices WHERE ip=?`, stored[i].ClientIP).Scan(&stored[i].DeviceName)
@@ -424,30 +448,30 @@ func (s *Service) publish(events []StoredEvent) {
 	}
 }
 
-func (s *Service) cacheAnswerIPs(events []Event) {
+func (s *Service) cacheAnswerDiagnostics(events []Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, event := range events {
-		if _, exists := s.answerIPs[event.EventID]; exists {
+		if _, exists := s.answerDiagnostics[event.EventID]; exists {
 			continue
 		}
-		s.answerIPs[event.EventID] = append([]string(nil), event.AnswerIPs...)
-		s.answerIPOrder = append(s.answerIPOrder, event.EventID)
-		if len(s.answerIPOrder) > cap(s.answerIPOrder) {
-			oldest := s.answerIPOrder[0]
-			delete(s.answerIPs, oldest)
-			copy(s.answerIPOrder, s.answerIPOrder[1:])
-			s.answerIPOrder = s.answerIPOrder[:len(s.answerIPOrder)-1]
+		s.answerDiagnostics[event.EventID] = AnswerDiagnostics{AnswerIPs: append([]string{}, event.AnswerIPs...), AnswerRecords: append([]string{}, event.AnswerRecords...)}
+		s.answerDiagnosticsOrder = append(s.answerDiagnosticsOrder, event.EventID)
+		if len(s.answerDiagnosticsOrder) > cap(s.answerDiagnosticsOrder) {
+			oldest := s.answerDiagnosticsOrder[0]
+			delete(s.answerDiagnostics, oldest)
+			copy(s.answerDiagnosticsOrder, s.answerDiagnosticsOrder[1:])
+			s.answerDiagnosticsOrder = s.answerDiagnosticsOrder[:len(s.answerDiagnosticsOrder)-1]
 		}
 	}
 }
 
-// AnswerIPs returns transient response addresses. They are never written to SQLite.
-func (s *Service) AnswerIPs(eventID string) ([]string, bool) {
+// AnswerDiagnostics returns transient response diagnostics. They are never written to SQLite.
+func (s *Service) AnswerDiagnostics(eventID string) (AnswerDiagnostics, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ips, ok := s.answerIPs[eventID]
-	return append([]string{}, ips...), ok
+	diagnostics, ok := s.answerDiagnostics[eventID]
+	return AnswerDiagnostics{AnswerIPs: append([]string{}, diagnostics.AnswerIPs...), AnswerRecords: append([]string{}, diagnostics.AnswerRecords...)}, ok
 }
 
 func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
