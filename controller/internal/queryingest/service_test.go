@@ -2,6 +2,7 @@ package queryingest
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -141,6 +142,24 @@ func TestAnswerDiagnosticsRemainInBoundedMemoryOnly(t *testing.T) {
 	}
 	if ipColumns != 0 || recordColumns != 0 {
 		t.Fatal("answer diagnostics must not be persisted")
+	}
+}
+
+func TestAnswerDiagnosticsEvictsEntriesBeyondFixedLimit(t *testing.T) {
+	s := testService(t)
+	events := make([]Event, maxAnswerDiagnostics+1)
+	for i := range events {
+		events[i] = validEvent("bounded-diagnostics-" + strconv.Itoa(i))
+	}
+	s.cacheAnswerDiagnostics(events)
+	if len(s.answerDiagnostics) != maxAnswerDiagnostics || len(s.answerDiagnosticsOrder) != maxAnswerDiagnostics {
+		t.Fatalf("diagnostic cache size = map:%d order:%d, want %d", len(s.answerDiagnostics), len(s.answerDiagnosticsOrder), maxAnswerDiagnostics)
+	}
+	if _, ok := s.AnswerDiagnostics(events[0].EventID); ok {
+		t.Fatal("oldest diagnostic was not evicted")
+	}
+	if _, ok := s.AnswerDiagnostics(events[len(events)-1].EventID); !ok {
+		t.Fatal("newest diagnostic was unexpectedly evicted")
 	}
 }
 

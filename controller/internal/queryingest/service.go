@@ -29,6 +29,7 @@ const (
 	maxAnswerRecords      = 32
 	maxAnswerRecordBytes  = 1024
 	maxAnswerRecordsBytes = 16 * 1024
+	maxAnswerDiagnostics  = 1024
 )
 
 var latencyBucketBoundsUS = [...]int64{1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000, 10_000_000}
@@ -160,7 +161,7 @@ type Service struct {
 }
 
 func New(db *sql.DB, token string, dbPath string) *Service {
-	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), answerDiagnostics: make(map[string]AnswerDiagnostics), answerDiagnosticsOrder: make([]string, 0, 1024)}
+	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), answerDiagnostics: make(map[string]AnswerDiagnostics), answerDiagnosticsOrder: make([]string, 0, maxAnswerDiagnostics)}
 	s.retentionDays.Store(7)
 	s.metrics = newMetrics()
 	s.wg.Add(2)
@@ -457,7 +458,7 @@ func (s *Service) cacheAnswerDiagnostics(events []Event) {
 		}
 		s.answerDiagnostics[event.EventID] = AnswerDiagnostics{AnswerIPs: append([]string{}, event.AnswerIPs...), AnswerRecords: append([]string{}, event.AnswerRecords...)}
 		s.answerDiagnosticsOrder = append(s.answerDiagnosticsOrder, event.EventID)
-		if len(s.answerDiagnosticsOrder) > cap(s.answerDiagnosticsOrder) {
+		if len(s.answerDiagnosticsOrder) > maxAnswerDiagnostics {
 			oldest := s.answerDiagnosticsOrder[0]
 			delete(s.answerDiagnostics, oldest)
 			copy(s.answerDiagnosticsOrder, s.answerDiagnosticsOrder[1:])
