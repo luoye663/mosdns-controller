@@ -49,13 +49,14 @@ type DatabaseStatus struct {
 	WALBytes int64 `json:"wal_bytes"`
 }
 type SystemStatus struct {
-	Database             DatabaseStatus            `json:"database"`
-	Mosdns               *mosdnsclient.Status      `json:"mosdns,omitempty"`
-	MosdnsError          string                    `json:"mosdns_error,omitempty"`
-	LastSuccessfulIngest string                    `json:"last_successful_ingest_at,omitempty"`
-	LastRetention        string                    `json:"last_retention_at,omitempty"`
-	Audit                *mosdnsclient.AuditStatus `json:"audit,omitempty"`
-	AuditError           string                    `json:"audit_error,omitempty"`
+	Database                 DatabaseStatus            `json:"database"`
+	ControllerMemoryRSSBytes int64                     `json:"controller_memory_rss_bytes"`
+	Mosdns                   *mosdnsclient.Status      `json:"mosdns,omitempty"`
+	MosdnsError              string                    `json:"mosdns_error,omitempty"`
+	LastSuccessfulIngest     string                    `json:"last_successful_ingest_at,omitempty"`
+	LastRetention            string                    `json:"last_retention_at,omitempty"`
+	Audit                    *mosdnsclient.AuditStatus `json:"audit,omitempty"`
+	AuditError               string                    `json:"audit_error,omitempty"`
 }
 type Upstreams struct {
 	Local     mosdnsclient.UpstreamSnapshot `json:"local"`
@@ -356,7 +357,7 @@ func (s *Service) DatabaseStatus() DatabaseStatus {
 	return DatabaseStatus{Bytes: fileSize(s.dbPath), WALBytes: fileSize(s.dbPath + "-wal")}
 }
 func (s *Service) SystemStatus(ctx context.Context) SystemStatus {
-	result := SystemStatus{Database: s.DatabaseStatus()}
+	result := SystemStatus{Database: s.DatabaseStatus(), ControllerMemoryRSSBytes: processRSSBytes()}
 	if status, err := s.mosdns.Status(ctx); err != nil {
 		result.MosdnsError = "mosdns 运行时不可用"
 	} else {

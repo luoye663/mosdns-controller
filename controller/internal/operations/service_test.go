@@ -24,7 +24,7 @@ func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
 	if f.statusErr != nil {
 		return mosdnsclient.Status{}, f.statusErr
 	}
-	return mosdnsclient.Status{State: "ready", SnapshotVersion: 3, Checksum: "sha256:test"}, nil
+	return mosdnsclient.Status{State: "ready", SnapshotVersion: 3, Checksum: "sha256:test", MemoryRSSBytes: 12 * 1024 * 1024}, nil
 }
 func (f *fakeMosdns) Validate(context.Context, mosdnsclient.Snapshot) (mosdnsclient.ValidateResult, error) {
 	return mosdnsclient.ValidateResult{}, nil
@@ -156,7 +156,15 @@ func TestFlushAttemptsBothCachesAndAuditsFailure(t *testing.T) {
 func TestSystemStatusDegradesWhenMosdnsUnavailable(t *testing.T) {
 	s := testService(t, &fakeMosdns{statusErr: errors.New("offline")})
 	status := s.SystemStatus(context.Background())
-	if status.Mosdns != nil || status.MosdnsError == "" {
+	if status.Mosdns != nil || status.MosdnsError == "" || status.ControllerMemoryRSSBytes <= 0 {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestSystemStatusReportsMosdnsRSS(t *testing.T) {
+	s := testService(t, &fakeMosdns{})
+	status := s.SystemStatus(context.Background())
+	if status.Mosdns == nil || status.Mosdns.MemoryRSSBytes <= 0 || status.ControllerMemoryRSSBytes <= 0 {
 		t.Fatalf("status=%+v", status)
 	}
 }

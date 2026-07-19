@@ -24,6 +24,7 @@ function percent(value: number, total = summary.value.query_count) { return tota
 function routeCount(name: string) { return routes.value.find((item) => String(item.value) === name)?.query_count ?? 0 }
 function rcodeCount(code: number) { return rcodes.value.find((item) => Number(item.value) === code)?.query_count ?? 0 }
 function chartLabel(timestamp: number) { return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+function memory(bytes?: number) { return bytes && bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(1)} MiB` : '-' }
 function renderCharts() {
   if (!trendElement.value || !distributionElement.value) return
   trendChart ??= echarts.init(trendElement.value)
@@ -84,7 +85,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
       <div class="health-strip">
         <div><span class="health-dot" :class="status?.mosdns?.state === 'ready' ? 'healthy' : 'unhealthy'"></span><b>mosdns</b><small>{{ status?.mosdns?.state ?? status?.mosdns_error ?? '状态未知' }}</small></div>
         <div><span class="health-dot healthy"></span><b>Controller</b><small>{{ status?.controller.version ?? '运行中' }}</small></div>
-        <div><b>规则版本</b><strong>v{{ status?.mosdns?.snapshot_version ?? '-' }}</strong><small>运行时快照</small></div>
+        <div><b>内存占用</b><strong>{{ memory(status?.mosdns?.memory_rss_bytes) }} / {{ memory(status?.controller_memory_rss_bytes) }}</strong><small>mosdns / Controller</small></div>
         <div><b>审计链路</b><strong>{{ status?.audit?.dropped_events ?? '-' }}</strong><small>累计丢弃事件</small></div>
       </div>
 

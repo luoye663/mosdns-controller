@@ -61,6 +61,7 @@ type Status struct {
 	State           string `json:"state"`
 	SnapshotVersion uint64 `json:"snapshot_version"`
 	Checksum        string `json:"checksum"`
+	MemoryRSSBytes  int64  `json:"memory_rss_bytes"`
 }
 type AuditStatus struct {
 	QueueDepth    int   `json:"queue_depth"`

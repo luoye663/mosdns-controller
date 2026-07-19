@@ -16,7 +16,7 @@ export interface RuleSubscription { id: number; category: string; action: string
 export interface RuleSubscriptionInput { category: string; action: string; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean }
 export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; cache_hit_count: number }
 export interface LatencyPoint { hour_start_ms: number; query_count: number; average_latency_us: number; max_latency_us: number }
-export interface SystemStatus { controller: Record<string, string>; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string }; mosdns_error?: string; audit?: { queue_depth: number; queue_capacity: number; dropped_events: number }; audit_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }
+export interface SystemStatus { controller: Record<string, string>; controller_memory_rss_bytes: number; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string; memory_rss_bytes: number }; mosdns_error?: string; audit?: { queue_depth: number; queue_capacity: number; dropped_events: number }; audit_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }
 
 // CSRF token 只保留在当前浏览器会话，刷新后仍可继续操作已有服务端 session。
 let csrfToken = sessionStorage.getItem('mosdns_csrf') ?? ''
