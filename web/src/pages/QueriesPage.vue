@@ -58,7 +58,7 @@ function qtypeLabel(value: number) { return ({ 1: 'A', 5: 'CNAME', 12: 'PTR', 15
 function qclassLabel(value: number) { return value === 1 ? 'IN' : `类别 ${value}` }
 function rcodeLabel(value: number) { return ({ 0: '成功', 1: '格式错误', 2: '服务器失败', 3: '域名不存在', 4: '未实现', 5: '已拒绝' } as Record<number, string>)[value] ?? `返回码 ${value}` }
 function routeLabel(value: string) { return ({ local: '本地', remote: '远程', block: '拦截' } as Record<string, string>)[value] ?? value }
-function formatTTL(value: number | null) { return value === null ? '-' : `${value} 秒` }
+function formatTTL(value: number | null) { return value === null ? '-' : `${value} s` }
 function ruleLabel(rule: Rule) {
   return ({
     'access:allow': '白名单',
