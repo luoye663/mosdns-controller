@@ -136,6 +136,9 @@ func (s *Service) createSubscription(ctx context.Context, input SubscriptionInpu
 		_, _ = s.store.DB().ExecContext(ctx, `DELETE FROM rule_subscriptions WHERE id=?`, id)
 		return Subscription{}, version, err
 	}
+	if err = s.applySubscriptionCategory(ctx, input.Category, input.Action); err != nil {
+		return Subscription{}, version, err
+	}
 	if input.Category == "route" {
 		if err = s.flushSubscriptionRoute(ctx); err != nil {
 			return Subscription{}, version, err
@@ -188,6 +191,9 @@ func (s *Service) RefreshSubscription(ctx context.Context, id int64, adminID int
 		_, _ = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET domains_json=? WHERE id=?`, previousDomains, item.ID)
 		return Subscription{}, &version, s.subscriptionFailure(ctx, item, err)
 	}
+	if err = s.applySubscriptionCategory(ctx, item.Category, item.Action); err != nil {
+		return Subscription{}, &version, err
+	}
 	if item.Category == "route" {
 		if err = s.flushSubscriptionRoute(ctx); err != nil {
 			return Subscription{}, &version, err
@@ -221,6 +227,9 @@ func (s *Service) SetSubscriptionEnabled(ctx context.Context, id int64, enabled 
 		_, _ = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET enabled=?,updated_at_ms=? WHERE id=?`, item.Enabled, time.Now().UnixMilli(), id)
 		return Subscription{}, version, err
 	}
+	if err = s.applySubscriptionCategory(ctx, item.Category, item.Action); err != nil {
+		return Subscription{}, version, err
+	}
 	if item.Category == "route" {
 		if err = s.flushSubscriptionRoute(ctx); err != nil {
 			return Subscription{}, version, err
@@ -252,6 +261,9 @@ func (s *Service) DeleteSubscription(ctx context.Context, id int64, adminID int6
 	version, err := s.publish(ctx, all, adminID, requestID, ip, 0)
 	if err != nil {
 		_, _ = s.store.DB().ExecContext(ctx, `INSERT INTO rule_subscriptions(id,category,action,kind,name,source_url,refresh_interval_seconds,enabled,content_checksum,rule_count,last_checked_at_ms,last_success_at_ms,last_error,created_at_ms,updated_at_ms,domains_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.Category, item.Action, item.Kind, item.Name, item.SourceURL, item.RefreshIntervalSeconds, item.Enabled, "", item.RuleCount, item.LastCheckedAtMS, item.LastSuccessAtMS, item.LastError, item.CreatedAtMS, item.UpdatedAtMS, domains)
+		return version, err
+	}
+	if err = s.applySubscriptionCategory(ctx, item.Category, item.Action); err != nil {
 		return version, err
 	}
 	if item.Category == "route" {
@@ -343,6 +355,36 @@ func (s *Service) flushSubscriptionRoute(ctx context.Context) error {
 	localErr := s.mosdns.Flush(ctx, "cache_local")
 	remoteErr := s.mosdns.Flush(ctx, "cache_remote")
 	return errors.Join(localErr, remoteErr)
+}
+
+func (s *Service) applySubscriptionCategory(ctx context.Context, category, action string) error {
+	sets, err := s.subscriptionSets(ctx)
+	if err != nil {
+		return err
+	}
+	domains := make([]string, 0)
+	for _, set := range sets {
+		if set.Category == category && set.Action == action {
+			domains = append(domains, set.Domains...)
+		}
+	}
+	sort.Strings(domains)
+	unique := domains[:0]
+	for _, domain := range domains {
+		if len(unique) == 0 || unique[len(unique)-1] != domain {
+			unique = append(unique, domain)
+		}
+	}
+	status, err := s.mosdns.SubscriptionStatus(ctx, subscriptionPluginTag(category, action))
+	if err != nil {
+		return err
+	}
+	_, err = s.mosdns.ApplySubscription(ctx, subscriptionPluginTag(category, action), mosdnsclient.DomainSetSnapshot{Version: status.Version + 1, ExpectedCurrentVersion: status.Version, Rules: strings.Join(unique, "\n")})
+	return err
+}
+
+func subscriptionPluginTag(category, action string) string {
+	return map[string]string{"access:allow": "subscription_allow", "access:block": "subscription_block", "route:local": "subscription_local", "route:remote": "subscription_remote"}[category+":"+action]
 }
 
 func (s *Service) subscription(ctx context.Context, id int64) (Subscription, error) {

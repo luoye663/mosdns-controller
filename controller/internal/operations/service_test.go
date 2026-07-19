@@ -79,6 +79,12 @@ func (f *fakeMosdns) ApplyECS(_ context.Context, group string, snapshot mosdnscl
 func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
 	return mosdnsclient.AuditStatus{QueueCapacity: 65536}, nil
 }
+func (f *fakeMosdns) SubscriptionStatus(context.Context, string) (mosdnsclient.DomainSetStatus, error) {
+	return mosdnsclient.DomainSetStatus{}, nil
+}
+func (f *fakeMosdns) ApplySubscription(_ context.Context, _ string, snapshot mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
+	return mosdnsclient.DomainSetStatus{Version: snapshot.Version}, nil
+}
 
 func testService(t *testing.T, fake *fakeMosdns) *Service {
 	t.Helper()

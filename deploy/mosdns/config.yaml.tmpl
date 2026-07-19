@@ -9,6 +9,20 @@ api:
   http: "${MOSDNS_API_LISTEN}"
 
 plugins:
+  # Four source-merged subscription sets use the compact domain_set matcher.
+  - tag: subscription_allow
+    type: dynamic_domain_set
+    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-allow.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-allow.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
+  - tag: subscription_block
+    type: dynamic_domain_set
+    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-block.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-block.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
+  - tag: subscription_local
+    type: dynamic_domain_set
+    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-local.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-local.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
+  - tag: subscription_remote
+    type: dynamic_domain_set
+    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-remote.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-remote.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
+
   # 管理页面发布的 allow/block/local/remote/no_log 动态规则。
   - tag: dynamic_rules
     type: dynamic_rule_engine
@@ -23,6 +37,7 @@ plugins:
       fail_open_on_snapshot_error: true
       marks:
         access_block: 1001
+        access_allow: 1002
         route_local: 1101
         route_remote: 1102
         no_log: 1201
@@ -48,6 +63,9 @@ plugins:
         route_local: 1101
         route_remote: 1102
         no_log: 1201
+        subscription_local: 1301
+        subscription_remote: 1302
+        subscription_block: 1303
         cache_hit: 2101
 
   # local 与 remote 使用独立缓存，避免不同上游组的结果串用。
@@ -154,6 +172,23 @@ plugins:
       - exec: $remote_dns
       - exec: accept
 
+  - tag: subscription_routes
+    type: sequence
+    args:
+      - matches:
+          - qname $subscription_local
+        exec: mark 1301
+      - matches:
+          - mark 1301
+        exec: goto route_local
+      - matches:
+          - qname $subscription_remote
+        exec: mark 1302
+      - matches:
+          - mark 1302
+        exec: goto route_remote
+      - exec: goto route_remote
+
   # DNS 主入口：动态 block 必须先于任何 cache。
   - tag: main
     type: sequence
@@ -171,7 +206,19 @@ plugins:
       - matches:
           - mark 1102
         exec: goto route_remote
-      - exec: goto route_remote
+      - matches:
+          - mark 1002
+        exec: goto subscription_routes
+      - matches:
+          - qname $subscription_allow
+        exec: goto subscription_routes
+      - matches:
+          - qname $subscription_block
+        exec: mark 1303
+      - matches:
+          - mark 1303
+        exec: reject 3
+      - exec: goto subscription_routes
 
   # DNS UDP/TCP 监听地址；生产通常为 :53，集成测试使用 :5353。
   - tag: udp_server

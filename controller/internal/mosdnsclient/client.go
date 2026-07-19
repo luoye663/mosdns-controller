@@ -30,6 +30,8 @@ type Client interface {
 	ECSStatus(context.Context, string) (ECSSnapshot, error)
 	ApplyECS(context.Context, string, ECSSnapshot) (ECSSnapshot, error)
 	AuditStatus(context.Context) (AuditStatus, error)
+	SubscriptionStatus(context.Context, string) (DomainSetStatus, error)
+	ApplySubscription(context.Context, string, DomainSetSnapshot) (DomainSetStatus, error)
 }
 type UpstreamSnapshot struct {
 	Version                uint64     `json:"version"`
@@ -64,6 +66,17 @@ type AuditStatus struct {
 	QueueDepth    int   `json:"queue_depth"`
 	QueueCapacity int   `json:"queue_capacity"`
 	DroppedEvents int64 `json:"dropped_events"`
+}
+type DomainSetStatus struct {
+	Version   uint64    `json:"version"`
+	Checksum  string    `json:"checksum"`
+	RuleCount int       `json:"rule_count"`
+	LoadedAt  time.Time `json:"loaded_at"`
+}
+type DomainSetSnapshot struct {
+	Version                uint64 `json:"version"`
+	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
+	Rules                  string `json:"rules"`
 }
 type ValidateResult struct {
 	Valid           bool   `json:"valid"`
@@ -206,6 +219,23 @@ func (c *HTTPClient) ApplyECS(ctx context.Context, group string, snapshot ECSSna
 func (c *HTTPClient) AuditStatus(ctx context.Context) (AuditStatus, error) {
 	var value AuditStatus
 	return value, c.request(ctx, http.MethodGet, "/plugins/query_audit/status", nil, &value)
+}
+func (c *HTTPClient) SubscriptionStatus(ctx context.Context, tag string) (DomainSetStatus, error) {
+	if !subscriptionTag(tag) {
+		return DomainSetStatus{}, fmt.Errorf("unsupported subscription tag %q", tag)
+	}
+	var value DomainSetStatus
+	return value, c.request(ctx, http.MethodGet, "/plugins/"+tag+"/status", nil, &value)
+}
+func (c *HTTPClient) ApplySubscription(ctx context.Context, tag string, snapshot DomainSetSnapshot) (DomainSetStatus, error) {
+	if !subscriptionTag(tag) {
+		return DomainSetStatus{}, fmt.Errorf("unsupported subscription tag %q", tag)
+	}
+	var value DomainSetStatus
+	return value, c.request(ctx, http.MethodPut, "/plugins/"+tag+"/snapshot", snapshot, &value)
+}
+func subscriptionTag(tag string) bool {
+	return tag == "subscription_allow" || tag == "subscription_block" || tag == "subscription_local" || tag == "subscription_remote"
 }
 func (c *HTTPClient) request(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,10 +13,11 @@ import (
 )
 
 type fakeMosdns struct {
-	mu      sync.Mutex
-	current mosdnsclient.Snapshot
-	unknown bool
-	flushes []string
+	mu            sync.Mutex
+	current       mosdnsclient.Snapshot
+	unknown       bool
+	flushes       []string
+	subscriptions map[string]mosdnsclient.DomainSetStatus
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -60,6 +62,24 @@ func (f *fakeMosdns) ApplyECS(context.Context, string, mosdnsclient.ECSSnapshot)
 }
 func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
 	return mosdnsclient.AuditStatus{}, nil
+}
+func (f *fakeMosdns) SubscriptionStatus(_ context.Context, tag string) (mosdnsclient.DomainSetStatus, error) {
+	if f.subscriptions == nil {
+		f.subscriptions = map[string]mosdnsclient.DomainSetStatus{}
+	}
+	return f.subscriptions[tag], nil
+}
+func (f *fakeMosdns) ApplySubscription(_ context.Context, tag string, snapshot mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
+	if f.subscriptions == nil {
+		f.subscriptions = map[string]mosdnsclient.DomainSetStatus{}
+	}
+	current := f.subscriptions[tag]
+	if current.Version != snapshot.ExpectedCurrentVersion {
+		return mosdnsclient.DomainSetStatus{}, mosdnsclient.ErrConflict
+	}
+	current.Version, current.RuleCount = snapshot.Version, len(strings.Fields(snapshot.Rules))
+	f.subscriptions[tag] = current
+	return current, nil
 }
 
 func testService(t *testing.T) (*Service, *fakeMosdns) {
@@ -132,7 +152,7 @@ func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
 	if err != nil || source.RuleCount != 2 || published.Version != 1 {
 		t.Fatalf("source=%+v version=%+v err=%v", source, published, err)
 	}
-	if len(fake.current.SubscriptionSets) != 1 || len(fake.current.SubscriptionSets[0].Domains) != 2 || fake.current.SubscriptionSets[0].Action != "local" || len(fake.flushes) != 2 {
+	if fake.subscriptions["subscription_local"].RuleCount != 2 || len(fake.flushes) != 2 {
 		t.Fatalf("snapshot=%+v flushes=%v", fake.current, fake.flushes)
 	}
 	manual, err := service.List(context.Background())
@@ -140,7 +160,7 @@ func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
 		t.Fatalf("subscription rules leaked into manual list: %+v err=%v", manual, err)
 	}
 	updated, version, err := service.SetSubscriptionEnabled(context.Background(), source.ID, false, 1, "sub-disable", "127.0.0.1")
-	if err != nil || updated.Enabled || version.Version != 2 || len(fake.current.SubscriptionSets) != 0 {
+	if err != nil || updated.Enabled || version.Version != 2 || fake.subscriptions["subscription_local"].RuleCount != 0 {
 		t.Fatalf("updated=%+v version=%+v snapshot=%+v err=%v", updated, version, fake.current, err)
 	}
 }

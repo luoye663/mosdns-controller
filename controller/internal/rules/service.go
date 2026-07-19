@@ -323,11 +323,7 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 	if err != nil {
 		return Version{}, err
 	}
-	sets, err := s.subscriptionSets(ctx)
-	if err != nil {
-		return Version{}, err
-	}
-	snapshot := buildSnapshot(version, current, rules, sets)
+	snapshot := buildSnapshot(version, current, rules, nil)
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return Version{}, err
