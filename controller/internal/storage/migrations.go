@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}, {9, migrationV9}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}, {9, migrationV9}, {10, migrationV10}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -98,4 +98,8 @@ var migrationV8 = []string{
 }
 var migrationV9 = []string{
 	`ALTER TABLE dns_queries ADD COLUMN subscription_categories_json TEXT NOT NULL DEFAULT '[]'`,
+}
+
+var migrationV10 = []string{
+	`CREATE INDEX idx_admin_audit_created_id ON admin_audit_logs(created_at_ms DESC,id DESC)`,
 }

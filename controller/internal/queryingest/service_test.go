@@ -40,6 +40,45 @@ func TestEmptyQueryPageReturnsItemsArray(t *testing.T) {
 	}
 }
 
+func TestRetentionDeletesExpiredRawAndAggregates(t *testing.T) {
+	s := testService(t)
+	old := time.Now().AddDate(-2, 0, 0).UnixMilli()
+	if _, err := s.db.Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,created_at_ms) VALUES('expired-event',?,'192.0.2.10','example.com',1,1,'remote','default',0,1,0,1,?)`, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO dns_stats_hourly_latency_bucket(hour_start_ms,upper_bound_us,query_count) VALUES(?,?,1)`, old, 1_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO admin_audit_logs(action,resource_type,request_id,result,created_at_ms) VALUES('test','retention','request','success',?)`, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.retain(); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"dns_queries", "dns_stats_hourly_latency_bucket", "admin_audit_logs"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained %d expired rows", table, count)
+		}
+	}
+}
+
+func TestDatabaseMaxSizeGiBValidation(t *testing.T) {
+	s := testService(t)
+	if err := s.SetDatabaseMaxGiB(4); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.databaseMaxBytes.Load(); got != int64(4)<<30 {
+		t.Fatalf("database max bytes=%d", got)
+	}
+	if err := s.SetDatabaseMaxGiB(0); err == nil {
+		t.Fatal("zero GiB accepted")
+	}
+}
+
 func TestDuplicateEventDoesNotAggregateTwice(t *testing.T) {
 	s := testService(t)
 	event := validEvent("event-1")

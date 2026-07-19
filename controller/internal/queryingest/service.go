@@ -30,6 +30,8 @@ const (
 	maxAnswerRecordBytes  = 1024
 	maxAnswerRecordsBytes = 16 * 1024
 	maxAnswerDiagnostics  = 1024
+	defaultDatabaseMaxGiB = 2
+	sizeRetentionBatch    = 10_000
 )
 
 var latencyBucketBoundsUS = [...]int64{1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000, 10_000_000}
@@ -158,16 +160,27 @@ type Service struct {
 	metrics                metrics
 	dbPath                 string
 	retentionDays          atomic.Int64
+	databaseMaxBytes       atomic.Int64
+	retentionMu            sync.Mutex
+	maintenanceOnce        sync.Once
 }
 
 func New(db *sql.DB, token string, dbPath string) *Service {
 	s := &Service{db: db, token: []byte(token), dbPath: dbPath, queue: make(chan Event, queueCapacity), done: make(chan struct{}), subscribers: make(map[uint64]subscription), answerDiagnostics: make(map[string]AnswerDiagnostics), answerDiagnosticsOrder: make([]string, 0, maxAnswerDiagnostics)}
 	s.retentionDays.Store(7)
+	s.databaseMaxBytes.Store(int64(defaultDatabaseMaxGiB) << 30)
 	s.metrics = newMetrics()
-	s.wg.Add(2)
+	s.wg.Add(1)
 	go s.writer()
-	go s.maintenance()
 	return s
+}
+
+// StartMaintenance begins retention after persisted settings have been loaded.
+func (s *Service) StartMaintenance() {
+	s.maintenanceOnce.Do(func() {
+		s.wg.Add(1)
+		go s.maintenance()
+	})
 }
 
 func newMetrics() metrics {
@@ -738,36 +751,58 @@ func (s *Service) Latency(ctx context.Context) ([]map[string]any, error) {
 // maintenance 周期执行保留策略和 WAL checkpoint，避免写入路径承担清理成本。
 func (s *Service) maintenance() {
 	defer s.wg.Done()
-	s.retain()
+	_ = s.retain()
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			s.retain()
+			_ = s.retain()
 		case <-s.done:
 			return
 		}
 	}
 }
-func (s *Service) retain() {
+func (s *Service) retain() error {
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	now := time.Now()
 	for _, item := range []struct {
-		table  string
-		before time.Time
-	}{{"dns_stats_hourly_client_domain", now.AddDate(0, 0, -90)}, {"dns_stats_hourly_domain", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_client", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_global", now.AddDate(-1, 0, 0)}} {
-		_, _ = s.db.ExecContext(ctx, "DELETE FROM "+item.table+" WHERE hour_start_ms < ?", item.before.UnixMilli())
-	}
-	_, _ = s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE timestamp_unix_ms < ?", now.AddDate(0, 0, -int(s.retentionDays.Load())).UnixMilli())
-	if s.dbPath != "" && s.dbPath != ":memory:" {
-		if info, err := os.Stat(s.dbPath); err == nil && info.Size() > int64(2<<30)*9/10 {
-			_, _ = s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE id IN (SELECT id FROM dns_queries ORDER BY timestamp_unix_ms ASC LIMIT 10000)")
+		table, column string
+		before        time.Time
+	}{{"dns_stats_hourly_client_domain", "hour_start_ms", now.AddDate(0, 0, -90)}, {"dns_stats_hourly_domain", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_client", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_global", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_latency_bucket", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"admin_audit_logs", "created_at_ms", now.AddDate(-1, 0, 0)}} {
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+item.table+" WHERE "+item.column+" < ?", item.before.UnixMilli()); err != nil {
+			return err
 		}
 	}
-	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES('last_retention_at',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, strconv.FormatInt(now.UnixMilli(), 10), now.UnixMilli())
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE timestamp_unix_ms < ?", now.AddDate(0, 0, -int(s.retentionDays.Load())).UnixMilli()); err != nil {
+		return err
+	}
+	if s.databaseBytes() >= s.databaseMaxBytes.Load()*9/10 {
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM dns_queries WHERE id IN (SELECT id FROM dns_queries ORDER BY timestamp_unix_ms ASC LIMIT ?)", sizeRetentionBatch); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES('last_retention_at',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, strconv.FormatInt(now.UnixMilli(), 10), now.UnixMilli())
+	return err
+}
+
+func (s *Service) databaseBytes() int64 {
+	if s.dbPath == "" || s.dbPath == ":memory:" {
+		return 0
+	}
+	var size int64
+	for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
+		if info, err := os.Stat(path); err == nil {
+			size += info.Size()
+		}
+	}
+	return size
 }
 func (s *Service) SetRetentionDays(days int) error {
 	if days < 1 || days > 365 {
@@ -776,8 +811,15 @@ func (s *Service) SetRetentionDays(days int) error {
 	s.retentionDays.Store(int64(days))
 	return nil
 }
+func (s *Service) SetDatabaseMaxGiB(gib int) error {
+	if gib < 1 || gib > 128 {
+		return errors.New("database max size must be within 1..128 GiB")
+	}
+	s.databaseMaxBytes.Store(int64(gib) << 30)
+	return nil
+}
 func (s *Service) RetentionDays() int { return int(s.retentionDays.Load()) }
-func (s *Service) RetainNow()         { s.retain() }
+func (s *Service) RetainNow() error   { return s.retain() }
 func (s *Service) Close() {
 	close(s.done)
 	s.wg.Wait()

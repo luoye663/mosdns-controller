@@ -105,6 +105,7 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Put("/upstreams/{group}/ecs", a.requireCSRF(a.updateECS))
 			protected.Get("/settings", a.settings)
 			protected.Put("/settings", a.requireCSRF(a.updateSettings))
+			protected.Post("/settings/query-history/clear", a.requireCSRF(a.clearQueryHistory))
 			protected.Get("/audit-logs", a.auditLogs)
 		})
 	})
@@ -122,6 +123,7 @@ func (a *App) InternalHandler() http.Handler {
 func (a *App) Close()                                        { a.ingest.Close() }
 func (a *App) Reconcile(ctx context.Context) (string, error) { return a.rules.Reconcile(ctx) }
 func (a *App) SyncSettings(ctx context.Context) error        { return a.ops.SyncSettings(ctx) }
+func (a *App) StartMaintenance()                             { a.ingest.StartMaintenance() }
 func (a *App) RefreshSubscriptions(ctx context.Context)      { a.rules.RefreshDue(ctx) }
 
 func (a *App) ready(w http.ResponseWriter, r *http.Request) {
@@ -777,12 +779,24 @@ func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "VALIDATION_ERROR", "invalid limit")
 		return
 	}
-	items, err := a.ops.AuditLogs(r.Context(), limit)
+	page, err := a.ops.AuditLogs(r.Context(), operations.AuditLogQuery{Limit: limit, Cursor: r.URL.Query().Get("cursor")})
+	if errors.Is(err, operations.ErrInvalidCursor) {
+		writeError(w, r, 400, "VALIDATION_ERROR", "invalid cursor")
+		return
+	}
 	if err != nil {
 		writeError(w, r, 500, "INTERNAL_ERROR", "list audit logs failed")
 		return
 	}
-	writeData(w, r, 200, map[string]any{"items": items})
+	writeData(w, r, 200, page)
+}
+func (a *App) clearQueryHistory(w http.ResponseWriter, r *http.Request) {
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	if err := a.ops.ClearQueryHistory(r.Context(), admin.ID, requestID(r), remoteIP(r)); err != nil {
+		writeError(w, r, 500, "INTERNAL_ERROR", "clear query history failed")
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string]bool{"cleared": true})
 }
 func (a *App) publishRule(w http.ResponseWriter, r *http.Request, operation func(auth.Admin) (rules.Version, error)) {
 	value, err := operation(r.Context().Value(adminKey).(auth.Admin))

@@ -3,6 +3,7 @@ package operations
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -126,12 +127,12 @@ func TestDevicesUpdateAndAudit(t *testing.T) {
 	if updated.DisplayName != name || updated.Note != note || updated.QueryCount24H != 1 {
 		t.Fatalf("updated=%+v", updated)
 	}
-	logs, err := s.AuditLogs(context.Background(), 10)
+	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(logs) != 1 || logs[0].Action != "update" || logs[0].ResourceType != "device" {
-		t.Fatalf("audit=%+v", logs)
+	if len(page.Items) != 1 || page.Items[0].Action != "update" || page.Items[0].ResourceType != "device" {
+		t.Fatalf("audit=%+v", page.Items)
 	}
 }
 
@@ -144,12 +145,12 @@ func TestFlushAttemptsBothCachesAndAuditsFailure(t *testing.T) {
 	if len(fake.flushes) != 2 || fake.flushes[0] != "cache_local" || fake.flushes[1] != "cache_remote" {
 		t.Fatalf("flushes=%v", fake.flushes)
 	}
-	logs, err := s.AuditLogs(context.Background(), 10)
+	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(logs) != 1 || logs[0].Result != "failed" || logs[0].ErrorCode != "CACHE_FLUSH_FAILED" {
-		t.Fatalf("audit=%+v", logs)
+	if len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "CACHE_FLUSH_FAILED" {
+		t.Fatalf("audit=%+v", page.Items)
 	}
 }
 
@@ -179,20 +180,73 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 	if len(fake.flushes) != 1 || fake.flushes[0] != "cache_local" {
 		t.Fatalf("flushes=%v", fake.flushes)
 	}
-	logs, err := s.AuditLogs(context.Background(), 10)
-	if err != nil || len(logs) != 1 || logs[0].ResourceType != "upstream" {
-		t.Fatalf("logs=%+v err=%v", logs, err)
+	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].ResourceType != "upstream" {
+		t.Fatalf("logs=%+v err=%v", page.Items, err)
 	}
 }
 
 func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3}, 1, "req-settings", "192.0.2.10"); err != nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4}, 1, "req-settings", "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := s.Settings(context.Background())
-	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.QueryRetentionDays != 3 || fake.cacheEnabled || fake.cacheTTL != 60 {
+	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || fake.cacheEnabled || fake.cacheTTL != 60 {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
+	}
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0}, 1, "req-settings", "192.0.2.10"); err == nil {
+		t.Fatal("invalid database size accepted")
+	}
+}
+
+func TestAuditLogsCursorHasNoDuplicatesAtEqualTimestamps(t *testing.T) {
+	s := testService(t, &fakeMosdns{})
+	for i := 1; i <= 3; i++ {
+		if err := s.Audit(context.Background(), 1, "test", "audit", strconv.Itoa(i), "request", "192.0.2.10", "success", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec(`UPDATE admin_audit_logs SET created_at_ms=1000`); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 2})
+	if err != nil || len(first.Items) != 2 || first.NextCursor == "" {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 2, Cursor: first.NextCursor})
+	if err != nil || len(second.Items) != 1 || second.Items[0].ID == first.Items[0].ID || second.Items[0].ID == first.Items[1].ID {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if _, err := s.AuditLogs(context.Background(), AuditLogQuery{Cursor: "bad"}); err == nil {
+		t.Fatal("invalid cursor accepted")
+	}
+}
+
+func TestClearQueryHistoryLeavesAdministrativeAudit(t *testing.T) {
+	s := testService(t, &fakeMosdns{})
+	now := time.Now().UnixMilli()
+	if _, err := s.db.Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,created_at_ms) VALUES('event-clear',?,'192.0.2.5','example.com',1,1,'remote','default',0,1,0,1,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO dns_stats_hourly_global(hour_start_ms,route,qtype,rcode,query_count,error_count,cache_hit_count,latency_sum_us,latency_max_us) VALUES(?, 'remote', 1, 0, 1, 0, 0, 1, 1)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearQueryHistory(context.Background(), 1, "request-clear", "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+	var raw, aggregate, audit int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM dns_queries`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM admin_audit_logs`).Scan(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM dns_stats_hourly_global`).Scan(&aggregate); err != nil {
+		t.Fatal(err)
+	}
+	if raw != 0 || aggregate != 0 || audit != 1 {
+		t.Fatalf("raw=%d aggregate=%d audit=%d", raw, aggregate, audit)
 	}
 }

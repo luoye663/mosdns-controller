@@ -12,7 +12,7 @@ export interface AuditLog { id: number; admin_username: string; action: string; 
 export interface Upstream { tag: string; addr: string; priority: number; weight: number }
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
 export interface ECSSnapshot { version: number; expected_current_version: number; mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }
-export interface Settings { cache_enabled: boolean; cache_ttl: number; query_retention_days: number }
+export interface Settings { cache_enabled: boolean; cache_ttl: number; query_retention_days: number; database_max_size_gib: number }
 export interface RuleSubscription { id: number; category: string; action: string; kind: 'url' | 'upload'; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean; rule_count: number; last_checked_at_ms: number; last_success_at_ms: number; last_error: string; created_at_ms: number; updated_at_ms: number }
 export interface RuleSubscriptionInput { category: string; action: string; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean }
 export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; cache_hit_count: number }
@@ -90,7 +90,8 @@ export const api = {
   updateECS: (group: 'local_dns' | 'remote_dns', snapshot: ECSSnapshot) => request<ECSSnapshot>(`/upstreams/${group}/ecs`, { method: 'PUT', body: JSON.stringify(snapshot) }),
   settings: () => request<Settings>('/settings'),
   updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
-  auditLogs: () => request<{ items: AuditLog[] }>('/audit-logs'),
+  clearQueryHistory: () => request<{ cleared: boolean }>('/settings/query-history/clear', { method: 'POST', body: '{}' }),
+  auditLogs: (params: QueryParams = {}) => request<{ items: AuditLog[]; next_cursor?: string }>(`/audit-logs?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
 }
 
 export function eventStream(params: QueryParams = {}) { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>); return new EventSource(`/api/v1/queries/stream?${query.toString()}`, { withCredentials: true }) }

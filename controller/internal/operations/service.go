@@ -4,6 +4,7 @@ package operations
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/managed-dns/controller/internal/mosdnsclient"
 	"github.com/managed-dns/controller/internal/queryingest"
 )
+
+var ErrInvalidCursor = errors.New("invalid cursor")
 
 type Device struct {
 	ID            int64  `json:"id"`
@@ -44,6 +47,14 @@ type AuditLog struct {
 	ErrorCode     string `json:"error_code"`
 	CreatedAtMS   int64  `json:"created_at_ms"`
 }
+type AuditLogQuery struct {
+	Limit  int
+	Cursor string
+}
+type AuditLogPage struct {
+	Items      []AuditLog `json:"items"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
 type DatabaseStatus struct {
 	Bytes    int64 `json:"bytes"`
 	WALBytes int64 `json:"wal_bytes"`
@@ -68,6 +79,7 @@ type Settings struct {
 	CacheEnabled       bool `json:"cache_enabled"`
 	CacheTTL           int  `json:"cache_ttl"`
 	QueryRetentionDays int  `json:"query_retention_days"`
+	DatabaseMaxSizeGiB int  `json:"database_max_size_gib"`
 }
 type Service struct {
 	db     *sql.DB
@@ -140,29 +152,69 @@ func (s *Service) UpdateDevice(ctx context.Context, id int64, patch DevicePatch,
 	return current, nil
 }
 
-func (s *Service) AuditLogs(ctx context.Context, limit int) ([]AuditLog, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+func (s *Service) AuditLogs(ctx context.Context, query AuditLogQuery) (AuditLogPage, error) {
+	if query.Limit <= 0 || query.Limit > 500 {
+		query.Limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT l.id,l.admin_id,COALESCE(a.username,''),l.action,l.resource_type,COALESCE(l.resource_id,''),l.request_id,COALESCE(l.client_ip,''),l.result,COALESCE(l.error_code,''),l.created_at_ms FROM admin_audit_logs l LEFT JOIN admins a ON a.id=l.admin_id ORDER BY l.created_at_ms DESC,l.id DESC LIMIT ?`, limit)
+	args := []any{}
+	where := ""
+	if query.Cursor != "" {
+		ts, id, err := decodeAuditCursor(query.Cursor)
+		if err != nil {
+			return AuditLogPage{}, ErrInvalidCursor
+		}
+		where = " WHERE (l.created_at_ms < ? OR (l.created_at_ms = ? AND l.id < ?))"
+		args = append(args, ts, ts, id)
+	}
+	args = append(args, query.Limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT l.id,l.admin_id,COALESCE(a.username,''),l.action,l.resource_type,COALESCE(l.resource_id,''),l.request_id,COALESCE(l.client_ip,''),l.result,COALESCE(l.error_code,''),l.created_at_ms FROM admin_audit_logs l LEFT JOIN admins a ON a.id=l.admin_id`+where+` ORDER BY l.created_at_ms DESC,l.id DESC LIMIT ?`, args...)
 	if err != nil {
-		return nil, err
+		return AuditLogPage{}, err
 	}
 	defer rows.Close()
-	out := []AuditLog{}
+	page := AuditLogPage{Items: []AuditLog{}}
 	for rows.Next() {
 		var item AuditLog
 		var admin sql.NullInt64
 		if err := rows.Scan(&item.ID, &admin, &item.AdminUsername, &item.Action, &item.ResourceType, &item.ResourceID, &item.RequestID, &item.ClientIP, &item.Result, &item.ErrorCode, &item.CreatedAtMS); err != nil {
-			return nil, err
+			return AuditLogPage{}, err
 		}
 		if admin.Valid {
 			value := admin.Int64
 			item.AdminID = &value
 		}
-		out = append(out, item)
+		page.Items = append(page.Items, item)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AuditLogPage{}, err
+	}
+	if len(page.Items) > query.Limit {
+		last := page.Items[query.Limit-1]
+		page.NextCursor = encodeAuditCursor(last.CreatedAtMS, last.ID)
+		page.Items = page.Items[:query.Limit]
+	}
+	return page, nil
+}
+
+func encodeAuditCursor(timestampMS, id int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(timestampMS, 10) + ":" + strconv.FormatInt(id, 10)))
+}
+
+func decodeAuditCursor(value string) (int64, int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return 0, 0, err
+	}
+	parts := strings.Split(string(raw), ":")
+	if len(parts) != 2 {
+		return 0, 0, ErrInvalidCursor
+	}
+	timestampMS, timestampErr := strconv.ParseInt(parts[0], 10, 64)
+	id, idErr := strconv.ParseInt(parts[1], 10, 64)
+	if timestampErr != nil || idErr != nil || timestampMS < 0 || id < 1 {
+		return 0, 0, ErrInvalidCursor
+	}
+	return timestampMS, id, nil
 }
 
 func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, clientIP string) error {
@@ -180,8 +232,8 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 	return errors.Join(localErr, remoteErr)
 }
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
-	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7}
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days')`)
+	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days','database_max_size_gib')`)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -210,6 +262,12 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 				return Settings{}, err
 			}
 			settings.CacheTTL = parsed
+		case "database_max_size_gib":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Settings{}, err
+			}
+			settings.DatabaseMaxSizeGiB = parsed
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -221,6 +279,9 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
 		return Settings{}, errors.New("cache TTL must be within 0..604800")
 	}
+	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
+		return Settings{}, errors.New("database max size must be within 1..128 GiB")
+	}
 	return settings, nil
 }
 func (s *Service) SyncSettings(ctx context.Context) error {
@@ -230,6 +291,9 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 	}
 	if s.ingest != nil {
 		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
+			return err
+		}
+		if err := s.ingest.SetDatabaseMaxGiB(settings.DatabaseMaxSizeGiB); err != nil {
 			return err
 		}
 	}
@@ -244,6 +308,9 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
 		return errors.New("cache TTL must be within 0..604800")
+	}
+	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
+		return errors.New("database max size must be within 1..128 GiB")
 	}
 	current, err := s.Settings(ctx)
 	if err != nil {
@@ -263,8 +330,13 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
 			return err
 		}
-		if current.QueryRetentionDays != settings.QueryRetentionDays {
-			s.ingest.RetainNow()
+		if err := s.ingest.SetDatabaseMaxGiB(settings.DatabaseMaxSizeGiB); err != nil {
+			return err
+		}
+		if current.QueryRetentionDays != settings.QueryRetentionDays || current.DatabaseMaxSizeGiB != settings.DatabaseMaxSizeGiB {
+			if err := s.ingest.RetainNow(); err != nil {
+				return err
+			}
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -273,12 +345,28 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}} {
+	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, item.key, item.value, now); err != nil {
 			return err
 		}
 	}
-	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention", requestID, clientIP, "success", ""); err != nil {
+	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention,database_max_size", requestID, clientIP, "success", ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestID, clientIP string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, table := range []string{"dns_queries", "dns_stats_hourly_global", "dns_stats_hourly_domain", "dns_stats_hourly_client", "dns_stats_hourly_client_domain", "dns_stats_hourly_latency_bucket"} {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return err
+		}
+	}
+	if err := s.auditTx(ctx, tx, adminID, "clear", "query_history", "all", requestID, clientIP, "success", ""); err != nil {
 		return err
 	}
 	return tx.Commit()

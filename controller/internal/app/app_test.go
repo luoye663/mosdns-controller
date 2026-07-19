@@ -330,4 +330,37 @@ func TestDeviceEndpointsRequireSessionAndCSRF(t *testing.T) {
 		t.Fatalf("flush without csrf=%d", flushRec.Code)
 	}
 }
+func TestAuditPaginationValidationAndQueryHistoryClear(t *testing.T) {
+	application := testApp(t)
+	now := time.Now().UnixMilli()
+	if _, err := application.store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'admin','x',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.store.DB().Exec(`INSERT INTO sessions(token_hash,admin_id,csrf_hash,created_at_ms,last_seen_at_ms,expires_at_ms) VALUES(?,?,?,?,?,?)`, authDigest("session"), 1, authDigest("csrf"), now, now, now+60_000); err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: auth.CookieName, Value: "session"}
+	invalidCursor := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs?cursor=invalid", nil)
+	invalidCursor.AddCookie(cookie)
+	invalidCursorRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(invalidCursorRec, invalidCursor)
+	if invalidCursorRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid cursor status=%d: %s", invalidCursorRec.Code, invalidCursorRec.Body.String())
+	}
+	if _, err := application.store.DB().Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,created_at_ms) VALUES('clear-endpoint',?,'192.0.2.10','example.com',1,1,'remote','default',0,1,0,1,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	clear := httptest.NewRequest(http.MethodPost, "/api/v1/settings/query-history/clear", bytes.NewBufferString(`{}`))
+	clear.AddCookie(cookie)
+	clear.Header.Set("X-CSRF-Token", "csrf")
+	clearRec := httptest.NewRecorder()
+	application.PublicHandler().ServeHTTP(clearRec, clear)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear status=%d: %s", clearRec.Code, clearRec.Body.String())
+	}
+	var count int
+	if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("query count=%d err=%v", count, err)
+	}
+}
 func authDigest(value string) []byte { result := sha256.Sum256([]byte(value)); return result[:] }
