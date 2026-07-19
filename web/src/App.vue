@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { dateZhCN, NAlert, NButton, NConfigProvider, NDropdown, NFormItem, NInput, NLayout, NLayoutContent, NLayoutHeader, NModal, zhCN } from 'naive-ui'
+import { Activity, ClipboardList, Database, FileClock, Gauge, Network, Server, Settings } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/lib/api'
 import { notify } from '@/lib/notify'
@@ -11,6 +12,16 @@ const mosdnsError = ref('')
 const showPassword = ref(false)
 const password = ref({ current: '', next: '', confirm: '' })
 const passwordSaving = ref(false)
+const navigation = [
+  { to: '/', label: '概览', icon: Gauge },
+  { to: '/queries', label: '查询日志', icon: ClipboardList },
+  { to: '/rules', label: '规则管理', icon: FileClock },
+  { to: '/upstreams', label: '上游 DNS', icon: Network },
+  { to: '/devices', label: '设备列表', icon: Server },
+  { to: '/settings', label: '系统设置', icon: Settings },
+  { to: '/versions', label: '版本发布', icon: Database },
+  { to: '/system', label: '系统状态', icon: Activity },
+]
 let statusTimer: ReturnType<typeof setInterval> | undefined
 async function logout() { await auth.logout(); await router.push({ name: 'login' }) }
 const accountOptions = [{ label: '修改密码', key: 'password' }, { label: '退出登录', key: 'logout' }]
@@ -40,7 +51,7 @@ onBeforeUnmount(stopStatusPolling)
   <NConfigProvider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="{ common: { primaryColor: '#087e8b', primaryColorHover: '#066d78', borderRadius: '6px' } }">
     <RouterView v-if="isPublicAuth" />
     <NLayout v-else class="shell" has-sider>
-      <aside class="sidebar"><RouterLink class="brand" to="/"><span class="brand-mark">M</span><span>mosdns<br><small>控制面板</small></span></RouterLink><nav><RouterLink to="/">概览</RouterLink><RouterLink to="/queries">查询日志</RouterLink><RouterLink to="/rules">规则管理</RouterLink><RouterLink to="/versions">版本发布</RouterLink><RouterLink to="/upstreams">上游 DNS</RouterLink><RouterLink to="/devices">设备列表</RouterLink><RouterLink to="/settings">系统设置</RouterLink><RouterLink to="/system">系统状态</RouterLink></nav></aside>
+      <aside class="sidebar"><RouterLink class="brand" to="/"><span class="brand-mark">M</span><span>mosdns<br><small>控制面板</small></span></RouterLink><nav><RouterLink v-for="item in navigation" :key="item.to" :to="item.to" :title="item.label"><component :is="item.icon" :size="18" :stroke-width="1.8" /><span>{{ item.label }}</span></RouterLink></nav></aside>
       <NLayout><NLayoutHeader bordered class="topbar"><span>{{ route.meta.title ?? '局域网 DNS 管理' }}</span><div class="topbar-account"><NDropdown trigger="hover" :options="accountOptions" @select="accountAction"><NButton size="small" quaternary>{{ auth.username }}</NButton></NDropdown></div></NLayoutHeader><NLayoutContent content-style="padding: 28px; min-height: calc(100vh - 59px)"><NAlert v-if="mosdnsError" type="warning" class="form-alert" :show-icon="true">mosdns 当前不可连接，DNS 将继续使用最近一次成功持久化的快照服务。{{ mosdnsError }}</NAlert><RouterView v-slot="{ Component }"><KeepAlive include="QueriesPage"><component :is="Component" /></KeepAlive></RouterView></NLayoutContent></NLayout>
     </NLayout>
     <NModal v-model:show="showPassword" preset="card" title="修改密码" class="rule-modal"><div class="form-grid password-form"><NFormItem label="当前密码"><NInput v-model:value="password.current" type="password" show-password-on="click" /></NFormItem><NFormItem label="新密码"><NInput v-model:value="password.next" type="password" show-password-on="click" /></NFormItem><NFormItem label="确认新密码"><NInput v-model:value="password.confirm" type="password" show-password-on="click" @keyup.enter="changePassword" /></NFormItem></div><div class="modal-actions"><NButton @click="showPassword = false">取消</NButton><NButton type="primary" :loading="passwordSaving" @click="changePassword">保存</NButton></div></NModal>

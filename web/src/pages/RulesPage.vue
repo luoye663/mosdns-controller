@@ -16,7 +16,13 @@ const uploadInput = ref<HTMLInputElement | null>(null)
 const uploadFiles = ref<File[]>([])
 const draft = reactive({ category: 'access', action: 'block', match_type: 'domain', pattern: '', priority: 100, source: 'manual', comment: '', enabled: true })
 const sourceDraft = reactive({ url: '', refresh_minutes: 1440 })
-const tabs = [{ key: 'allow', label: '白名单', category: 'access', action: 'allow' }, { key: 'block', label: '黑名单', category: 'access', action: 'block' }, { key: 'local', label: '强制国内', category: 'route', action: 'local' }, { key: 'remote', label: '强制国外', category: 'route', action: 'remote' }, { key: 'no_log', label: '不记录日志', category: 'logging', action: 'no_log' }]
+const tabs = [
+  { key: 'allow', label: '白名单', category: 'access', action: 'allow', description: '允许匹配域名继续解析，并仅绕过匹配到的动态黑名单规则；不会改变其本应使用的解析线路。' },
+  { key: 'block', label: '黑名单', category: 'access', action: 'block', description: '拦截匹配域名的 DNS 查询。黑名单在缓存之前生效，新规则发布后会立即影响后续查询。' },
+  { key: 'local', label: '强制国内', category: 'route', action: 'local', description: '将匹配域名固定交给本地解析线路，用于国内服务或需要本地 DNS 解析的域名。' },
+  { key: 'remote', label: '强制国外', category: 'route', action: 'remote', description: '将匹配域名固定交给远程解析线路，用于境外服务或需要远程 DNS 解析的域名。' },
+  { key: 'no_log', label: '不记录日志', category: 'logging', action: 'no_log', description: '匹配域名仍会正常解析，但不会写入查询审计日志，适用于需要额外保护隐私的域名。' },
+]
 const selected = computed(() => tabs.find((tab) => tab.key === active.value) || tabs[1]!)
 const visibleRules = computed(() => rules.value.filter((rule) => rule.category === selected.value.category && rule.action === selected.value.action))
 const visibleSubscriptions = computed(() => subscriptions.value.filter((source) => source.category === selected.value.category && source.action === selected.value.action))
@@ -47,18 +53,19 @@ onMounted(load)
   <section class="page">
     <header class="page-heading"><div><p class="eyebrow">动态策略</p><h1>规则管理</h1></div></header>
     <nav class="rule-tabs"><button v-for="tab in tabs" :key="tab.key" :class="{ active: active === tab.key }" @click="active = tab.key">{{ tab.label }} <small>{{ tabRuleCount(tab.category, tab.action).toLocaleString() }}</small></button></nav>
-    <nav v-if="supportsSubscriptions" class="rule-view-tabs" aria-label="规则来源">
-      <button :class="{ active: ruleView === 'manual' }" @click="ruleView = 'manual'">手工规则 <small>{{ visibleRules.length.toLocaleString() }}</small></button>
-      <button :class="{ active: ruleView === 'subscription' }" @click="ruleView = 'subscription'">订阅源 <small>{{ subscriptionRuleCount.toLocaleString() }}</small></button>
-    </nav>
+    <div class="rule-context">
+      <p class="rule-description">{{ selected.description }}</p>
+      <nav v-if="supportsSubscriptions" class="rule-view-tabs" aria-label="规则来源">
+        <button :class="{ active: ruleView === 'manual' }" @click="ruleView = 'manual'">本地规则 <small>{{ visibleRules.length.toLocaleString() }}</small></button>
+        <button :class="{ active: ruleView === 'subscription' }" @click="ruleView = 'subscription'">订阅源 <small>{{ subscriptionRuleCount.toLocaleString() }}</small></button>
+      </nav>
+    </div>
     <section v-if="!supportsSubscriptions || ruleView === 'manual'" class="manual-rules">
-      <header><p class="eyebrow">手工规则</p><h2>{{ selected.label }}规则</h2></header>
-      <div class="section-action"><NButton size="small" type="primary" @click="openCreate">添加规则</NButton></div>
-      <div class="table-wrap"><table><thead><tr><th>ID</th><th>域名</th><th>匹配</th><th>优先级</th><th>来源</th><th>备注</th><th>启用</th><th></th></tr></thead><tbody><tr v-for="rule in visibleRules" :key="rule.id"><td>{{ rule.id }}</td><td class="mono">{{ rule.pattern }}</td><td>{{ rule.match_type }}</td><td>{{ rule.priority }}</td><td>{{ rule.source }}</td><td>{{ rule.comment || '-' }}</td><td><NSwitch :value="rule.enabled" @update:value="switchRule(rule, $event)" /></td><td class="actions"><NButton size="small" @click="openEdit(rule)">编辑</NButton><NButton size="small" type="error" secondary @click="remove(rule)">删除</NButton></td></tr><tr v-if="!loading && !visibleRules.length"><td colspan="8" class="empty-cell">该分类没有手工规则</td></tr></tbody></table></div>
+      <header class="rule-section-heading"><div><p class="eyebrow">{{ selected.label }}</p><h2>本地规则</h2></div><NButton size="small" type="primary" @click="openCreate">添加规则</NButton></header>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>域名</th><th>匹配</th><th>优先级</th><th>来源</th><th>备注</th><th>启用</th><th></th></tr></thead><tbody><tr v-for="rule in visibleRules" :key="rule.id"><td>{{ rule.id }}</td><td class="mono">{{ rule.pattern }}</td><td>{{ rule.match_type }}</td><td>{{ rule.priority }}</td><td>{{ rule.source }}</td><td>{{ rule.comment || '-' }}</td><td><NSwitch :value="rule.enabled" @update:value="switchRule(rule, $event)" /></td><td class="actions"><NButton size="small" @click="openEdit(rule)">编辑</NButton><NButton size="small" type="error" secondary @click="remove(rule)">删除</NButton></td></tr><tr v-if="!loading && !visibleRules.length"><td colspan="8" class="empty-cell">该分类没有本地规则</td></tr></tbody></table></div>
     </section>
     <section v-else class="subscription-sources">
-      <header><p class="eyebrow">订阅源</p><h2>{{ selected.label }}订阅</h2></header>
-      <div class="section-action"><NButton size="small" type="primary" @click="openSources">添加订阅源</NButton></div>
+      <header class="rule-section-heading"><div><p class="eyebrow">{{ selected.label }}</p><h2>订阅源</h2></div><NButton size="small" type="primary" @click="openSources">添加订阅源</NButton></header>
       <div class="table-wrap"><table><thead><tr><th>名称</th><th>来源</th><th>规则数</th><th>刷新间隔</th><th>最后成功</th><th>状态</th><th>启用</th><th></th></tr></thead><tbody><tr v-for="source in visibleSubscriptions" :key="source.id"><td>{{ source.name }}</td><td class="mono source-url" :title="source.source_url">{{ source.kind === 'url' ? source.source_url : '本地 TXT' }}</td><td>{{ source.rule_count.toLocaleString() }}</td><td>{{ source.kind === 'url' ? `${Math.round(source.refresh_interval_seconds / 60)} 分钟` : '-' }}</td><td>{{ formatTime(source.last_success_at_ms) }}</td><td><span :class="{ 'source-error': source.last_error }">{{ source.last_error || '正常' }}</span></td><td><NSwitch :value="source.enabled" @update:value="switchSource(source.id, $event)" /></td><td class="actions"><NButton v-if="source.kind === 'url'" size="small" @click="refreshSource(source.id)">刷新</NButton><NButton size="small" type="error" secondary @click="removeSource(source.id, source.name)">删除</NButton></td></tr><tr v-if="!visibleSubscriptions.length"><td colspan="8" class="empty-cell">暂无订阅源</td></tr></tbody></table></div>
     </section>
     <NModal v-model:show="showEditor" preset="card" :title="editing ? '编辑规则' : '新增规则'" class="rule-modal"><div class="form-grid rule-form"><label class="rule-domain-field">域名<NInput v-model:value="draft.pattern" :type="editing ? 'text' : 'textarea'" :autosize="editing ? false : { minRows: 5, maxRows: 12 }" placeholder="example.com&#10;example.net" /></label><label>匹配类型<NSelect v-model:value="draft.match_type" :options="[{ label: '域名后缀', value: 'domain' }, { label: '精确域名', value: 'full' }, { label: '正则表达式', value: 'regexp' }]" /></label><label>优先级<NInputNumber v-model:value="draft.priority" :min="0" :max="1000" /></label><label>备注<NInput v-model:value="draft.comment" maxlength="500" /></label></div><small v-if="!editing && draftPatterns.length > 1" class="bulk-rule-count">将创建 {{ draftPatterns.length }} 条规则</small><div class="modal-actions"><NButton @click="showEditor = false">取消</NButton><NButton type="primary" :loading="loading" @click="save">保存并发布</NButton></div></NModal>

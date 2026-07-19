@@ -9,6 +9,7 @@
     "typecheck": "vue-tsc -b"
   },
   "dependencies": {
+    "@lucide/vue": "^1.25.0",
     "echarts": "^6.0.0",
     "naive-ui": "^2.43.1",
     "pinia": "^3.0.3",
