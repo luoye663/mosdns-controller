@@ -2,6 +2,36 @@
 
 面向局域网的 DNS 管理平台。`mosdns/` 是固定在官方 `v5.3.4` 的 GPL-3.0 数据面 fork；`controller/` 提供规则、审计、统计和认证 API；`web/` 是 Vue 管理界面。推荐通过 Docker Compose 运行完整系统。
 
+## 获取源码
+
+`mosdns/` 是 Git 子模块。首次克隆时使用 `--recurse-submodules`，可同时检出根仓库锁定的 mosdns 精确提交：
+
+```bash
+git clone --recurse-submodules https://github.com/luoye663/mosdns-controller.git
+cd mosdns-controller
+```
+
+已克隆但未初始化子模块的仓库，执行：
+
+```bash
+git submodule update --init --recursive
+```
+
+更新根仓库并检出其锁定的 mosdns 版本：
+
+```bash
+git pull --ff-only
+git submodule update --init --recursive
+```
+
+根仓库锁定具体的 mosdns 提交，保证构建可复现。`mosdns` 的日常开发分支为 `managed-dns`；仅在需要主动获取该分支最新代码时执行：
+
+```bash
+git submodule update --remote mosdns
+```
+
+该操作会更新根仓库记录的 mosdns 提交，提交根仓库变更前应完成相应测试并检查 `git status`。
+
 ## 功能概览
 
 - 动态白名单、黑名单、强制 local/remote 路由，规则发布不重启 DNS 监听。

@@ -1,3 +1,4 @@
 [submodule "mosdns"]
 	path = mosdns
-	url = git@github.com:luoye663/mosdns.git
+	url = https://github.com/luoye663/mosdns.git
+	branch = managed-dns
