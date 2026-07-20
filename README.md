@@ -1,6 +1,15 @@
-# mosdns-manager
+# mosdns-controller
 
-面向局域网的 DNS 管理平台。`mosdns/` 是固定在官方 `v5.3.4` 的 GPL-3.0 数据面 fork；`controller/` 提供规则、审计、统计和认证 API；`web/` 是 Vue 管理界面。推荐通过 Docker Compose 运行完整系统。
+本项目基于 `mosdns` 的插件系统扩展 DNS 数据面，并提供面向局域网的 DNS 管理 Web UI，用于分流解析国内外域名。
+
+
+## 功能概览
+
+- 动态白名单、黑名单、强制 local/remote 路由，规则发布不重启 DNS 监听。
+- 独立 local/remote DNS 缓存，黑名单检查位于缓存之前。
+- 查询审计、SQLite 统计、SSE 实时查询流，以及每次实际采纳响应的 `upstream_tag`。
+- controller 不可用时，mosdns 仍使用最近成功持久化的规则快照继续解析。
+- 管理员 session、CSRF 防护、内部 Bearer Token 和非 root 容器部署。
 
 ## 获取源码
 
@@ -32,15 +41,7 @@ git submodule update --remote mosdns
 
 该操作会更新根仓库记录的 mosdns 提交，提交根仓库变更前应完成相应测试并检查 `git status`。
 
-## 功能概览
-
-- 动态白名单、黑名单、强制 local/remote 路由，规则发布不重启 DNS 监听。
-- 独立 local/remote DNS 缓存，黑名单检查位于缓存之前。
-- 查询审计、SQLite 统计、SSE 实时查询流，以及每次实际采纳响应的 `upstream_tag`。
-- controller 不可用时，mosdns 仍使用最近成功持久化的规则快照继续解析。
-- 管理员 session、CSRF 防护、内部 Bearer Token 和非 root 容器部署。
-
-## 快速部署
+## Docker部署
 
 ### 1. 准备环境
 
@@ -86,7 +87,7 @@ docker compose -f deploy/docker-compose.yml logs --tail=100 mosdns controller
 
 状态为 `healthy` 后，访问 `http://<部署主机IP>:8080`。仅 `53/udp`、`53/tcp` 与 `8080/tcp` 映射到宿主机；mosdns API `9091` 和 controller ingest `8081` 仅在 Compose 内部网络开放。
 
-需要通过 SOCKS5 代理拉取基础镜像或下载构建依赖时，可在运行 Docker 命令的终端设置：
+如果需要通过 SOCKS5 代理拉取基础镜像或下载构建依赖时，可在运行 Docker 命令的终端设置：
 
 ```bash
 export ALL_PROXY=socks5://127.0.0.1:10808
@@ -203,7 +204,7 @@ go -C mosdns build -o ../bin/mosdns .
 go -C controller build -o ../bin/controller ./cmd/controller
 ```
 
-### 本地运行完整服务
+### 本地运行完整服务(开发时)
 
 `deploy/local/` 提供不依赖 Docker 的开发配置。它只监听本机回环地址，端口为 DNS `5353`、WebUI/API `18080`、内部 ingest `18081`、mosdns API `19091`，所有本地数据均写入被 Git 忽略的 `.local/`。配置中的公开 DoH 仅用于开发功能验证，不应用于生产。
 
