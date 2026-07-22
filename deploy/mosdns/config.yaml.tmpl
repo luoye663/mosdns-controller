@@ -42,6 +42,15 @@ plugins:
         route_remote: 1102
         no_log: 1201
 
+  # 全局 A/AAAA 策略由管理页面热更新；默认保留双栈响应。
+  - tag: address_family
+    type: dynamic_address_family
+    args:
+      snapshot_file: "${MOSDNS_STATE_DIR}/address-family.json"
+      backup_file: "${MOSDNS_STATE_DIR}/address-family.json.bak"
+      auth_token_file: "${MOSDNS_TOKEN_FILE}"
+      initial: { version: 1, mode: "dual_stack" }
+
   # DNS 后置审计。事件异步发送至 controller，队列满时丢弃而不阻塞 DNS。
   - tag: query_audit
     type: query_audit
@@ -201,6 +210,8 @@ plugins:
       - matches:
           - mark 1001
         exec: reject 3
+      # 地址族策略必须在缓存和上游之前执行，且不绕过访问封锁。
+      - exec: $address_family
       - matches:
           - mark 1101
         exec: goto route_local

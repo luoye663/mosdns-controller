@@ -60,6 +60,12 @@ func (f *fakeMosdns) ECSStatus(context.Context, string) (mosdnsclient.ECSSnapsho
 func (f *fakeMosdns) ApplyECS(context.Context, string, mosdnsclient.ECSSnapshot) (mosdnsclient.ECSSnapshot, error) {
 	return mosdnsclient.ECSSnapshot{}, nil
 }
+func (f *fakeMosdns) AddressFamilyStatus(context.Context) (mosdnsclient.AddressFamilySnapshot, error) {
+	return mosdnsclient.AddressFamilySnapshot{Version: 1, Mode: "dual_stack"}, nil
+}
+func (f *fakeMosdns) ApplyAddressFamily(context.Context, mosdnsclient.AddressFamilySnapshot) (mosdnsclient.AddressFamilySnapshot, error) {
+	return mosdnsclient.AddressFamilySnapshot{}, nil
+}
 func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
 	return mosdnsclient.AuditStatus{}, nil
 }

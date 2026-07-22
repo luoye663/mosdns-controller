@@ -12,13 +12,14 @@ import (
 )
 
 type fakeMosdns struct {
-	flushes      []string
-	flushErr     map[string]error
-	statusErr    error
-	upstreams    map[string]mosdnsclient.UpstreamSnapshot
-	cacheEnabled bool
-	cacheTTL     int
-	ecs          map[string]mosdnsclient.ECSSnapshot
+	flushes       []string
+	flushErr      map[string]error
+	statusErr     error
+	upstreams     map[string]mosdnsclient.UpstreamSnapshot
+	cacheEnabled  bool
+	cacheTTL      int
+	ecs           map[string]mosdnsclient.ECSSnapshot
+	addressFamily mosdnsclient.AddressFamilySnapshot
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -76,6 +77,20 @@ func (f *fakeMosdns) ApplyECS(_ context.Context, group string, snapshot mosdnscl
 	}
 	f.ecs[group] = snapshot
 	return snapshot, nil
+}
+func (f *fakeMosdns) AddressFamilyStatus(context.Context) (mosdnsclient.AddressFamilySnapshot, error) {
+	if f.addressFamily.Version == 0 {
+		f.addressFamily = mosdnsclient.AddressFamilySnapshot{Version: 1, Mode: "dual_stack"}
+	}
+	return f.addressFamily, nil
+}
+func (f *fakeMosdns) ApplyAddressFamily(_ context.Context, snapshot mosdnsclient.AddressFamilySnapshot) (mosdnsclient.AddressFamilySnapshot, error) {
+	if snapshot.ExpectedCurrentVersion != f.addressFamily.Version {
+		return mosdnsclient.AddressFamilySnapshot{}, mosdnsclient.ErrConflict
+	}
+	f.addressFamily = snapshot
+	f.addressFamily.ExpectedCurrentVersion = 0
+	return f.addressFamily, nil
 }
 func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
 	return mosdnsclient.AuditStatus{QueueCapacity: 65536}, nil
@@ -189,15 +204,35 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4}, 1, "req-settings", "192.0.2.10"); err != nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := s.Settings(context.Background())
-	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || fake.cacheEnabled || fake.cacheTTL != 60 {
+	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || fake.cacheEnabled || fake.cacheTTL != 60 || fake.addressFamily.Mode != "ipv4_only" {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
 	}
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0}, 1, "req-settings", "192.0.2.10"); err == nil {
+	if len(fake.flushes) != 2 || fake.flushes[0] != "cache_local" || fake.flushes[1] != "cache_remote" {
+		t.Fatalf("flushes=%v", fake.flushes)
+	}
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err == nil {
 		t.Fatal("invalid database size accepted")
+	}
+}
+
+func TestUpdateSettingsPersistsAddressFamilyWhenCacheFlushFails(t *testing.T) {
+	fake := &fakeMosdns{flushErr: map[string]error{"cache_local": errors.New("cache unavailable")}}
+	s := testService(t, fake)
+	settings := Settings{CacheEnabled: true, CacheTTL: 0, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "ipv6_only"}
+	if err := s.UpdateSettings(context.Background(), settings, 1, "req-settings", "192.0.2.10"); err == nil {
+		t.Fatal("expected cache flush error")
+	}
+	persisted, err := s.Settings(context.Background())
+	if err != nil || persisted.AddressFamilyMode != "ipv6_only" || fake.addressFamily.Mode != "ipv6_only" {
+		t.Fatalf("persisted=%+v runtime=%+v err=%v", persisted, fake.addressFamily, err)
+	}
+	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "CACHE_FLUSH_FAILED" {
+		t.Fatalf("audit=%+v err=%v", page.Items, err)
 	}
 }
 

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NFormItem, NInputNumber, NModal, NSwitch } from 'naive-ui'
+import { NAlert, NButton, NCard, NFormItem, NInputNumber, NModal, NSelect, NSwitch } from 'naive-ui'
 import { api, type Settings } from '@/lib/api'
 import { notify } from '@/lib/notify'
 
-const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, query_retention_days: 7, database_max_size_gib: 2 })
+const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack' })
 const loading = ref(false)
 const saving = ref(false)
 const clearing = ref(false)
@@ -21,8 +21,9 @@ onMounted(load)
       <div><p class="eyebrow">系统配置</p><h1>设置</h1></div>
       <NButton :loading="loading" @click="load">刷新</NButton>
     </header>
-    <div class="settings-grid"><NCard title="DNS 缓存" size="small" class="settings-card">
+    <div class="settings-grid"><NCard title="DNS 解析" size="small" class="settings-card">
       <NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem><NFormItem label="缓存 TTL（秒）"><NInputNumber v-model:value="settings.cache_ttl" :min="0" :max="604800" /></NFormItem><p class="field-hint">0 表示不延长缓存，响应有效期完全遵循上游 DNS 的 TTL。</p>
+      <NFormItem label="地址族策略"><NSelect v-model:value="settings.address_family_mode" :options="[{ label: '双栈', value: 'dual_stack' }, { label: '优先 IPv4', value: 'prefer_ipv4' }, { label: '优先 IPv6', value: 'prefer_ipv6' }, { label: '仅 IPv4', value: 'ipv4_only' }, { label: '仅 IPv6', value: 'ipv6_only' }]" /></NFormItem><p class="field-hint">优先模式会在首选地址存在时隐藏另一种地址；仅限模式会直接返回被禁用地址族的空响应。</p>
     </NCard>
     <NCard title="查询日志" size="small" class="settings-card">
       <NFormItem label="保留天数"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem>

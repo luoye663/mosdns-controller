@@ -76,10 +76,11 @@ type Upstreams struct {
 	RemoteECS mosdnsclient.ECSSnapshot      `json:"remote_ecs"`
 }
 type Settings struct {
-	CacheEnabled       bool `json:"cache_enabled"`
-	CacheTTL           int  `json:"cache_ttl"`
-	QueryRetentionDays int  `json:"query_retention_days"`
-	DatabaseMaxSizeGiB int  `json:"database_max_size_gib"`
+	CacheEnabled       bool   `json:"cache_enabled"`
+	CacheTTL           int    `json:"cache_ttl"`
+	QueryRetentionDays int    `json:"query_retention_days"`
+	DatabaseMaxSizeGiB int    `json:"database_max_size_gib"`
+	AddressFamilyMode  string `json:"address_family_mode"`
 }
 type Service struct {
 	db     *sql.DB
@@ -232,8 +233,8 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 	return errors.Join(localErr, remoteErr)
 }
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
-	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2}
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days','database_max_size_gib')`)
+	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "dual_stack"}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days','database_max_size_gib','address_family_mode')`)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -268,6 +269,8 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 				return Settings{}, err
 			}
 			settings.DatabaseMaxSizeGiB = parsed
+		case "address_family_mode":
+			settings.AddressFamilyMode = value
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -281,6 +284,9 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	}
 	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
 		return Settings{}, errors.New("database max size must be within 1..128 GiB")
+	}
+	if !validAddressFamilyMode(settings.AddressFamilyMode) {
+		return Settings{}, errors.New("invalid address family mode")
 	}
 	return settings, nil
 }
@@ -300,9 +306,22 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 	if err := s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled); err != nil {
 		return err
 	}
-	return s.mosdns.SetCacheTTL(ctx, settings.CacheTTL)
+	if err := s.mosdns.SetCacheTTL(ctx, settings.CacheTTL); err != nil {
+		return err
+	}
+	changed, err := s.applyAddressFamilyMode(ctx, settings.AddressFamilyMode)
+	if err != nil {
+		return err
+	}
+	if changed {
+		return s.flushBothCaches(ctx)
+	}
+	return nil
 }
 func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID int64, requestID, clientIP string) error {
+	if settings.AddressFamilyMode == "" {
+		settings.AddressFamilyMode = "dual_stack"
+	}
 	if settings.QueryRetentionDays < 1 || settings.QueryRetentionDays > 365 {
 		return errors.New("query retention days must be within 1..365")
 	}
@@ -311,6 +330,9 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
 		return errors.New("database max size must be within 1..128 GiB")
+	}
+	if !validAddressFamilyMode(settings.AddressFamilyMode) {
+		return errors.New("invalid address family mode")
 	}
 	current, err := s.Settings(ctx)
 	if err != nil {
@@ -339,21 +361,74 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 			}
 		}
 	}
+	var addressFamilyErr error
+	if current.AddressFamilyMode != settings.AddressFamilyMode {
+		changed, err := s.applyAddressFamilyMode(ctx, settings.AddressFamilyMode)
+		if err != nil {
+			return err
+		}
+		if changed {
+			if err := s.flushBothCaches(ctx); err != nil {
+				// The policy snapshot is already durable in mosdns. Persist the
+				// controller view before reporting the incomplete cache flush.
+				addressFamilyErr = err
+			}
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}} {
+	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}, {"address_family_mode", settings.AddressFamilyMode}} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, item.key, item.value, now); err != nil {
 			return err
 		}
 	}
-	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention,database_max_size", requestID, clientIP, "success", ""); err != nil {
+	result, code := "success", ""
+	if addressFamilyErr != nil {
+		result, code = "failed", "CACHE_FLUSH_FAILED"
+	}
+	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention,database_max_size,address_family", requestID, clientIP, result, code); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return addressFamilyErr
+}
+
+func validAddressFamilyMode(mode string) bool {
+	switch mode {
+	case "dual_stack", "prefer_ipv4", "prefer_ipv6", "ipv4_only", "ipv6_only":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) applyAddressFamilyMode(ctx context.Context, mode string) (bool, error) {
+	current, err := s.mosdns.AddressFamilyStatus(ctx)
+	if err != nil {
+		return false, err
+	}
+	if current.Mode == mode {
+		return false, nil
+	}
+	requested := mosdnsclient.AddressFamilySnapshot{Version: current.Version + 1, ExpectedCurrentVersion: current.Version, Mode: mode}
+	_, err = s.mosdns.ApplyAddressFamily(ctx, requested)
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		current, statusErr := s.mosdns.AddressFamilyStatus(ctx)
+		if statusErr == nil && current.Mode == mode {
+			return true, nil
+		}
+	}
+	return err == nil, err
+}
+
+func (s *Service) flushBothCaches(ctx context.Context) error {
+	return errors.Join(s.mosdns.Flush(ctx, "cache_local"), s.mosdns.Flush(ctx, "cache_remote"))
 }
 func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestID, clientIP string) error {
 	tx, err := s.db.BeginTx(ctx, nil)

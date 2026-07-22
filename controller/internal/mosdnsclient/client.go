@@ -29,6 +29,8 @@ type Client interface {
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
 	ECSStatus(context.Context, string) (ECSSnapshot, error)
 	ApplyECS(context.Context, string, ECSSnapshot) (ECSSnapshot, error)
+	AddressFamilyStatus(context.Context) (AddressFamilySnapshot, error)
+	ApplyAddressFamily(context.Context, AddressFamilySnapshot) (AddressFamilySnapshot, error)
 	AuditStatus(context.Context) (AuditStatus, error)
 	SubscriptionStatus(context.Context, string) (DomainSetStatus, error)
 	ApplySubscription(context.Context, string, DomainSetSnapshot) (DomainSetStatus, error)
@@ -56,6 +58,11 @@ type ECSSnapshot struct {
 	Mask6                  int    `json:"mask6"`
 	Preset4                string `json:"preset4,omitempty"`
 	Preset6                string `json:"preset6,omitempty"`
+}
+type AddressFamilySnapshot struct {
+	Version                uint64 `json:"version"`
+	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
+	Mode                   string `json:"mode"`
 }
 type Status struct {
 	State           string `json:"state"`
@@ -216,6 +223,14 @@ func (c *HTTPClient) ApplyECS(ctx context.Context, group string, snapshot ECSSna
 	}
 	var value ECSSnapshot
 	return value, c.request(ctx, http.MethodPut, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/snapshot", snapshot, &value)
+}
+func (c *HTTPClient) AddressFamilyStatus(ctx context.Context) (AddressFamilySnapshot, error) {
+	var value AddressFamilySnapshot
+	return value, c.request(ctx, http.MethodGet, "/plugins/address_family/status", nil, &value)
+}
+func (c *HTTPClient) ApplyAddressFamily(ctx context.Context, snapshot AddressFamilySnapshot) (AddressFamilySnapshot, error) {
+	var value AddressFamilySnapshot
+	return value, c.request(ctx, http.MethodPut, "/plugins/address_family/snapshot", snapshot, &value)
 }
 func (c *HTTPClient) AuditStatus(ctx context.Context) (AuditStatus, error) {
 	var value AuditStatus

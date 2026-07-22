@@ -11,6 +11,12 @@
 - controller 不可用时，mosdns 仍使用最近成功持久化的规则快照继续解析。
 - 管理员 session、CSRF 防护、内部 Bearer Token 和非 root 容器部署。
 
+
+> [!WARNING]
+> 本项目包含 AI 辅助生成或修订的代码。维护者会对代码进行人工审查，但**不保证**代码不存在缺陷、漏洞、兼容性问题或合规风险。
+>
+> 本项目按“现状”提供，不附带任何安全承诺、生产适用性承诺或完整安全审计保证。若你计划将其用于生产环境，请自行完成代码审阅、部署测试。
+
 ## 获取源码
 
 `mosdns/` 是 Git 子模块。首次克隆时使用 `--recurse-submodules`，可同时检出根仓库锁定的 mosdns 精确提交：
@@ -41,13 +47,26 @@ git submodule update --remote mosdns
 
 该操作会更新根仓库记录的 mosdns 提交，提交根仓库变更前应完成相应测试并检查 `git status`。
 
+## 注意事项
+
+### 禁用 systemd-resolved
+
+Ubuntu / Debian 默认启用了`systemd-resolved`,会占用 `127.0.0.53:53`,停止方法:
+
+停止并禁用：
+
+```bash
+systemctl stop systemd-resolved
+systemctl disable systemd-resolved
+```
+
 ## Docker部署
 
 ### 1. 准备环境
 
 部署主机需要 Docker Engine 和 Docker Compose v2。DNS 服务会占用宿主机的 `53/udp`、`53/tcp`，管理界面占用 `8080/tcp`；请先停止或迁移已有 DNS 服务，并确认这些端口未被占用。
 
-首次部署建议先在测试机器或隔离网络使用 [集成环境](#集成环境验证)，它只使用 `5353`，不会影响生产 DNS。
+
 
 ### 2. 配置密钥和上游
 
@@ -139,7 +158,9 @@ docker compose -f deploy/docker-compose.yml down
 
 ## 二进制部署
 
-`deploy/binary/` 保存原生 systemd 部署所需的模板：服务文件、配置、安装脚本与说明。`make binary-package` 将它们与当前平台的 `mosdns`、嵌入 WebUI 的 `controller` 二进制一起生成至 `deploy/binary/package/`，同时创建可传输的 `.tar.gz`；生成物被 Git 忽略，不含 token、SQLite 数据、缓存或规则快照。
+`deploy/binary/` 保存原生 systemd 部署所需的模板：服务文件、配置、安装脚本与说明。
+
+`make binary-package` 将它们与当前平台的 `mosdns`、嵌入 WebUI 的 `controller` 二进制一起生成至 `deploy/binary/package/`，同时创建可传输的 `.tar.gz`；生成物被 Git 忽略，不含 token、SQLite 数据、缓存或规则快照。
 
 ```bash
 npm --prefix web ci
