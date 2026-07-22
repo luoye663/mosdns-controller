@@ -47,6 +47,7 @@ git submodule update --remote mosdns
 
 该操作会更新根仓库记录的 mosdns 提交，提交根仓库变更前应完成相应测试并检查 `git status`。
 
+
 ## 注意事项
 
 ### 禁用 systemd-resolved
@@ -59,6 +60,20 @@ Ubuntu / Debian 默认启用了`systemd-resolved`,会占用 `127.0.0.53:53`,停�
 systemctl stop systemd-resolved
 systemctl disable systemd-resolved
 ```
+
+## 项目截图
+
+概况：
+![概况](docs/images/863033tUgzcbsgpZbMR5pz15r.webp)
+
+查询日志：
+![查询日志](docs/images/863033tUgzRP63ka9Agf8tw8v.webp)
+
+规则管理：
+![规则管理](docs/images/863033tUgwzKnhsX24Bk8dymW.webp)
+
+上游DNS：
+![上游DNS](docs/images/863033tUgyh64CxkmmNdIGEIJ.webp)
 
 ## Docker部署
 
