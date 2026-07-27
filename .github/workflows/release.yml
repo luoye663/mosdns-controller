@@ -222,4 +222,8 @@ jobs:
           if [[ "${{ needs.validate.outputs.prerelease }}" == true ]]; then
             args+=(--prerelease)
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* "${args[@]}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* "${args[@]}"
+          fi
