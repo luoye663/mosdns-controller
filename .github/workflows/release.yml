@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.semver.outputs.prerelease }}
+    steps:
+      - name: Validate SemVer tag
+        id: semver
+        shell: bash
+        run: |
+          semver_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $semver_regex ]]; then
+            printf 'Invalid SemVer release tag: %s\n' "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          version_without_build=${GITHUB_REF_NAME%%+*}
+          if [[ "$version_without_build" == *-* ]]; then
+            printf 'prerelease=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'prerelease=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  binaries:
+    name: Binary linux/${{ matrix.goarch }}
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        goarch:
+          - amd64
+          - arm64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - name: Install render dependencies
+        run: sudo apt-get update && sudo apt-get install --yes gettext-base
+      - name: Install web dependencies
+        run: npm ci --prefix web
+      - name: Build binary archive
+        shell: bash
+        run: |
+          commit=$(git rev-parse 'HEAD^{commit}')
+          build_time=$(git show -s --format=%cI 'HEAD^{commit}')
+          make binary-package \
+            PROJECT_VERSION="$GITHUB_REF_NAME" \
+            GIT_COMMIT="$commit" \
+            BUILD_TIME="$build_time" \
+            BINARY_GOOS=linux \
+            BINARY_GOARCH="${{ matrix.goarch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mosdns-manager-linux-${{ matrix.goarch }}
+          path: deploy/binary/mosdns-manager-linux-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  docker:
+    name: Docker images
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Resolve build metadata
+        id: build-meta
+        shell: bash
+        run: |
+          printf 'commit=%s\n' "$(git rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+          printf 'build_time=%s\n' "$(git show -s --format=%cI 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Mosdns image metadata
+        id: mosdns-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/luoye663/mosdns-manager
+            ghcr.io/luoye663/mosdns-manager
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}},value=${{ github.ref_name }}
+            type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
+      - name: Controller image metadata
+        id: controller-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/luoye663/mosdns-controller
+            ghcr.io/luoye663/mosdns-controller
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}},value=${{ github.ref_name }}
+            type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
+      - name: Build and push mosdns-manager
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mosdns
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.mosdns-meta.outputs.tags }}
+          labels: ${{ steps.mosdns-meta.outputs.labels }}
+          build-args: |
+            PROJECT_VERSION=${{ github.ref_name }}
+            GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
+            BUILD_TIME=${{ steps.build-meta.outputs.build_time }}
+            MOSDNS_BASE=v5.3.4
+      - name: Build and push mosdns-controller
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: controller/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.controller-meta.outputs.tags }}
+          labels: ${{ steps.controller-meta.outputs.labels }}
+          build-args: |
+            PROJECT_VERSION=${{ github.ref_name }}
+            GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
+            BUILD_TIME=${{ steps.build-meta.outputs.build_time }}
+            MOSDNS_BASE=v5.3.4
+
+  release:
+    name: GitHub Release
+    needs:
+      - validate
+      - binaries
+      - docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mosdns-manager-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum mosdns-manager-*.tar.gz > SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          args=(--verify-tag --generate-notes)
+          if [[ "${{ needs.validate.outputs.prerelease }}" == true ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* "${args[@]}"
