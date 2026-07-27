@@ -1,4 +1,7 @@
 MOSDNS_BASE := v5.3.4
+PROJECT_VERSION := $(or $(PROJECT_VERSION),$(or $(shell git describe --tags --always --dirty 2>/dev/null),dev))
+GIT_COMMIT := $(or $(GIT_COMMIT),$(or $(shell git rev-parse --short HEAD 2>/dev/null),unknown))
+BUILD_TIME := $(or $(BUILD_TIME),$(or $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null),unknown))
 LOCAL_DIR := .local
 LOCAL_TOKEN := $(LOCAL_DIR)/mosdns_control_token
 LOCAL_MOSDNS_CONFIG := deploy/local/mosdns.yaml
@@ -8,9 +11,11 @@ LOCAL_CONTROLLER_CONFIG := deploy/local/controller.yaml
 COMPOSE_CONTROLLER_CONFIG := deploy/controller/config.yaml
 BINARY_DEPLOY_DIR := deploy/binary
 BINARY_PACKAGE_DIR := $(BINARY_DEPLOY_DIR)/package
-BINARY_GOOS ?= $(shell go env GOOS)
-BINARY_GOARCH ?= $(shell go env GOARCH)
+BINARY_GOOS ?= $(or $(shell go env GOOS 2>/dev/null),linux)
+BINARY_GOARCH ?= $(or $(shell go env GOARCH 2>/dev/null),amd64)
 BINARY_ARCHIVE := $(BINARY_DEPLOY_DIR)/mosdns-manager-$(BINARY_GOOS)-$(BINARY_GOARCH).tar.gz
+MOSDNS_LDFLAGS = -s -w -X 'main.projectVersion=$(PROJECT_VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.mosdnsBase=$(MOSDNS_BASE)' -X 'main.buildTime=$(BUILD_TIME)' -X 'github.com/IrineSistiana/mosdns/v5/plugin/executable/dynamic_rule_engine.Version=$(PROJECT_VERSION)' -X 'github.com/IrineSistiana/mosdns/v5/plugin/executable/query_audit.Version=$(PROJECT_VERSION)'
+CONTROLLER_LDFLAGS = -s -w -X 'github.com/managed-dns/controller/internal/version.ProjectVersion=$(PROJECT_VERSION)' -X 'github.com/managed-dns/controller/internal/version.GitCommit=$(GIT_COMMIT)' -X 'github.com/managed-dns/controller/internal/version.MosdnsBase=$(MOSDNS_BASE)' -X 'github.com/managed-dns/controller/internal/version.BuildTime=$(BUILD_TIME)'
 
 .PHONY: build test race lint web-build web-embed configs compose-up compose-down local-init local-mosdns local-controller local-up local-create-admin local-clean binary-package binary-copy binary-clean
 
@@ -104,8 +109,8 @@ local-clean:
 binary-package: web-embed
 	rm -rf $(BINARY_PACKAGE_DIR) $(BINARY_DEPLOY_DIR)/mosdns-manager-*.tar.gz
 	install -d $(BINARY_PACKAGE_DIR)/bin $(BINARY_PACKAGE_DIR)/etc/mosdns/rules $(BINARY_PACKAGE_DIR)/etc/controller $(BINARY_PACKAGE_DIR)/systemd
-	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C mosdns build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/mosdns .
-	GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C controller build -trimpath -o ../$(BINARY_PACKAGE_DIR)/bin/controller ./cmd/controller
+	CGO_ENABLED=0 GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C mosdns build -trimpath -ldflags "$(MOSDNS_LDFLAGS)" -o ../$(BINARY_PACKAGE_DIR)/bin/mosdns .
+	CGO_ENABLED=0 GOOS=$(BINARY_GOOS) GOARCH=$(BINARY_GOARCH) go -C controller build -trimpath -ldflags "$(CONTROLLER_LDFLAGS)" -o ../$(BINARY_PACKAGE_DIR)/bin/controller ./cmd/controller
 	bash deploy/render-mosdns-config.sh binary $(BINARY_PACKAGE_DIR)/etc/mosdns/config.yaml
 	bash deploy/render-controller-config.sh binary $(BINARY_PACKAGE_DIR)/etc/controller/config.yaml
 	install -m 0644 $(BINARY_DEPLOY_DIR)/mosdns.service $(BINARY_PACKAGE_DIR)/systemd/mosdns.service
