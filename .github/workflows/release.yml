@@ -149,8 +149,6 @@ jobs:
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ github.ref_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
-            type=semver,pattern={{major}},value=${{ github.ref_name }}
             type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
       - name: Controller image metadata
         id: controller-meta
@@ -162,8 +160,6 @@ jobs:
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ github.ref_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
-            type=semver,pattern={{major}},value=${{ github.ref_name }}
             type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
       - name: Build and push mosdns-manager
         uses: docker/build-push-action@v6
