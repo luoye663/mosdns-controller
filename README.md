@@ -17,39 +17,6 @@
 >
 > 本项目按“现状”提供，不附带任何安全承诺、生产适用性承诺或完整安全审计保证。若你计划将其用于生产环境，请自行完成代码审阅、部署测试。
 
-## 快速运行
-
-### 脚本安装
-
-适用于使用 systemd 的 Linux `amd64`、`arm64` 主机。安装脚本会自动识别架构，下载并校验 [GitHub Releases](https://github.com/luoye663/mosdns-controller/releases) 中的最新二进制包，然后安装并启动服务：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/luoye663/mosdns-controller/main/deploy/binary/install-release.sh | sudo bash
-```
-
-安装完成后访问 `http://<部署主机IP>:8080` 初始化管理员。需要安装指定版本时，使用 `curl` 下载脚本后通过 `VERSION` 环境变量执行，详见 [二进制部署说明](deploy/binary/README.md)。
-
-### Docker Compose
-
-Docker 部署包包含版本匹配的 `docker-compose.yml`、mosdns 配置、controller 配置和镜像版本文件。主机需要 Docker Engine、Docker Compose v2 和 `openssl`：
-
-```bash
-curl -fLO https://github.com/luoye663/mosdns-controller/releases/latest/download/mosdns-manager-docker.tar.gz
-curl -fLO https://github.com/luoye663/mosdns-controller/releases/latest/download/SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf mosdns-manager-docker.tar.gz
-cd mosdns-manager
-umask 077
-mkdir -p secrets
-chmod 0700 secrets
-openssl rand -hex 32 > secrets/mosdns_control_token
-chmod 0444 secrets/mosdns_control_token
-docker compose pull
-docker compose up -d
-```
-
-部署包通过 `.env` 固定与 Release 对应的镜像版本，`mosdns/config.yaml` 和 `controller/config.yaml` 可在启动前修改。服务就绪后访问 `http://<部署主机IP>:8080`。DNS 使用宿主机的 `53/tcp` 和 `53/udp`，WebUI 使用 `8080/tcp`；这些端口必须未被其他服务占用。完整配置和升级方法见下方 [Docker部署](#docker部署)。
-
 ## 获取源码
 
 `mosdns/` 是 Git 子模块。首次克隆时使用 `--recurse-submodules`，可同时检出根仓库锁定的 mosdns 精确提交：
@@ -108,15 +75,46 @@ systemctl disable systemd-resolved
 上游DNS：
 ![上游DNS](docs/images/863033tUgyh64CxkmmNdIGEIJ.webp)
 
-## Docker部署
+## 快速运行
 
-### 1. 准备环境
+DNS 服务会占用宿主机的 `53/udp`、`53/tcp`，管理界面占用 `8080/tcp`；请先停止或迁移已有 DNS 服务，并确认这些端口未被占用。
 
-部署主机需要 Docker Engine 和 Docker Compose v2。DNS 服务会占用宿主机的 `53/udp`、`53/tcp`，管理界面占用 `8080/tcp`；请先停止或迁移已有 DNS 服务，并确认这些端口未被占用。
+### 方式一: 脚本安装
 
+适用于使用 systemd 的 Linux `amd64`、`arm64` 主机。安装脚本会自动识别架构，下载并校验 [GitHub Releases](https://github.com/luoye663/mosdns-controller/releases) 中的最新二进制包，然后安装并启动服务：
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/luoye663/mosdns-controller/main/deploy/binary/install-release.sh | sudo bash
+```
 
-### 2. 配置密钥和上游
+安装完成后访问 `http://<部署主机IP>:8080` 初始化管理员。需要安装指定版本时，使用 `curl` 下载脚本后通过 `VERSION` 环境变量执行，详见 [二进制部署说明](deploy/binary/README.md)。
+
+### 方式二: Docker运行
+
+Docker 部署包包含版本匹配的 `docker-compose.yml`、mosdns 配置、controller 配置和镜像版本文件。主机需要 Docker Engine、Docker Compose v2 和 `openssl`：
+
+```bash
+curl -fLO https://github.com/luoye663/mosdns-controller/releases/latest/download/mosdns-manager-docker.tar.gz
+curl -fLO https://github.com/luoye663/mosdns-controller/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf mosdns-manager-docker.tar.gz
+cd mosdns-manager
+umask 077
+mkdir -p secrets
+chmod 0700 secrets
+openssl rand -hex 32 > secrets/mosdns_control_token
+chmod 0444 secrets/mosdns_control_token
+docker compose pull
+docker compose up -d
+```
+
+部署包通过 `.env` 固定与 Release 对应的镜像版本，`mosdns/config.yaml` 和 `controller/config.yaml` 可在启动前修改。服务就绪后访问 `http://<部署主机IP>:8080`。DNS 使用宿主机的 `53/tcp` 和 `53/udp`，WebUI 使用 `8080/tcp`；这些端口必须未被其他服务占用。完整配置和升级方法见下方 [Docker部署](#docker部署)。
+
+---
+
+## 方式三: Docker编译部署
+
+### 1. 配置密钥和上游
 
 在仓库根目录执行。共享 token 供 controller 与 mosdns 的内部 API 使用，必须保密且不能提交：
 
@@ -131,11 +129,13 @@ chmod 0444 deploy/secrets/mosdns_control_token
 
 `deploy/secrets/` 保持为 `0700`，token 文件可供容器内的非 root 服务读取，但普通宿主机用户不能访问该目录。不要将 token 写入 Compose 文件或提交到 Git。
 
-mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。执行 `make configs` 会生成 Compose、本地和集成测试配置；`make binary-package` 会生成包内二进制配置。首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
+mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。
+1. 执行 `make configs` 会生成 Compose、本地和集成测试配置；
+2. `make binary-package` 会生成包内二进制配置。
+3. 首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。
 
-国内、国外、白名单和黑名单域名集合均在“规则管理”的对应 tab 中作为订阅源或手工规则发布；URL 订阅可按源配置刷新间隔，TXT 上传会作为可独立启停和删除的本地源保存。
 
-### 3. 构建并启动
+### 2. 构建并启动
 
 ```bash
 docker build \
@@ -163,38 +163,6 @@ docker build --build-arg GOPROXY=https://goproxy.cn,direct --file controller/Doc
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-不要将代理地址或凭证写入 Dockerfile、Compose 文件或 Git。
-
-### 4. 创建首个管理员
-
-首次访问 `http://<部署主机IP>:8080` 时，WebUI 会显示管理员初始化页面。设置用户名和至少 8 个字符的密码后会自动登录。
-
-也可使用 CLI 初始化。命令中的密码会出现在 shell 历史记录中，生产环境应使用受控终端并在执行后清理历史记录。
-
-```bash
-docker compose -f deploy/docker-compose.yml exec controller \
-  controller create-admin \
-  -config /etc/mosdns-controller/config.yaml \
-  -username admin \
-  -password '请替换为高强度密码'
-```
-
-管理员只能初始化一次；完成后首次初始化接口会关闭。首次使用前，应先在 WebUI 确认系统状态和当前规则版本，再让局域网客户端使用该主机作为 DNS 服务器。
-
-### 5. 验证服务
-
-```bash
-curl -fsS http://127.0.0.1:8080/health/ready
-dig @127.0.0.1 example.com A
-dig @127.0.0.1 example.com A +tcp
-```
-
-如果未安装 `dig`，可使用项目自带的健康检查命令：
-
-```bash
-docker compose -f deploy/docker-compose.yml exec mosdns \
-  dns-healthcheck --server 127.0.0.1:53 --network udp
-```
 
 停止服务但保留规则快照、缓存和 SQLite 数据：
 
@@ -202,52 +170,9 @@ docker compose -f deploy/docker-compose.yml exec mosdns \
 docker compose -f deploy/docker-compose.yml down
 ```
 
-`down -v` 会删除命名卷中的运行数据，仅应在确认不需要恢复数据时使用。
 
-### 6. 更新与回滚
 
-部署包中的 `.env` 固定两个镜像的版本。仅更新镜像时，先备份版本文件，将 `VERSION` 替换为目标稳定版本，再拉取并重建容器：
-
-```bash
-cp .env .env.before-upgrade
-VERSION=1.2.4
-printf 'MOSDNS_VERSION=%s\n' "$VERSION" > .env
-docker compose config >/dev/null
-docker compose pull
-docker compose up -d --remove-orphans
-docker compose ps
-curl -fsS http://127.0.0.1:8080/health/ready
-```
-
-如果 Release 说明提到 Compose 或默认配置变化，应将对应版本的新版部署包解压到临时目录：
-
-```bash
-VERSION=1.2.4
-STAGE_DIR=$(mktemp -d)
-BASE_URL="https://github.com/luoye663/mosdns-controller/releases/download/v${VERSION}"
-curl -fLo "$STAGE_DIR/mosdns-manager-docker.tar.gz" "$BASE_URL/mosdns-manager-docker.tar.gz"
-curl -fLo "$STAGE_DIR/SHA256SUMS" "$BASE_URL/SHA256SUMS"
-(cd "$STAGE_DIR" && sha256sum --check --ignore-missing SHA256SUMS)
-tar -xzf "$STAGE_DIR/mosdns-manager-docker.tar.gz" -C "$STAGE_DIR"
-
-diff -u docker-compose.yml "$STAGE_DIR/mosdns-manager/docker-compose.yml"
-diff -u mosdns/config.yaml "$STAGE_DIR/mosdns-manager/mosdns/config.yaml"
-diff -u controller/config.yaml "$STAGE_DIR/mosdns-manager/controller/config.yaml"
-```
-
-先备份当前 `.env`、Compose 和两份配置，再将必要变更合并到当前文件，保留本机的上游、监听地址和其他自定义项。完成后将新版 `.env` 复制到当前目录，执行 `docker compose config`、`docker compose pull` 和 `docker compose up -d --remove-orphans`。不要直接解压新版部署包覆盖现有配置；确认升级正常后可删除 `$STAGE_DIR`。
-
-升级失败时，恢复升级前的 Compose、配置和 `.env`，然后执行：
-
-```bash
-docker compose config >/dev/null
-docker compose pull
-docker compose up -d --remove-orphans
-```
-
-命名卷中的规则快照、缓存和 SQLite 数据不会因重建容器而删除。升级或回滚时不要执行 `docker compose down -v`。
-
-## 二进制部署
+## 方式四:手动编译部署
 
 `deploy/binary/` 保存原生 systemd 部署所需的模板：服务文件、配置、安装脚本与说明。
 
@@ -267,11 +192,18 @@ sudo ./install.sh
 sudo systemctl start mosdns.service mosdns-controller.service
 ```
 
-安装脚本创建最小权限服务用户、运行数据目录和共享 token，并将 [mosdns.service](deploy/binary/mosdns.service) 与 [mosdns-controller.service](deploy/binary/mosdns-controller.service) 安装到 `/etc/systemd/system/`。远程 DoH 默认使用 Cloudflare（`https://cloudflare-dns.com/dns-query`）；如需其他上游，可在启动前编辑 `/etc/mosdns-manager/mosdns/config.yaml`。DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
+### 额外一些说明
 
-首次启动后，访问 `http://<部署主机IP>:8080` 初始化管理员，并使用 `curl -fsS http://127.0.0.1:8080/health/ready`、`dig @127.0.0.1 example.com A` 与 `dig @127.0.0.1 example.com A +tcp` 验证服务。升级前备份 `/etc/mosdns-manager`、`/var/lib/mosdns` 和 `/var/lib/mosdns-controller`；详见 [升级说明](docs/upgrade.md) 与 [恢复说明](docs/recovery.md)。
+安装脚本创建最小权限服务用户、运行数据目录和共享 token，并将 [mosdns.service](deploy/binary/mosdns.service) 与 [mosdns-controller.service](deploy/binary/mosdns-controller.service) 安装到 `/etc/systemd/system/`。
 
-查看二进制部署的服务日志：
+远程 DoH 默认使用 Cloudflare（`https://cloudflare-dns.com/dns-query`）；DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
+
+首次启动后，访问 `http://<部署主机IP>:8080` 初始化管理员，并使用 `curl -fsS http://127.0.0.1:8080/health/ready`、`dig @127.0.0.1 example.com A` 与 `dig @127.0.0.1 example.com A +tcp` 验证服务。
+
+升级前备份 `/etc/mosdns-manager`、`/var/lib/mosdns` 和 `/var/lib/mosdns-controller`；详见 [升级说明](docs/upgrade.md) 与 [恢复说明](docs/recovery.md)。
+
+
+### 查看二进制部署的服务日志：
 
 ```bash
 # 实时跟随两个服务
@@ -280,6 +212,26 @@ sudo journalctl -fu mosdns.service -u mosdns-controller.service
 sudo journalctl -b -u mosdns.service -u mosdns-controller.service
 # 仅查看近期错误
 sudo journalctl -p err..alert -u mosdns.service -u mosdns-controller.service
+```
+
+## 安装后操作
+
+### 创建首个管理员
+
+首次访问 `http://<部署主机IP>:8080` 时，WebUI 会显示管理员初始化页面。设置用户名和至少 8 个字符的密码后会自动登录。
+
+也可使用 CLI 初始化。命令中的密码会出现在 shell 历史记录中，生产环境应使用受控终端并在执行后清理历史记录。
+
+```bash
+docker compose -f deploy/docker-compose.yml exec controller \
+  controller create-admin \
+  -config /etc/mosdns-controller/config.yaml \
+  -username admin \
+  -password '请替换为高强度密码'
+```
+
+管理员只能初始化一次；完成后首次初始化接口会关闭。首次使用前，应先在 WebUI 确认系统状态和当前规则版本，再让局域网客户端使用该主机作为 DNS 服务器。
+
 ```
 
 ## 本地编译与测试
