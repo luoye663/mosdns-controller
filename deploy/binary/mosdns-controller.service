@@ -7,8 +7,11 @@ Wants=network-online.target
 User=mosdns-controller
 Group=mosdns-manager
 ExecStart=/usr/local/bin/controller serve -config /etc/mosdns-manager/controller.yaml
+Environment=GOMEMLIMIT=128MiB
 Restart=on-failure
 RestartSec=5
+MemoryHigh=192M
+MemoryMax=256M
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

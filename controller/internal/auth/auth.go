@@ -23,8 +23,9 @@ var ErrInitialAdminExists = errors.New("an administrator already exists")
 var ErrAdminNotFound = errors.New("administrator not found")
 
 type Service struct {
-	store *storage.Store
-	ttl   time.Duration
+	store        *storage.Store
+	ttl          time.Duration
+	passwordWork chan struct{}
 }
 type Admin struct {
 	ID       int64  `json:"id"`
@@ -35,14 +36,16 @@ type Session struct {
 	CSRFToken string
 }
 
-func New(store *storage.Store, ttl time.Duration) *Service { return &Service{store: store, ttl: ttl} }
+func New(store *storage.Store, ttl time.Duration) *Service {
+	return &Service{store: store, ttl: ttl, passwordWork: make(chan struct{}, 1)}
+}
 
 func (s *Service) CreateAdmin(ctx context.Context, username, password string) error {
 	username, err := validateCredentials(username, password)
 	if err != nil {
 		return err
 	}
-	hash, err := hashPassword(password)
+	hash, err := s.hashPassword(ctx, password)
 	if err != nil {
 		return err
 	}
@@ -67,7 +70,7 @@ func (s *Service) CreateInitialAdmin(ctx context.Context, username, password str
 	if err != nil {
 		return err
 	}
-	hash, err := hashPassword(password)
+	hash, err := s.hashPassword(ctx, password)
 	if err != nil {
 		return err
 	}
@@ -99,7 +102,14 @@ func (s *Service) Login(ctx context.Context, username, password, clientIP, userA
 	var hash string
 	var disabled bool
 	err := s.store.DB().QueryRowContext(ctx, `SELECT id,password_hash,disabled FROM admins WHERE username = ? COLLATE NOCASE`, strings.TrimSpace(username)).Scan(&id, &hash, &disabled)
-	if err != nil || disabled || !verifyPassword(password, hash) {
+	if err != nil || disabled {
+		return "", "", errors.New("invalid credentials")
+	}
+	verified, err := s.verifyPassword(ctx, password, hash)
+	if err != nil {
+		return "", "", err
+	}
+	if !verified {
 		return "", "", errors.New("invalid credentials")
 	}
 	token, err := randomToken()
@@ -172,10 +182,17 @@ func (s *Service) ChangePasswordKeepingSession(ctx context.Context, adminID int6
 		return errors.New("password must be at least 8 characters")
 	}
 	var currentHash string
-	if err := s.store.DB().QueryRowContext(ctx, `SELECT password_hash FROM admins WHERE id=? AND disabled=0`, adminID).Scan(&currentHash); err != nil || !verifyPassword(currentPassword, currentHash) {
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT password_hash FROM admins WHERE id=? AND disabled=0`, adminID).Scan(&currentHash); err != nil {
 		return errors.New("invalid credentials")
 	}
-	nextHash, err := hashPassword(nextPassword)
+	verified, err := s.verifyPassword(ctx, currentPassword, currentHash)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		return errors.New("invalid credentials")
+	}
+	nextHash, err := s.hashPassword(ctx, nextPassword)
 	if err != nil {
 		return err
 	}
@@ -205,7 +222,7 @@ func (s *Service) ResetPassword(ctx context.Context, username, nextPassword stri
 	if err != nil {
 		return err
 	}
-	nextHash, err := hashPassword(nextPassword)
+	nextHash, err := s.hashPassword(ctx, nextPassword)
 	if err != nil {
 		return err
 	}
@@ -243,6 +260,34 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func (s *Service) withPasswordMemory(ctx context.Context, work func()) error {
+	select {
+	case s.passwordWork <- struct{}{}:
+		defer func() { <-s.passwordWork }()
+		work()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) hashPassword(ctx context.Context, password string) (string, error) {
+	var hash string
+	var err error
+	if waitErr := s.withPasswordMemory(ctx, func() { hash, err = hashPassword(password) }); waitErr != nil {
+		return "", waitErr
+	}
+	return hash, err
+}
+
+func (s *Service) verifyPassword(ctx context.Context, password, encoded string) (bool, error) {
+	var verified bool
+	if err := s.withPasswordMemory(ctx, func() { verified = verifyPassword(password, encoded) }); err != nil {
+		return false, err
+	}
+	return verified, nil
 }
 
 // 密码格式携带 Argon2id 参数，后续升级参数时仍可验证已有管理员。

@@ -22,7 +22,7 @@ import (
 
 const (
 	maxBatchEvents        = 500
-	queueCapacity         = 65_536
+	queueCapacity         = 8_192
 	batchInterval         = 500 * time.Millisecond
 	batchSize             = 500
 	maxAnswerIPs          = 16

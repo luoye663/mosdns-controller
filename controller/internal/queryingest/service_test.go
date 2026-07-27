@@ -29,6 +29,13 @@ func validBatch(events ...Event) Batch {
 	return Batch{SchemaVersion: 1, SenderID: "mosdns-test", SentAtMS: time.Now().UnixMilli(), Events: events}
 }
 
+func TestIngestQueueCapacityIsBounded(t *testing.T) {
+	s := testService(t)
+	if got := cap(s.queue); got != 8_192 {
+		t.Fatalf("queue capacity = %d, want 8192", got)
+	}
+}
+
 func TestEmptyQueryPageReturnsItemsArray(t *testing.T) {
 	s := testService(t)
 	page, err := s.Queries(context.Background(), Query{})
