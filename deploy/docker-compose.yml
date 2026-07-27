@@ -1,6 +1,6 @@
 services:
   mosdns:
-    image: luoye663/mosdns-manager:latest
+    image: luoye663/mosdns-manager:${MOSDNS_VERSION:-latest}
     command: ["start", "-c", "/etc/mosdns/config.yaml"]
     restart: unless-stopped
     init: true
@@ -32,7 +32,7 @@ services:
 #      start_period: 10s
 
   controller:
-    image: luoye663/mosdns-controller:latest
+    image: luoye663/mosdns-controller:${MOSDNS_VERSION:-latest}
     command: ["serve", "-config", "/etc/mosdns-controller/config.yaml"]
     restart: unless-stopped
     init: true

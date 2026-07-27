@@ -1,5 +1,8 @@
 .git/
+.local/
 deploy/secrets/
+deploy/binary/package/
+deploy/binary/*.tar.gz
 mosdns/mosdns
 controller/controller
 web/node_modules/

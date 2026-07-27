@@ -79,6 +79,35 @@ jobs:
           path: deploy/binary/mosdns-manager-linux-${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
+  docker-package:
+    name: Docker deployment package
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install render dependencies
+        run: sudo apt-get update && sudo apt-get install --yes gettext-base
+      - name: Build deployment archive
+        shell: bash
+        run: |
+          package_dir=dist/mosdns-manager
+          image_version=${GITHUB_REF_NAME#v}
+          image_version=${image_version//+/-}
+          install -d "$package_dir/mosdns" "$package_dir/controller"
+          install -d -m 0700 "$package_dir/secrets"
+          bash deploy/render-mosdns-config.sh compose "$package_dir/mosdns/config.yaml"
+          bash deploy/render-controller-config.sh compose "$package_dir/controller/config.yaml"
+          install -m 0644 deploy/docker-compose.yml "$package_dir/docker-compose.yml"
+          printf 'MOSDNS_VERSION=%s\n' "$image_version" > "$package_dir/.env"
+          tar -C dist -czf dist/mosdns-manager-docker.tar.gz mosdns-manager
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mosdns-manager-docker
+          path: dist/mosdns-manager-docker.tar.gz
+          if-no-files-found: error
+
   docker:
     name: Docker images
     needs: validate
@@ -96,6 +125,7 @@ jobs:
         shell: bash
         run: |
           printf 'commit=%s\n' "$(git rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+          printf 'mosdns_commit=%s\n' "$(git -C mosdns rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
           printf 'build_time=%s\n' "$(git show -s --format=%cI 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with:
@@ -145,7 +175,7 @@ jobs:
           labels: ${{ steps.mosdns-meta.outputs.labels }}
           build-args: |
             PROJECT_VERSION=${{ github.ref_name }}
-            GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
+            GIT_COMMIT=${{ steps.build-meta.outputs.mosdns_commit }}
             BUILD_TIME=${{ steps.build-meta.outputs.build_time }}
             MOSDNS_BASE=v5.3.4
       - name: Build and push mosdns-controller
@@ -168,6 +198,7 @@ jobs:
     needs:
       - validate
       - binaries
+      - docker-package
       - docker
     runs-on: ubuntu-latest
     permissions:
@@ -175,7 +206,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: mosdns-manager-linux-*
+          pattern: mosdns-manager-*
           path: dist
           merge-multiple: true
       - name: Generate checksums

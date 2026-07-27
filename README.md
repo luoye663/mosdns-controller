@@ -17,6 +17,39 @@
 >
 > 本项目按“现状”提供，不附带任何安全承诺、生产适用性承诺或完整安全审计保证。若你计划将其用于生产环境，请自行完成代码审阅、部署测试。
 
+## 快速运行
+
+### 脚本安装
+
+适用于使用 systemd 的 Linux `amd64`、`arm64` 主机。安装脚本会自动识别架构，下载并校验 [GitHub Releases](https://github.com/luoye663/mosdns-controller/releases) 中的最新二进制包，然后安装并启动服务：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luoye663/mosdns-controller/main/deploy/binary/install-release.sh | sudo bash
+```
+
+安装完成后访问 `http://<部署主机IP>:8080` 初始化管理员。需要安装指定版本时，使用 `curl` 下载脚本后通过 `VERSION` 环境变量执行，详见 [二进制部署说明](deploy/binary/README.md)。
+
+### Docker Compose
+
+Docker 部署包包含版本匹配的 `docker-compose.yml`、mosdns 配置、controller 配置和镜像版本文件。主机需要 Docker Engine、Docker Compose v2 和 `openssl`：
+
+```bash
+curl -fLO https://github.com/luoye663/mosdns-controller/releases/latest/download/mosdns-manager-docker.tar.gz
+curl -fLO https://github.com/luoye663/mosdns-controller/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf mosdns-manager-docker.tar.gz
+cd mosdns-manager
+umask 077
+mkdir -p secrets
+chmod 0700 secrets
+openssl rand -hex 32 > secrets/mosdns_control_token
+chmod 0444 secrets/mosdns_control_token
+docker compose pull
+docker compose up -d
+```
+
+部署包通过 `.env` 固定与 Release 对应的镜像版本，`mosdns/config.yaml` 和 `controller/config.yaml` 可在启动前修改。服务就绪后访问 `http://<部署主机IP>:8080`。DNS 使用宿主机的 `53/tcp` 和 `53/udp`，WebUI 使用 `8080/tcp`；这些端口必须未被其他服务占用。完整配置和升级方法见下方 [Docker部署](#docker部署)。
+
 ## 获取源码
 
 `mosdns/` 是 Git 子模块。首次克隆时使用 `--recurse-submodules`，可同时检出根仓库锁定的 mosdns 精确提交：
@@ -98,7 +131,7 @@ chmod 0444 deploy/secrets/mosdns_control_token
 
 `deploy/secrets/` 保持为 `0700`，token 文件可供容器内的非 root 服务读取，但普通宿主机用户不能访问该目录。不要将 token 写入 Compose 文件或提交到 Git。
 
-mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。执行 `make configs` 会生成 Compose、本地和集成测试配置；`make binary-package` 会直接生成包内二进制配置。首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
+mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。执行 `make configs` 会生成 Compose、本地和集成测试配置；`make binary-package` 会生成包内二进制配置。首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。请勿提交真实私有 URL。
 
 国内、国外、白名单和黑名单域名集合均在“规则管理”的对应 tab 中作为订阅源或手工规则发布；URL 订阅可按源配置刷新间隔，TXT 上传会作为可独立启停和删除的本地源保存。
 
@@ -170,6 +203,49 @@ docker compose -f deploy/docker-compose.yml down
 ```
 
 `down -v` 会删除命名卷中的运行数据，仅应在确认不需要恢复数据时使用。
+
+### 6. 更新与回滚
+
+部署包中的 `.env` 固定两个镜像的版本。仅更新镜像时，先备份版本文件，将 `VERSION` 替换为目标稳定版本，再拉取并重建容器：
+
+```bash
+cp .env .env.before-upgrade
+VERSION=1.2.4
+printf 'MOSDNS_VERSION=%s\n' "$VERSION" > .env
+docker compose config >/dev/null
+docker compose pull
+docker compose up -d --remove-orphans
+docker compose ps
+curl -fsS http://127.0.0.1:8080/health/ready
+```
+
+如果 Release 说明提到 Compose 或默认配置变化，应将对应版本的新版部署包解压到临时目录：
+
+```bash
+VERSION=1.2.4
+STAGE_DIR=$(mktemp -d)
+BASE_URL="https://github.com/luoye663/mosdns-controller/releases/download/v${VERSION}"
+curl -fLo "$STAGE_DIR/mosdns-manager-docker.tar.gz" "$BASE_URL/mosdns-manager-docker.tar.gz"
+curl -fLo "$STAGE_DIR/SHA256SUMS" "$BASE_URL/SHA256SUMS"
+(cd "$STAGE_DIR" && sha256sum --check --ignore-missing SHA256SUMS)
+tar -xzf "$STAGE_DIR/mosdns-manager-docker.tar.gz" -C "$STAGE_DIR"
+
+diff -u docker-compose.yml "$STAGE_DIR/mosdns-manager/docker-compose.yml"
+diff -u mosdns/config.yaml "$STAGE_DIR/mosdns-manager/mosdns/config.yaml"
+diff -u controller/config.yaml "$STAGE_DIR/mosdns-manager/controller/config.yaml"
+```
+
+先备份当前 `.env`、Compose 和两份配置，再将必要变更合并到当前文件，保留本机的上游、监听地址和其他自定义项。完成后将新版 `.env` 复制到当前目录，执行 `docker compose config`、`docker compose pull` 和 `docker compose up -d --remove-orphans`。不要直接解压新版部署包覆盖现有配置；确认升级正常后可删除 `$STAGE_DIR`。
+
+升级失败时，恢复升级前的 Compose、配置和 `.env`，然后执行：
+
+```bash
+docker compose config >/dev/null
+docker compose pull
+docker compose up -d --remove-orphans
+```
+
+命名卷中的规则快照、缓存和 SQLite 数据不会因重建容器而删除。升级或回滚时不要执行 `docker compose down -v`。
 
 ## 二进制部署
 
@@ -284,8 +360,8 @@ go -C mosdns test -v ./tests/integration
 ## 配置、数据与运维
 
 - 生产 Compose：`deploy/docker-compose.yml`。
-- mosdns 配置模板：`deploy/mosdns/config.yaml.tmpl`；运行配置由 `make configs` 生成。
-- controller 配置模板：`deploy/controller/config.yaml.tmpl`；运行配置由 `make configs` 生成。
+- mosdns 配置模板：`deploy/mosdns/config.yaml.tmpl`；运行配置由 `make configs` 或 Release 部署包生成。
+- controller 配置模板：`deploy/controller/config.yaml.tmpl`；运行配置由 `make configs` 或 Release 部署包生成。
 - 持久化数据：Compose 命名卷 `mosdns-state`（快照和缓存）与 `controller-state`（SQLite）。
 - 密钥目录：`deploy/secrets/`，只保留 `.gitkeep`，实际 token 被 Git 忽略。
 - 运维、备份恢复、升级与故障诊断分别见 [operations](docs/operations.md)、[recovery](docs/recovery.md)、[upgrade](docs/upgrade.md) 与 [troubleshooting](docs/troubleshooting.md)。
