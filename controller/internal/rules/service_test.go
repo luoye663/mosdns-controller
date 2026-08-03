@@ -539,6 +539,109 @@ func TestRefreshFailureRestoresCompleteSubscriptionState(t *testing.T) {
 	}
 }
 
+func TestRefreshDownloadDoesNotBlockRuleMutation(t *testing.T) {
+	service, fake := testService(t)
+	downloadStarted := make(chan struct{})
+	releaseDownload := make(chan struct{})
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = w.Write([]byte("old.example\n"))
+			return
+		}
+		close(downloadStarted)
+		<-releaseDownload
+		_, _ = w.Write([]byte("new.example\n"))
+	}))
+	defer server.Close()
+
+	source, _, err := service.CreateURLSubscription(context.Background(), SubscriptionInput{Category: "access", Action: "block", Name: "url", SourceURL: server.URL, RefreshIntervalSeconds: 86400, Enabled: true}, 1, "create", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, _, refreshErr := service.RefreshSubscription(context.Background(), source.ID, 1, "refresh", "")
+		refreshDone <- refreshErr
+	}()
+	<-downloadStarted
+
+	mutationDone := make(chan error, 1)
+	go func() {
+		_, mutationErr := service.Create(context.Background(), blockRule("manual.example"), 1, "manual", "")
+		mutationDone <- mutationErr
+	}()
+	select {
+	case err := <-mutationDone:
+		if err != nil {
+			close(releaseDownload)
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		close(releaseDownload)
+		<-refreshDone
+		t.Fatal("rule mutation was blocked by subscription download")
+	}
+	close(releaseDownload)
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.current.Rules) != 1 || len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "new.example" {
+		t.Fatalf("snapshot=%+v", fake.current)
+	}
+}
+
+func TestRefreshDoesNotOverwriteConcurrentSubscriptionMutation(t *testing.T) {
+	service, fake := testService(t)
+	downloadStarted := make(chan struct{})
+	releaseDownload := make(chan struct{})
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = w.Write([]byte("old.example\n"))
+			return
+		}
+		close(downloadStarted)
+		<-releaseDownload
+		_, _ = w.Write([]byte("stale.example\n"))
+	}))
+	defer server.Close()
+
+	source, _, err := service.CreateURLSubscription(context.Background(), SubscriptionInput{Category: "access", Action: "block", Name: "url", SourceURL: server.URL, RefreshIntervalSeconds: 86400, Enabled: true}, 1, "create", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, _, refreshErr := service.RefreshSubscription(context.Background(), source.ID, 1, "refresh", "")
+		refreshDone <- refreshErr
+	}()
+	<-downloadStarted
+	updated, _, err := service.SetSubscriptionEnabled(context.Background(), source.ID, false, 1, "disable", "")
+	if err != nil || updated.Enabled {
+		close(releaseDownload)
+		<-refreshDone
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	close(releaseDownload)
+	if err := <-refreshDone; !errors.Is(err, mosdnsclient.ErrConflict) {
+		t.Fatalf("refresh err=%v, want conflict", err)
+	}
+	sets, err := service.subscriptionSets(context.Background())
+	if err != nil || len(sets) != 0 || len(fake.current.SubscriptionSets) != 0 {
+		t.Fatalf("sets=%+v snapshot=%+v err=%v", sets, fake.current, err)
+	}
+	var domains string
+	if err := service.store.DB().QueryRow(`SELECT domains_json FROM rule_subscriptions WHERE id=?`, source.ID).Scan(&domains); err != nil {
+		t.Fatal(err)
+	}
+	if domains != `["old.example"]` {
+		t.Fatalf("domains_json=%s", domains)
+	}
+}
+
 func TestReconcileUpgradesLegacyActiveSnapshotToV3(t *testing.T) {
 	service, fake := testService(t)
 	input := SubscriptionInput{Category: "access", Action: "allow", Name: "allow.txt", RefreshIntervalSeconds: 86400, Enabled: true}

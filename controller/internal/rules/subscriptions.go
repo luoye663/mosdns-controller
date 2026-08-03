@@ -186,8 +186,6 @@ func (s *Service) createSubscription(ctx context.Context, input SubscriptionInpu
 }
 
 func (s *Service) RefreshSubscription(ctx context.Context, id int64, adminID int64, requestID, ip string) (Subscription, *Version, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	item, err := s.subscription(ctx, id)
 	if err != nil {
 		return Subscription{}, nil, err
@@ -199,12 +197,6 @@ func (s *Service) RefreshSubscription(ctx context.Context, id int64, adminID int
 	if err != nil {
 		return Subscription{}, nil, s.subscriptionFailure(ctx, item, err)
 	}
-	now := time.Now().UnixMilli()
-	if checksum(body) == sourceChecksum(ctx, s, item.ID) {
-		_, err = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET source_url=?,last_checked_at_ms=?,last_error='',updated_at_ms=? WHERE id=?`, normalizedURL, now, now, item.ID)
-		updated, getErr := s.subscription(ctx, item.ID)
-		return updated, nil, errors.Join(err, getErr)
-	}
 	patterns, err := parseSubscription(body)
 	if err != nil {
 		return Subscription{}, nil, s.subscriptionFailure(ctx, item, err)
@@ -212,6 +204,26 @@ func (s *Service) RefreshSubscription(ctx context.Context, id int64, adminID int
 	domains, err := json.Marshal(patterns)
 	if err != nil {
 		return Subscription{}, nil, s.subscriptionFailure(ctx, item, err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, err := s.subscription(ctx, id)
+	if err != nil {
+		return Subscription{}, nil, err
+	}
+	if current.UpdatedAtMS != item.UpdatedAtMS {
+		return current, nil, mosdnsclient.ErrConflict
+	}
+	item = current
+	now := time.Now().UnixMilli()
+	if now <= item.UpdatedAtMS {
+		now = item.UpdatedAtMS + 1
+	}
+	if checksum(body) == sourceChecksum(ctx, s, item.ID) {
+		_, err = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET source_url=?,last_checked_at_ms=?,last_error='',updated_at_ms=? WHERE id=?`, normalizedURL, now, now, item.ID)
+		updated, getErr := s.subscription(ctx, item.ID)
+		return updated, nil, errors.Join(err, getErr)
 	}
 	var previousDomains []byte
 	if err = s.store.DB().QueryRowContext(ctx, `SELECT domains_json FROM rule_subscriptions WHERE id=?`, item.ID).Scan(&previousDomains); err != nil {
@@ -253,7 +265,11 @@ func (s *Service) SetSubscriptionEnabled(ctx context.Context, id int64, enabled 
 	if item.Enabled == enabled {
 		return item, Version{}, nil
 	}
-	_, err = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET enabled=?,updated_at_ms=? WHERE id=?`, enabled, time.Now().UnixMilli(), id)
+	now := time.Now().UnixMilli()
+	if now <= item.UpdatedAtMS {
+		now = item.UpdatedAtMS + 1
+	}
+	_, err = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET enabled=?,updated_at_ms=? WHERE id=?`, enabled, now, id)
 	if err != nil {
 		return Subscription{}, Version{}, err
 	}
@@ -536,7 +552,20 @@ func (s *Service) validateBinding(ctx context.Context, groupID string, priority 
 }
 
 func (s *Service) subscriptionFailure(ctx context.Context, item Subscription, cause error) error {
-	_, err := s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET last_checked_at_ms=?,last_error=?,updated_at_ms=? WHERE id=?`, time.Now().UnixMilli(), truncateError(cause), time.Now().UnixMilli(), item.ID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, err := s.subscription(ctx, item.ID)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	if current.UpdatedAtMS != item.UpdatedAtMS {
+		return errors.Join(cause, mosdnsclient.ErrConflict)
+	}
+	now := time.Now().UnixMilli()
+	if now <= item.UpdatedAtMS {
+		now = item.UpdatedAtMS + 1
+	}
+	_, err = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET last_checked_at_ms=?,last_error=?,updated_at_ms=? WHERE id=?`, now, truncateError(cause), now, item.ID)
 	return errors.Join(cause, err)
 }
 

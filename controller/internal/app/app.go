@@ -906,6 +906,10 @@ func (a *App) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
 		return
 	}
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "subscription changed while refreshing; refresh and retry")
+		return
+	}
 	if err != nil {
 		writeError(w, r, 400, "SUBSCRIPTION_REFRESH_FAILED", err.Error())
 		return
