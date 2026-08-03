@@ -9,15 +9,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/managed-dns/controller/internal/mosdnsclient"
-	"github.com/managed-dns/controller/internal/storage"
-	"golang.org/x/net/idna"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/managed-dns/controller/internal/coordination"
+	"github.com/managed-dns/controller/internal/mosdnsclient"
+	"github.com/managed-dns/controller/internal/storage"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -50,13 +52,18 @@ type Version struct {
 	ErrorCode   string `json:"error_code,omitempty"`
 }
 type Service struct {
-	store  *storage.Store
-	mosdns mosdnsclient.Client
-	mu     sync.Mutex
+	store    *storage.Store
+	mosdns   mosdnsclient.Client
+	mu       sync.Mutex
+	bindings *coordination.UpstreamBindings
 }
 
-func New(store *storage.Store, client mosdnsclient.Client) *Service {
-	return &Service{store: store, mosdns: client}
+func New(store *storage.Store, client mosdnsclient.Client, locks ...*coordination.UpstreamBindings) *Service {
+	bindings := &coordination.UpstreamBindings{}
+	if len(locks) > 0 && locks[0] != nil {
+		bindings = locks[0]
+	}
+	return &Service{store: store, mosdns: client, bindings: bindings}
 }
 func (s *Service) List(ctx context.Context) ([]Rule, error) {
 	return s.list(ctx, ` WHERE source NOT LIKE 'subscription:%'`)
@@ -284,13 +291,47 @@ func (s *Service) Reconcile(ctx context.Context) (string, error) {
 	var checksum, status string
 	err = s.store.DB().QueryRowContext(ctx, `SELECT version,checksum,status FROM rule_versions WHERE status IN ('pending','unknown') AND version=?`, runtime.SnapshotVersion).Scan(&version, &checksum, &status)
 	if err == nil && checksum == runtime.Checksum {
-		return "matched_candidate", s.finalize(ctx, version)
+		sets, err := s.subscriptionSets(ctx)
+		if err != nil {
+			return "matched_candidate", err
+		}
+		if err := s.finalize(ctx, version); err != nil {
+			return "matched_candidate", err
+		}
+		candidate, err := s.Version(ctx, version)
+		if err != nil {
+			return "matched_candidate", err
+		}
+		if subscriptionSetsEqual(candidate.SubscriptionSets, sets) {
+			return "matched_candidate", nil
+		}
+		current, err := s.allRules(ctx)
+		if err != nil {
+			return "matched_candidate", err
+		}
+		_, err = s.publish(ctx, current, 0, "reconcile_candidate_sources", "", 0)
+		return "republished", err
 	}
 	var active uint64
 	var activeChecksum string
 	err = s.store.DB().QueryRowContext(ctx, `SELECT version,checksum FROM rule_versions WHERE status='active'`).Scan(&active, &activeChecksum)
 	if errors.Is(err, sql.ErrNoRows) && runtime.SnapshotVersion == 0 {
-		return "empty", nil
+		sets, setErr := s.subscriptionSets(ctx)
+		if setErr != nil {
+			return "", setErr
+		}
+		current, ruleErr := s.allRules(ctx)
+		if ruleErr != nil {
+			return "", ruleErr
+		}
+		if len(current) == 0 && len(sets) == 0 {
+			return "empty", nil
+		}
+		_, publishErr := s.publish(ctx, current, 0, "reconcile_v3", "", 0)
+		return "republished", publishErr
+	}
+	if err != nil {
+		return "", err
 	}
 	if runtime.SnapshotVersion > active {
 		return "degraded", fmt.Errorf("runtime version %d is not a known candidate", runtime.SnapshotVersion)
@@ -307,11 +348,33 @@ func (s *Service) Reconcile(ctx context.Context) (string, error) {
 	if runtime.Checksum != activeChecksum {
 		return "degraded", errors.New("runtime checksum does not match active version")
 	}
+	var raw []byte
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE version=?`, active).Scan(&raw); err != nil {
+		return "", err
+	}
+	var activeSnapshot mosdnsclient.Snapshot
+	if err := json.Unmarshal(raw, &activeSnapshot); err != nil {
+		return "", err
+	}
+	sets, err := s.subscriptionSets(ctx)
+	if err != nil {
+		return "", err
+	}
+	if activeSnapshot.SchemaVersion < 3 || !subscriptionSetsEqual(activeSnapshot.SubscriptionSets, sets) {
+		current, err := s.allRules(ctx)
+		if err != nil {
+			return "", err
+		}
+		_, err = s.publish(ctx, current, 0, "reconcile_v3", "", 0)
+		return "republished", err
+	}
 	return "unchanged", nil
 }
 func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requestID, ip string, rollbackFrom uint64) (Version, error) {
-	existing, _ := s.allRules(ctx)
-	routeChanged := routeFingerprint(existing) != routeFingerprint(rules)
+	sets, err := s.subscriptionSets(ctx)
+	if err != nil {
+		return Version{}, err
+	}
 	if err := validateRules(rules); err != nil {
 		return Version{}, err
 	}
@@ -323,13 +386,13 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 	if err != nil {
 		return Version{}, err
 	}
-	snapshot := buildSnapshot(version, current, rules, nil)
+	snapshot := buildSnapshot(version, current, rules, sets)
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return Version{}, err
 	}
 	v := Version{Version: version, Checksum: snapshot.Checksum, Status: statusPending, RuleCount: snapshotRuleCount(snapshot), CreatedAtMS: time.Now().UnixMilli()}
-	if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rollback_from_version,rule_count,regexp_rule_count,snapshot_json,created_by,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, version, 2, snapshot.Checksum, statusPending, current, nullableVersion(rollbackFrom), v.RuleCount, regexpCount(snapshot.Rules), encoded, adminID, v.CreatedAtMS); err != nil {
+	if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rollback_from_version,rule_count,regexp_rule_count,snapshot_json,created_by,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, version, 3, snapshot.Checksum, statusPending, current, nullableVersion(rollbackFrom), v.RuleCount, regexpCount(snapshot.Rules), encoded, nullableAdminID(adminID), v.CreatedAtMS); err != nil {
 		return Version{}, err
 	}
 	validation, err := s.mosdns.Validate(ctx, snapshot)
@@ -368,15 +431,6 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 	}
 	if err := s.finalizeWithRules(ctx, version, rules, adminID, requestID, ip); err != nil {
 		return v, err
-	}
-	if routeChanged {
-		registry, statusErr := s.mosdns.RegistryStatus(ctx)
-		if statusErr != nil {
-			return v, statusErr
-		}
-		if err := s.mosdns.FlushRegistry(ctx, "", registry.Version); err != nil {
-			return v, err
-		}
 	}
 	v.Status = statusActive
 	return v, nil
@@ -512,7 +566,20 @@ func buildSnapshot(version, current uint64, rules []Rule, sets []mosdnsclient.Su
 		}
 		return a.ID < b.ID
 	})
-	snap := mosdnsclient.Snapshot{SchemaVersion: 2, Version: version, ExpectedCurrentVersion: current, GeneratedAt: time.Now().UTC(), BlockRCode: 3, Rules: wire, SubscriptionSets: sets}
+	if sets == nil {
+		sets = make([]mosdnsclient.SubscriptionSet, 0)
+	}
+	snap := mosdnsclient.Snapshot{SchemaVersion: 3, Version: version, ExpectedCurrentVersion: current, GeneratedAt: time.Now().UTC(), BlockRCode: 3, Rules: wire, SubscriptionSets: sets}
+	data := snapshotCanonicalJSON(snap)
+	sum := sha256.Sum256(data)
+	snap.Checksum = "sha256:" + hex.EncodeToString(sum[:])
+	return snap
+}
+
+func snapshotCanonicalJSON(snapshot mosdnsclient.Snapshot) []byte {
+	if snapshot.SubscriptionSets == nil {
+		snapshot.SubscriptionSets = make([]mosdnsclient.SubscriptionSet, 0)
+	}
 	canonical := struct {
 		SchemaVersion    uint32                         `json:"schema_version"`
 		Version          uint64                         `json:"version"`
@@ -520,12 +587,10 @@ func buildSnapshot(version, current uint64, rules []Rule, sets []mosdnsclient.Su
 		GeneratedAt      time.Time                      `json:"generated_at"`
 		BlockRCode       int                            `json:"block_rcode"`
 		Rules            []mosdnsclient.Rule            `json:"rules"`
-		SubscriptionSets []mosdnsclient.SubscriptionSet `json:"subscription_sets,omitempty"`
-	}{snap.SchemaVersion, snap.Version, snap.ExpectedCurrentVersion, snap.GeneratedAt, snap.BlockRCode, snap.Rules, snap.SubscriptionSets}
+		SubscriptionSets []mosdnsclient.SubscriptionSet `json:"subscription_sets"`
+	}{snapshot.SchemaVersion, snapshot.Version, snapshot.ExpectedCurrentVersion, snapshot.GeneratedAt, snapshot.BlockRCode, snapshot.Rules, snapshot.SubscriptionSets}
 	data, _ := json.Marshal(canonical)
-	sum := sha256.Sum256(data)
-	snap.Checksum = "sha256:" + hex.EncodeToString(sum[:])
-	return snap
+	return data
 }
 func snapshotRuleCount(snapshot mosdnsclient.Snapshot) int {
 	count := len(snapshot.Rules)
@@ -555,15 +620,19 @@ func nullableVersion(v uint64) any {
 	}
 	return v
 }
-func routeFingerprint(rs []Rule) string {
-	var out []string
-	for _, r := range rs {
-		if r.Category == "route" {
-			out = append(out, fmt.Sprintf("%d:%s:%s:%s:%d:%t", r.ID, r.Action, r.MatchType, r.Pattern, r.Priority, r.Enabled))
-		}
+func nullableAdminID(id int64) any {
+	if id == 0 {
+		return nil
 	}
-	sort.Strings(out)
-	return strings.Join(out, "|")
+	return id
+}
+func subscriptionSetsEqual(a, b []mosdnsclient.SubscriptionSet) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	aJSON, _ := json.Marshal(a)
+	bJSON, _ := json.Marshal(b)
+	return string(aJSON) == string(bJSON)
 }
 func isSubscriptionRule(r Rule) bool { return strings.HasPrefix(r.Source, "subscription:") }
 func validateRules(rules []Rule) error {

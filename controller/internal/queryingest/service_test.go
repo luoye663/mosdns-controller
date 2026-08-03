@@ -63,6 +63,24 @@ func TestForwardRouteIsAcceptedAndQueryable(t *testing.T) {
 	}
 }
 
+func TestSubscriptionBindingIDIsPersistedAndReturned(t *testing.T) {
+	s := testService(t)
+	event := validEvent("subscription-binding")
+	event.Route = "forward"
+	event.RouteSource = "subscription"
+	event.UpstreamGroup = "office_dns"
+	event.UpstreamTag = "office-primary"
+	event.SubscriptionSourceID = 17
+	event.SubscriptionBindingID = 23
+	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Queries(context.Background(), Query{})
+	if err != nil || len(page.Items) != 1 || page.Items[0].SubscriptionBindingID != 23 || page.Items[0].RouteSource != "subscription" || page.Items[0].UpstreamGroup != "office_dns" || page.Items[0].UpstreamTag != "office-primary" {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+}
+
 func TestRetentionDeletesExpiredRawAndAggregates(t *testing.T) {
 	s := testService(t)
 	old := time.Now().AddDate(-2, 0, 0).UnixMilli()

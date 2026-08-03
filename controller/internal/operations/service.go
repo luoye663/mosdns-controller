@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/managed-dns/controller/internal/coordination"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
 	"github.com/managed-dns/controller/internal/queryingest"
 )
@@ -102,14 +104,19 @@ type VersionPrecondition struct {
 	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
 }
 type Service struct {
-	db     *sql.DB
-	dbPath string
-	mosdns mosdnsclient.Client
-	ingest *queryingest.Service
+	db       *sql.DB
+	dbPath   string
+	mosdns   mosdnsclient.Client
+	ingest   *queryingest.Service
+	bindings *coordination.UpstreamBindings
 }
 
-func New(db *sql.DB, dbPath string, mosdns mosdnsclient.Client, ingest *queryingest.Service) *Service {
-	return &Service{db: db, dbPath: dbPath, mosdns: mosdns, ingest: ingest}
+func New(db *sql.DB, dbPath string, mosdns mosdnsclient.Client, ingest *queryingest.Service, locks ...*coordination.UpstreamBindings) *Service {
+	bindings := &coordination.UpstreamBindings{}
+	if len(locks) > 0 && locks[0] != nil {
+		bindings = locks[0]
+	}
+	return &Service{db: db, dbPath: dbPath, mosdns: mosdns, ingest: ingest, bindings: bindings}
 }
 
 func (s *Service) Devices(ctx context.Context) ([]Device, error) {
@@ -712,6 +719,8 @@ func (s *Service) CreateUpstreamGroup(ctx context.Context, input UpstreamGroupWr
 }
 
 func (s *Service) UpdateUpstreamGroup(ctx context.Context, id string, input UpstreamGroupWrite, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	group := input.Group
 	if group.ID != id {
 		return mosdnsclient.RegistrySnapshot{}, fmt.Errorf("%w: upstream group id cannot be modified", ErrValidation)
@@ -734,11 +743,22 @@ func (s *Service) UpdateUpstreamGroup(ctx context.Context, id string, input Upst
 	if id == current.DefaultGroupID && !group.Enabled {
 		return mosdnsclient.RegistrySnapshot{}, ErrProtectedGroup
 	}
+	if desired.Groups[index].Enabled && !group.Enabled {
+		referenced, err := s.upstreamGroupReferencedBySubscriptions(ctx, id)
+		if err != nil {
+			return mosdnsclient.RegistrySnapshot{}, err
+		}
+		if referenced {
+			return mosdnsclient.RegistrySnapshot{}, ErrGroupReferenced
+		}
+	}
 	desired.Groups[index] = group
 	return s.applyGroupChange(ctx, current, desired, "update", id, adminID, requestID, clientIP)
 }
 
 func (s *Service) DeleteUpstreamGroup(ctx context.Context, id string, expectedCurrentVersion uint64, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	current, err := s.mosdns.RegistryStatus(ctx)
 	if err != nil {
 		return mosdnsclient.RegistrySnapshot{}, err
@@ -765,10 +785,37 @@ func (s *Service) DeleteUpstreamGroup(ctx context.Context, id string, expectedCu
 	return s.applyGroupChange(ctx, current, desired, "delete", id, adminID, requestID, clientIP)
 }
 
-// Subscription bindings are introduced in the next schema phase. Keeping the
-// check behind this method makes deletion fail closed once those rows exist.
-func (s *Service) upstreamGroupReferencedBySubscriptions(context.Context, string) (bool, error) {
-	return false, nil
+func (s *Service) upstreamGroupReferencedBySubscriptions(ctx context.Context, id string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM subscription_bindings WHERE upstream_group_id=?`, id).Scan(&count)
+	if err != nil || count > 0 {
+		return count > 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE status IN ('active','pending','unknown')`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var snapshot mosdnsclient.Snapshot
+		if err := json.Unmarshal(raw, &snapshot); err != nil {
+			return false, err
+		}
+		for _, set := range snapshot.SubscriptionSets {
+			groupID := set.UpstreamGroupID
+			if groupID == "" && set.Category == "route" {
+				groupID = map[string]string{"local": "local_dns", "remote": "remote_dns"}[set.Action]
+			}
+			if groupID == id {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *Service) FlushUpstreamGroup(ctx context.Context, id string, expectedCurrentVersion uint64, adminID int64, requestID, clientIP string) error {

@@ -2,6 +2,7 @@ package operations
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"testing"
@@ -163,6 +164,51 @@ func testService(t *testing.T, fake *fakeMosdns) *Service {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return New(store.DB(), ":memory:", fake, nil)
+}
+
+func TestDeleteOrDisableUpstreamGroupRejectsDisabledSubscriptionReference(t *testing.T) {
+	fake := &fakeMosdns{}
+	s := testService(t, fake)
+	registry, err := s.CreateUpstreamGroup(context.Background(), UpstreamGroupWrite{ExpectedCurrentVersion: 1, Group: mosdnsclient.UpstreamGroup{ID: "office_dns", Name: "Office", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "office", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, 1, "create", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.db.Exec(`INSERT INTO rule_subscriptions(category,action,kind,name,refresh_interval_seconds,enabled,created_at_ms,updated_at_ms,domains_json) VALUES('route','local','upload','disabled',86400,0,1,1,'["example.com"]')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscriptionID, _ := result.LastInsertId()
+	if _, err := s.db.Exec(`INSERT INTO subscription_bindings(subscription_id,upstream_group_id,priority,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?)`, subscriptionID, "office_dns", 100, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteUpstreamGroup(context.Background(), "office_dns", registry.Version, 1, "delete", ""); !errors.Is(err, ErrGroupReferenced) {
+		t.Fatalf("delete err=%v, want ErrGroupReferenced", err)
+	}
+	group, ok := registryGroup(registry, "office_dns")
+	if !ok {
+		t.Fatal("office_dns missing")
+	}
+	group.Enabled = false
+	if _, err := s.UpdateUpstreamGroup(context.Background(), group.ID, UpstreamGroupWrite{ExpectedCurrentVersion: registry.Version, Group: group}, 1, "disable", ""); !errors.Is(err, ErrGroupReferenced) {
+		t.Fatalf("disable err=%v, want ErrGroupReferenced", err)
+	}
+}
+
+func TestDeleteUpstreamGroupRejectsReferenceRetainedByActiveSnapshot(t *testing.T) {
+	fake := &fakeMosdns{}
+	s := testService(t, fake)
+	registry, err := s.CreateUpstreamGroup(context.Background(), UpstreamGroupWrite{ExpectedCurrentVersion: 1, Group: mosdnsclient.UpstreamGroup{ID: "office_dns", Name: "Office", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "office", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, 1, "create", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := mosdnsclient.Snapshot{SchemaVersion: 3, Version: 1, SubscriptionSets: []mosdnsclient.SubscriptionSet{{SourceID: 1, SourceName: "route", Category: "route", Action: "upstream", BindingID: 1, UpstreamGroupID: "office_dns", Priority: 100, Domains: []string{"example.com"}}}}
+	raw, _ := json.Marshal(snapshot)
+	if _, err := s.db.Exec(`INSERT INTO rule_versions(version,schema_version,checksum,status,rule_count,regexp_rule_count,snapshot_json,created_at_ms) VALUES(1,3,'snapshot','active',1,0,?,1)`, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteUpstreamGroup(context.Background(), "office_dns", registry.Version, 1, "delete", ""); !errors.Is(err, ErrGroupReferenced) {
+		t.Fatalf("delete err=%v, want ErrGroupReferenced", err)
+	}
 }
 
 func TestDevicesUpdateAndAudit(t *testing.T) {

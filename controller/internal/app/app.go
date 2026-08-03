@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
+	"github.com/managed-dns/controller/internal/coordination"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
 	"github.com/managed-dns/controller/internal/operations"
 	"github.com/managed-dns/controller/internal/queryingest"
@@ -48,7 +49,8 @@ func New(logger *slog.Logger, cfg config.Config, store *storage.Store, client mo
 	service := auth.New(store, cfg.Web.SessionTTL)
 	limiter := auth.NewLoginLimiter()
 	ingest := queryingest.New(store.DB(), ingestToken, cfg.Storage.Path)
-	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client), ingest: ingest, ops: operations.New(store.DB(), cfg.Storage.Path, client, ingest)}
+	bindings := &coordination.UpstreamBindings{}
+	return &App{logger: logger, config: cfg, store: store, auth: service, limiter: limiter, rules: rules.New(store, client, bindings), ingest: ingest, ops: operations.New(store.DB(), cfg.Storage.Path, client, ingest, bindings)}
 }
 
 func (a *App) PublicHandler() http.Handler {
@@ -81,6 +83,7 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Post("/rule-subscriptions", a.requireCSRF(a.createSubscription))
 			protected.Post("/rule-subscriptions/upload", a.requireCSRF(a.uploadSubscription))
 			protected.Patch("/rule-subscriptions/{id}", a.requireCSRF(a.updateSubscription))
+			protected.Put("/rule-subscriptions/{id}/binding", a.requireCSRF(a.updateSubscriptionBinding))
 			protected.Post("/rule-subscriptions/{id}/refresh", a.requireCSRF(a.refreshSubscription))
 			protected.Delete("/rule-subscriptions/{id}", a.requireCSRF(a.deleteSubscription))
 			protected.Get("/rule-versions", a.listVersions)
@@ -793,6 +796,14 @@ func (a *App) createSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
 	item, published, err := a.rules.CreateURLSubscription(r.Context(), input, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, map[string]any{"subscription": item, "version": published})
+		return
+	}
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream registry changed; refresh and retry")
+		return
+	}
 	if err != nil {
 		writeError(w, r, 400, "SUBSCRIPTION_CREATE_FAILED", err.Error())
 		return
@@ -821,8 +832,32 @@ func (a *App) uploadSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
-	input := rules.SubscriptionInput{Category: r.FormValue("category"), Action: r.FormValue("action"), Name: r.FormValue("name"), RefreshIntervalSeconds: interval, Enabled: r.FormValue("enabled") != "false"}
+	input := rules.SubscriptionInput{Category: r.FormValue("category"), Action: r.FormValue("action"), Name: r.FormValue("name"), RefreshIntervalSeconds: interval, Enabled: r.FormValue("enabled") != "false", UpstreamGroupID: r.FormValue("upstream_group_id")}
+	if value := r.FormValue("priority"); value != "" {
+		priority, parseErr := strconv.Atoi(value)
+		if parseErr != nil {
+			writeError(w, r, 400, "VALIDATION_ERROR", "invalid priority")
+			return
+		}
+		input.Priority = &priority
+	}
+	if value := r.FormValue("expected_upstream_registry_version"); value != "" {
+		registryVersion, parseErr := strconv.ParseUint(value, 10, 64)
+		if parseErr != nil {
+			writeError(w, r, 400, "VALIDATION_ERROR", "invalid upstream registry version")
+			return
+		}
+		input.ExpectedUpstreamRegistryVersion = &registryVersion
+	}
 	item, published, err := a.rules.CreateUploadSubscription(r.Context(), input, header.Filename, content, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, map[string]any{"subscription": item, "version": published})
+		return
+	}
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream registry changed; refresh and retry")
+		return
+	}
 	if err != nil {
 		writeError(w, r, 400, "SUBSCRIPTION_UPLOAD_FAILED", err.Error())
 		return
@@ -842,6 +877,10 @@ func (a *App) updateSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
 	item, published, err := a.rules.SetSubscriptionEnabled(r.Context(), id, input.Enabled, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, map[string]any{"subscription": item, "version": published})
+		return
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
 		return
@@ -859,6 +898,10 @@ func (a *App) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
 	item, published, err := a.rules.RefreshSubscription(r.Context(), id, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, map[string]any{"subscription": item, "version": published})
+		return
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
 		return
@@ -869,6 +912,35 @@ func (a *App) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	writeData(w, r, 200, map[string]any{"subscription": item, "version": published})
 }
+func (a *App) updateSubscriptionBinding(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var input rules.BindingInput
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	item, published, err := a.rules.UpdateSubscriptionBinding(r.Context(), id, input, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, map[string]any{"subscription": item, "version": published})
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "subscription not found")
+		return
+	}
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream registry changed; refresh and retry")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "SUBSCRIPTION_UPDATE_FAILED", err.Error())
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string]any{"subscription": item, "version": published})
+}
 func (a *App) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
 	if !ok {
@@ -876,6 +948,10 @@ func (a *App) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
 	published, err := a.rules.DeleteSubscription(r.Context(), id, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeData(w, r, http.StatusAccepted, published)
+		return
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, r, 404, "NOT_FOUND", "subscription not found")
 		return

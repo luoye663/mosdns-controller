@@ -32,7 +32,7 @@ func TestMosdnsProfilesRenderDynamicUpstreamRegistry(t *testing.T) {
 					t.Fatalf("rendered config does not contain %q", required)
 				}
 			}
-			for _, forbidden := range []string{"tag: cache_local", "tag: cache_remote", "tag: ecs_local", "tag: ecs_remote", "type: dynamic_forward", "tag: route_local", "tag: route_remote"} {
+			for _, forbidden := range []string{"tag: cache_local", "tag: cache_remote", "tag: ecs_local", "tag: ecs_remote", "type: dynamic_forward", "tag: route_local", "tag: route_remote", "type: dynamic_domain_set", "tag: subscription_allow", "tag: subscription_block", "tag: subscription_local", "tag: subscription_remote", "qname $subscription_"} {
 				if strings.Contains(value, forbidden) {
 					t.Fatalf("rendered config still contains %q", forbidden)
 				}

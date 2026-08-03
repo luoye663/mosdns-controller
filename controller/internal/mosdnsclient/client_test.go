@@ -113,6 +113,41 @@ func TestExplicitWrite4xxIsRejectedNotUnknown(t *testing.T) {
 	}
 }
 
+func TestStatusAcceptsCompleteRuleEngineResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema_version":3,"plugin_version":"dev","mosdns_base":"v5.3.4","state":"ready","snapshot_version":22,"checksum":"sha256:test","rule_count":12,"regexp_rule_count":2,"loaded_at":"2026-08-03T19:33:36Z","last_compile_duration_ms":7,"snapshot_file_ok":true,"memory_rss_bytes":20447232}`))
+	}))
+	defer server.Close()
+
+	status, err := New(server.URL, "test", time.Second).Status(context.Background())
+	if err != nil || status.SchemaVersion != 3 || status.SnapshotVersion != 22 || status.RuleCount != 12 || !status.SnapshotFileOK {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestValidateAndApplyAcceptCompleteRuleEngineResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/plugins/dynamic_rules/validate":
+			_, _ = w.Write([]byte(`{"valid":true,"checksum":"sha256:test","rule_count":12,"regexp_rule_count":2,"compile_duration_ms":7,"warnings":[]}`))
+		case "/plugins/dynamic_rules/snapshot":
+			_, _ = w.Write([]byte(`{"applied":true,"previous_version":21,"version":22,"checksum":"sha256:test","compile_duration_ms":7,"persist_duration_ms":3,"applied_at":"2026-08-03T19:33:36Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, "test", time.Second)
+	validated, err := client.Validate(context.Background(), Snapshot{})
+	if err != nil || !validated.Valid || validated.CompileDurationMS != 7 {
+		t.Fatalf("validated=%+v err=%v", validated, err)
+	}
+	applied, err := client.Apply(context.Background(), Snapshot{})
+	if err != nil || !applied.Applied || applied.PersistDurationMS != 3 || applied.AppliedAt.IsZero() {
+		t.Fatalf("applied=%+v err=%v", applied, err)
+	}
+}
+
 func TestNegativeCacheGetAndPut(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

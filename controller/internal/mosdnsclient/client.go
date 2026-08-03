@@ -113,10 +113,18 @@ type NegativeCacheSettings struct {
 	TTLSeconds uint32 `json:"ttl_seconds"`
 }
 type Status struct {
-	State           string `json:"state"`
-	SnapshotVersion uint64 `json:"snapshot_version"`
-	Checksum        string `json:"checksum"`
-	MemoryRSSBytes  int64  `json:"memory_rss_bytes"`
+	SchemaVersion         uint32    `json:"schema_version"`
+	PluginVersion         string    `json:"plugin_version"`
+	MosdnsBase            string    `json:"mosdns_base"`
+	State                 string    `json:"state"`
+	SnapshotVersion       uint64    `json:"snapshot_version"`
+	Checksum              string    `json:"checksum"`
+	RuleCount             int       `json:"rule_count"`
+	RegexpRuleCount       int       `json:"regexp_rule_count"`
+	LoadedAt              time.Time `json:"loaded_at"`
+	LastCompileDurationMS int64     `json:"last_compile_duration_ms"`
+	SnapshotFileOK        bool      `json:"snapshot_file_ok"`
+	MemoryRSSBytes        int64     `json:"memory_rss_bytes"`
 }
 type AuditStatus struct {
 	QueueDepth    int   `json:"queue_depth"`
@@ -135,16 +143,21 @@ type DomainSetSnapshot struct {
 	Rules                  string `json:"rules"`
 }
 type ValidateResult struct {
-	Valid           bool   `json:"valid"`
-	Checksum        string `json:"checksum"`
-	RuleCount       int    `json:"rule_count"`
-	RegexpRuleCount int    `json:"regexp_rule_count"`
+	Valid             bool     `json:"valid"`
+	Checksum          string   `json:"checksum"`
+	RuleCount         int      `json:"rule_count"`
+	RegexpRuleCount   int      `json:"regexp_rule_count"`
+	CompileDurationMS int64    `json:"compile_duration_ms"`
+	Warnings          []string `json:"warnings"`
 }
 type ApplyResult struct {
-	Applied         bool   `json:"applied"`
-	PreviousVersion uint64 `json:"previous_version"`
-	Version         uint64 `json:"version"`
-	Checksum        string `json:"checksum"`
+	Applied           bool      `json:"applied"`
+	PreviousVersion   uint64    `json:"previous_version"`
+	Version           uint64    `json:"version"`
+	Checksum          string    `json:"checksum"`
+	CompileDurationMS int64     `json:"compile_duration_ms"`
+	PersistDurationMS int64     `json:"persist_duration_ms"`
+	AppliedAt         time.Time `json:"applied_at"`
 }
 type Snapshot struct {
 	SchemaVersion          uint32            `json:"schema_version"`
@@ -154,15 +167,17 @@ type Snapshot struct {
 	Checksum               string            `json:"checksum"`
 	BlockRCode             int               `json:"block_rcode"`
 	Rules                  []Rule            `json:"rules"`
-	SubscriptionSets       []SubscriptionSet `json:"subscription_sets,omitempty"`
+	SubscriptionSets       []SubscriptionSet `json:"subscription_sets"`
 }
 type SubscriptionSet struct {
-	SourceID   int64    `json:"source_id"`
-	SourceName string   `json:"source_name"`
-	Category   string   `json:"category"`
-	Action     string   `json:"action"`
-	Priority   int      `json:"priority"`
-	Domains    []string `json:"domains"`
+	SourceID        int64    `json:"source_id"`
+	SourceName      string   `json:"source_name"`
+	Category        string   `json:"category"`
+	Action          string   `json:"action"`
+	BindingID       int64    `json:"binding_id,omitempty"`
+	UpstreamGroupID string   `json:"upstream_group_id,omitempty"`
+	Priority        int      `json:"priority"`
+	Domains         []string `json:"domains"`
 }
 type Rule struct {
 	ID        int64  `json:"id"`

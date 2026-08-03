@@ -9,21 +9,7 @@ api:
   http: "${MOSDNS_API_LISTEN}"
 
 plugins:
-  # Four source-merged subscription sets use the compact domain_set matcher.
-  - tag: subscription_allow
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-allow.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-allow.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-  - tag: subscription_block
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-block.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-block.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-  - tag: subscription_local
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-local.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-local.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-  - tag: subscription_remote
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-remote.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-remote.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-
-  # 管理页面发布的 allow/block/local/remote/no_log 动态规则。
+  # 管理页面发布的手工规则和整源订阅规则。
   - tag: dynamic_rules
     type: dynamic_rule_engine
     args:
@@ -72,10 +58,6 @@ plugins:
         route_local: 1101
         route_remote: 1102
         no_log: 1201
-        subscription_local: 1301
-        subscription_remote: 1302
-        subscription_block: 1303
-        subscription_allow: 1304
         cache_hit: 2101
 
   # Registry 原子管理任意上游组及其 ECS、缓存和调度运行时。
@@ -129,18 +111,6 @@ plugins:
   - tag: forward_routes
     type: sequence
     args:
-      - matches:
-          - qname $subscription_local
-        exec: mark 1301
-      - matches:
-          - mark 1301
-        exec: mark 1101
-      - matches:
-          - qname $subscription_remote
-        exec: mark 1302
-      - matches:
-          - mark 1302
-        exec: mark 1102
       - exec: $dynamic_upstreams
       - exec: accept
 
@@ -166,18 +136,6 @@ plugins:
       - matches:
           - mark 1002
         exec: goto forward_routes
-      - matches:
-          - qname $subscription_allow
-        exec: mark 1304
-      - matches:
-          - mark 1304
-        exec: goto forward_routes
-      - matches:
-          - qname $subscription_block
-        exec: mark 1303
-      - matches:
-          - mark 1303
-        exec: reject 3
       - exec: goto forward_routes
 
   # DNS UDP/TCP 监听地址；生产通常为 :53，集成测试使用 :5353。

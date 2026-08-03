@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}, {9, migrationV9}, {10, migrationV10}, {11, migrationV11}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}, {9, migrationV9}, {10, migrationV10}, {11, migrationV11}, {12, migrationV12}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -120,4 +120,13 @@ var migrationV11 = []string{
 	`INSERT INTO migration_v11_result_counts SELECT timestamp_unix_ms/3600000*3600000,route,qtype,COALESCE(rcode,0),COUNT(*),SUM(result_class='success'),SUM(result_class='negative_answer'),SUM(result_class='policy_block'),SUM(result_class='processing_error') FROM dns_queries GROUP BY 1,2,3,4`,
 	`UPDATE dns_stats_hourly_global AS g SET success_count=(SELECT success_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),negative_answer_count=(SELECT negative_answer_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),policy_block_count=(SELECT policy_block_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),processing_error_count=(SELECT processing_error_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),error_count=(SELECT processing_error_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode) WHERE query_count=(SELECT query_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode)`,
 	`DROP TABLE migration_v11_result_counts`,
+}
+
+// migrationV12 binds an entire route subscription to one registry-owned
+// upstream group. Explicit IDs keep migrated bindings stable across databases.
+var migrationV12 = []string{
+	`CREATE TABLE subscription_bindings (id INTEGER PRIMARY KEY AUTOINCREMENT, subscription_id INTEGER NOT NULL UNIQUE REFERENCES rule_subscriptions(id) ON DELETE CASCADE, upstream_group_id TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 100 CHECK(priority BETWEEN 0 AND 1000), created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
+	`CREATE INDEX idx_subscription_bindings_group ON subscription_bindings(upstream_group_id)`,
+	`INSERT INTO subscription_bindings(id,subscription_id,upstream_group_id,priority,created_at_ms,updated_at_ms) SELECT id,id,CASE action WHEN 'local' THEN 'local_dns' ELSE 'remote_dns' END,100,created_at_ms,updated_at_ms FROM rule_subscriptions WHERE category='route' AND action IN ('local','remote') ORDER BY id`,
+	`ALTER TABLE dns_queries ADD COLUMN subscription_binding_id INTEGER NOT NULL DEFAULT 0`,
 }

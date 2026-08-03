@@ -142,6 +142,73 @@ func TestMigrateV11BackfillsResultClassesAndErrorCounts(t *testing.T) {
 	}
 }
 
+func TestMigrateV11ToV12CreatesStableSubscriptionBindings(t *testing.T) {
+	store, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB().Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	previous := [][]string{migrationV1, migrationV2, migrationV3, migrationV4, migrationV5, migrationV6, migrationV7, migrationV8, migrationV9, migrationV10, migrationV11}
+	for index, statements := range previous {
+		for _, statement := range statements {
+			if _, err := store.DB().Exec(statement); err != nil {
+				t.Fatalf("migration %d setup: %v", index+1, err)
+			}
+		}
+		if _, err := store.DB().Exec(`INSERT INTO schema_migrations(version) VALUES (?)`, index+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert := `INSERT INTO rule_subscriptions(id,category,action,kind,name,source_url,refresh_interval_seconds,enabled,content_checksum,rule_count,last_checked_at_ms,last_success_at_ms,last_error,created_at_ms,updated_at_ms,domains_json) VALUES(?,?,?,?,?,'',86400,1,'',1,0,0,'',?,?,?)`
+	for _, item := range []struct {
+		id       int
+		category string
+		action   string
+		name     string
+	}{{7, "route", "local", "local"}, {9, "route", "remote", "remote"}, {11, "access", "block", "block"}} {
+		if _, err := store.DB().Exec(insert, item.id, item.category, item.action, "upload", item.name, item.id*100, item.id*100, `["example.com"]`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,created_at_ms) VALUES('old',1,'192.0.2.1','example.com',1,1,'remote','default',0,1,0,1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.DB().Query(`SELECT id,subscription_id,upstream_group_id,priority FROM subscription_bindings ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	want := []struct {
+		id, subscriptionID, priority int
+		group                        string
+	}{{7, 7, 100, "local_dns"}, {9, 9, 100, "remote_dns"}}
+	for index := 0; rows.Next(); index++ {
+		if index >= len(want) {
+			t.Fatal("unexpected migrated binding")
+		}
+		var got struct {
+			id, subscriptionID, priority int
+			group                        string
+		}
+		if err := rows.Scan(&got.id, &got.subscriptionID, &got.group, &got.priority); err != nil || got != want[index] {
+			t.Fatalf("binding=%+v err=%v want=%+v", got, err, want[index])
+		}
+	}
+	var bindingCount, historicalBindingID int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM subscription_bindings`).Scan(&bindingCount); err != nil || bindingCount != 2 {
+		t.Fatalf("binding count=%d err=%v", bindingCount, err)
+	}
+	if err := store.DB().QueryRow(`SELECT subscription_binding_id FROM dns_queries WHERE event_id='old'`).Scan(&historicalBindingID); err != nil || historicalBindingID != 0 {
+		t.Fatalf("historical binding=%d err=%v", historicalBindingID, err)
+	}
+}
+
 func TestBackupCreatesConsistentSQLiteFile(t *testing.T) {
 	store, err := Open(context.Background(), ":memory:")
 	if err != nil {
