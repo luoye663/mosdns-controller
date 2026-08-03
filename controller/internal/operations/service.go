@@ -76,11 +76,13 @@ type Upstreams struct {
 	RemoteECS mosdnsclient.ECSSnapshot      `json:"remote_ecs"`
 }
 type Settings struct {
-	CacheEnabled       bool   `json:"cache_enabled"`
-	CacheTTL           int    `json:"cache_ttl"`
-	QueryRetentionDays int    `json:"query_retention_days"`
-	DatabaseMaxSizeGiB int    `json:"database_max_size_gib"`
-	AddressFamilyMode  string `json:"address_family_mode"`
+	CacheEnabled         bool   `json:"cache_enabled"`
+	CacheTTL             int    `json:"cache_ttl"`
+	NegativeCacheEnabled bool   `json:"negative_cache_enabled"`
+	NegativeCacheTTL     int    `json:"negative_cache_ttl"`
+	QueryRetentionDays   int    `json:"query_retention_days"`
+	DatabaseMaxSizeGiB   int    `json:"database_max_size_gib"`
+	AddressFamilyMode    string `json:"address_family_mode"`
 }
 type Service struct {
 	db     *sql.DB
@@ -233,8 +235,8 @@ func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, cli
 	return errors.Join(localErr, remoteErr)
 }
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
-	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "dual_stack"}
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days','database_max_size_gib','address_family_mode')`)
+	settings := Settings{CacheEnabled: true, NegativeCacheEnabled: true, NegativeCacheTTL: 30, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "dual_stack"}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','negative_cache_enabled','negative_cache_ttl','query_retention_days','database_max_size_gib','address_family_mode')`)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -263,6 +265,18 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 				return Settings{}, err
 			}
 			settings.CacheTTL = parsed
+		case "negative_cache_enabled":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return Settings{}, err
+			}
+			settings.NegativeCacheEnabled = parsed
+		case "negative_cache_ttl":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Settings{}, err
+			}
+			settings.NegativeCacheTTL = parsed
 		case "database_max_size_gib":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
@@ -281,6 +295,9 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	}
 	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
 		return Settings{}, errors.New("cache TTL must be within 0..604800")
+	}
+	if settings.NegativeCacheTTL < 1 || settings.NegativeCacheTTL > 86400 {
+		return Settings{}, errors.New("negative cache TTL must be within 1..86400")
 	}
 	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
 		return Settings{}, errors.New("database max size must be within 1..128 GiB")
@@ -309,6 +326,9 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 	if err := s.mosdns.SetCacheTTL(ctx, settings.CacheTTL); err != nil {
 		return err
 	}
+	if err := s.syncNegativeCache(ctx, settings); err != nil {
+		return err
+	}
 	changed, err := s.applyAddressFamilyMode(ctx, settings.AddressFamilyMode)
 	if err != nil {
 		return err
@@ -327,6 +347,9 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
 		return errors.New("cache TTL must be within 0..604800")
+	}
+	if settings.NegativeCacheTTL < 1 || settings.NegativeCacheTTL > 86400 {
+		return errors.New("negative cache TTL must be within 1..86400")
 	}
 	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
 		return errors.New("database max size must be within 1..128 GiB")
@@ -347,6 +370,10 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 		if err := s.mosdns.SetCacheTTL(ctx, settings.CacheTTL); err != nil {
 			return err
 		}
+	}
+	var negativeCacheErr error
+	if current.NegativeCacheEnabled != settings.NegativeCacheEnabled || current.NegativeCacheTTL != settings.NegativeCacheTTL {
+		negativeCacheErr = s.syncNegativeCache(ctx, settings)
 	}
 	if s.ingest != nil {
 		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
@@ -381,22 +408,35 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}, {"address_family_mode", settings.AddressFamilyMode}} {
+	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"negative_cache_enabled", strconv.FormatBool(settings.NegativeCacheEnabled)}, {"negative_cache_ttl", strconv.Itoa(settings.NegativeCacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}, {"address_family_mode", settings.AddressFamilyMode}} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, item.key, item.value, now); err != nil {
 			return err
 		}
 	}
 	result, code := "success", ""
-	if addressFamilyErr != nil {
+	if negativeCacheErr != nil {
+		result, code = "failed", "NEGATIVE_CACHE_APPLY_FAILED"
+	} else if addressFamilyErr != nil {
 		result, code = "failed", "CACHE_FLUSH_FAILED"
 	}
-	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention,database_max_size,address_family", requestID, clientIP, result, code); err != nil {
+	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,negative_cache,query_retention,database_max_size,address_family", requestID, clientIP, result, code); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return addressFamilyErr
+	return errors.Join(negativeCacheErr, addressFamilyErr)
+}
+
+func (s *Service) syncNegativeCache(ctx context.Context, settings Settings) error {
+	requested := mosdnsclient.NegativeCacheSettings{Enabled: settings.NegativeCacheEnabled, TTLSeconds: uint32(settings.NegativeCacheTTL)}
+	var errs []error
+	for _, tag := range []string{"cache_local", "cache_remote"} {
+		if _, err := s.mosdns.SetNegativeCache(ctx, tag, requested); err != nil {
+			errs = append(errs, fmt.Errorf("sync %s negative cache: %w", tag, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func validAddressFamilyMode(mode string) bool {

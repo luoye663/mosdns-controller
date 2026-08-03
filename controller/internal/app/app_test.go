@@ -18,6 +18,10 @@ import (
 )
 
 func testApp(t *testing.T) *App {
+	return testAppWithClient(t, mosdnsclient.New("http://127.0.0.1", "test", time.Second))
+}
+
+func testAppWithClient(t *testing.T, client mosdnsclient.Client) *App {
 	t.Helper()
 	cfg := config.Default()
 	if err := cfg.Validate(); err != nil {
@@ -31,9 +35,45 @@ func testApp(t *testing.T) *App {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	application := New(slog.Default(), cfg, store, mosdnsclient.New("http://127.0.0.1", "test", time.Second), "test")
+	application := New(slog.Default(), cfg, store, client, "test")
 	t.Cleanup(application.Close)
 	return application
+}
+
+func TestSettingsAPIIncludesAndUpdatesNegativeCache(t *testing.T) {
+	var tags []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tags = append(tags, r.URL.Path)
+		var settings mosdnsclient.NegativeCacheSettings
+		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+			t.Errorf("decode negative cache request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(settings)
+	}))
+	defer server.Close()
+	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
+	if _, err := application.store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'admin','x',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	getRec := httptest.NewRecorder()
+	application.settings(getRec, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil))
+	if getRec.Code != http.StatusOK || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_enabled":true`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_ttl":30`)) {
+		t.Fatalf("get settings=%d: %s", getRec.Code, getRec.Body.String())
+	}
+
+	body := `{"cache_enabled":true,"cache_ttl":0,"negative_cache_enabled":false,"negative_cache_ttl":60,"query_retention_days":7,"database_max_size_gib":2,"address_family_mode":"dual_stack"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewBufferString(body))
+	req = req.WithContext(context.WithValue(req.Context(), adminKey, auth.Admin{ID: 1, Username: "admin"}))
+	rec := httptest.NewRecorder()
+	application.updateSettings(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_enabled":false`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_ttl":60`)) {
+		t.Fatalf("update settings=%d: %s", rec.Code, rec.Body.String())
+	}
+	want := []string{"/plugins/cache_local/negative-cache", "/plugins/cache_remote/negative-cache"}
+	if len(tags) != len(want) || tags[0] != want[0] || tags[1] != want[1] {
+		t.Fatalf("negative cache paths=%v", tags)
+	}
 }
 func TestHealthEndpoints(t *testing.T) {
 	application := testApp(t)

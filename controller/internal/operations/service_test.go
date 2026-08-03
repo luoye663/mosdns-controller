@@ -18,6 +18,9 @@ type fakeMosdns struct {
 	upstreams     map[string]mosdnsclient.UpstreamSnapshot
 	cacheEnabled  bool
 	cacheTTL      int
+	negativeCache map[string]mosdnsclient.NegativeCacheSettings
+	negativeCalls []string
+	negativeErr   map[string]error
 	ecs           map[string]mosdnsclient.ECSSnapshot
 	addressFamily mosdnsclient.AddressFamilySnapshot
 }
@@ -44,6 +47,20 @@ func (f *fakeMosdns) SetCacheEnabled(_ context.Context, enabled bool) error {
 	return nil
 }
 func (f *fakeMosdns) SetCacheTTL(_ context.Context, ttl int) error { f.cacheTTL = ttl; return nil }
+func (f *fakeMosdns) NegativeCache(_ context.Context, tag string) (mosdnsclient.NegativeCacheSettings, error) {
+	return f.negativeCache[tag], nil
+}
+func (f *fakeMosdns) SetNegativeCache(_ context.Context, tag string, settings mosdnsclient.NegativeCacheSettings) (mosdnsclient.NegativeCacheSettings, error) {
+	if f.negativeCache == nil {
+		f.negativeCache = map[string]mosdnsclient.NegativeCacheSettings{}
+	}
+	f.negativeCalls = append(f.negativeCalls, tag)
+	if err := f.negativeErr[tag]; err != nil {
+		return mosdnsclient.NegativeCacheSettings{}, err
+	}
+	f.negativeCache[tag] = settings
+	return settings, nil
+}
 func (f *fakeMosdns) UpstreamStatus(_ context.Context, group string) (mosdnsclient.UpstreamSnapshot, error) {
 	if f.upstreams == nil {
 		f.upstreams = map[string]mosdnsclient.UpstreamSnapshot{}
@@ -204,17 +221,22 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err != nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheEnabled: false, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := s.Settings(context.Background())
-	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || fake.cacheEnabled || fake.cacheTTL != 60 || fake.addressFamily.Mode != "ipv4_only" {
+	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.NegativeCacheEnabled || settings.NegativeCacheTTL != 45 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || fake.cacheEnabled || fake.cacheTTL != 60 || fake.addressFamily.Mode != "ipv4_only" {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
+	}
+	for _, tag := range []string{"cache_local", "cache_remote"} {
+		if got := fake.negativeCache[tag]; got.Enabled || got.TTLSeconds != 45 {
+			t.Fatalf("negative cache %s=%+v", tag, got)
+		}
 	}
 	if len(fake.flushes) != 2 || fake.flushes[0] != "cache_local" || fake.flushes[1] != "cache_remote" {
 		t.Fatalf("flushes=%v", fake.flushes)
 	}
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err == nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err == nil {
 		t.Fatal("invalid database size accepted")
 	}
 }
@@ -222,7 +244,7 @@ func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 func TestUpdateSettingsPersistsAddressFamilyWhenCacheFlushFails(t *testing.T) {
 	fake := &fakeMosdns{flushErr: map[string]error{"cache_local": errors.New("cache unavailable")}}
 	s := testService(t, fake)
-	settings := Settings{CacheEnabled: true, CacheTTL: 0, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "ipv6_only"}
+	settings := Settings{CacheEnabled: true, CacheTTL: 0, NegativeCacheEnabled: true, NegativeCacheTTL: 30, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "ipv6_only"}
 	if err := s.UpdateSettings(context.Background(), settings, 1, "req-settings", "192.0.2.10"); err == nil {
 		t.Fatal("expected cache flush error")
 	}
@@ -233,6 +255,62 @@ func TestUpdateSettingsPersistsAddressFamilyWhenCacheFlushFails(t *testing.T) {
 	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
 	if err != nil || len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "CACHE_FLUSH_FAILED" {
 		t.Fatalf("audit=%+v err=%v", page.Items, err)
+	}
+}
+
+func TestSettingsNegativeCacheDefaultsAndValidation(t *testing.T) {
+	s := testService(t, &fakeMosdns{})
+	settings, err := s.Settings(context.Background())
+	if err != nil || !settings.NegativeCacheEnabled || settings.NegativeCacheTTL != 30 {
+		t.Fatalf("settings=%+v err=%v", settings, err)
+	}
+	settings.NegativeCacheTTL = 0
+	if err := s.UpdateSettings(context.Background(), settings, 1, "req-settings", "192.0.2.10"); err == nil {
+		t.Fatal("zero negative cache TTL accepted")
+	}
+	settings.NegativeCacheTTL = 86401
+	if err := s.UpdateSettings(context.Background(), settings, 1, "req-settings", "192.0.2.10"); err == nil {
+		t.Fatal("oversized negative cache TTL accepted")
+	}
+}
+
+func TestUpdateSettingsPersistsAndAuditsPartialNegativeCacheFailure(t *testing.T) {
+	fake := &fakeMosdns{negativeErr: map[string]error{"cache_local": errors.New("local unavailable")}}
+	s := testService(t, fake)
+	settings, err := s.Settings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.NegativeCacheEnabled = false
+	settings.NegativeCacheTTL = 60
+	if err := s.UpdateSettings(context.Background(), settings, 1, "req-negative", "192.0.2.10"); err == nil {
+		t.Fatal("expected negative cache sync error")
+	}
+	if len(fake.negativeCalls) != 2 || fake.negativeCalls[0] != "cache_local" || fake.negativeCalls[1] != "cache_remote" {
+		t.Fatalf("negative cache calls=%v", fake.negativeCalls)
+	}
+	persisted, err := s.Settings(context.Background())
+	if err != nil || persisted.NegativeCacheEnabled || persisted.NegativeCacheTTL != 60 {
+		t.Fatalf("persisted=%+v err=%v", persisted, err)
+	}
+	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "NEGATIVE_CACHE_APPLY_FAILED" {
+		t.Fatalf("audit=%+v err=%v", page.Items, err)
+	}
+}
+
+func TestSyncSettingsAttemptsBothNegativeCaches(t *testing.T) {
+	fake := &fakeMosdns{negativeErr: map[string]error{"cache_local": errors.New("local unavailable")}}
+	s := testService(t, fake)
+	if err := s.SyncSettings(context.Background()); err == nil {
+		t.Fatal("expected startup settings sync error")
+	}
+	if len(fake.negativeCalls) != 2 || fake.negativeCalls[0] != "cache_local" || fake.negativeCalls[1] != "cache_remote" {
+		t.Fatalf("negative cache calls=%v", fake.negativeCalls)
+	}
+	want := mosdnsclient.NegativeCacheSettings{Enabled: true, TTLSeconds: 30}
+	if got := fake.negativeCache["cache_remote"]; got != want {
+		t.Fatalf("remote negative cache=%+v", got)
 	}
 }
 

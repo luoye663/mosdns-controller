@@ -25,6 +25,8 @@ type Client interface {
 	Flush(context.Context, string) error
 	SetCacheEnabled(context.Context, bool) error
 	SetCacheTTL(context.Context, int) error
+	NegativeCache(context.Context, string) (NegativeCacheSettings, error)
+	SetNegativeCache(context.Context, string, NegativeCacheSettings) (NegativeCacheSettings, error)
 	UpstreamStatus(context.Context, string) (UpstreamSnapshot, error)
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
 	ECSStatus(context.Context, string) (ECSSnapshot, error)
@@ -63,6 +65,10 @@ type AddressFamilySnapshot struct {
 	Version                uint64 `json:"version"`
 	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
 	Mode                   string `json:"mode"`
+}
+type NegativeCacheSettings struct {
+	Enabled    bool   `json:"enabled"`
+	TTLSeconds uint32 `json:"ttl_seconds"`
 }
 type Status struct {
 	State           string `json:"state"`
@@ -162,11 +168,30 @@ func (c *HTTPClient) Match(ctx context.Context, qname string) (any, error) {
 	return value, c.request(ctx, http.MethodPost, "/plugins/dynamic_rules/match", map[string]string{"qname": qname}, &value)
 }
 func (c *HTTPClient) Flush(ctx context.Context, tag string) error {
-	if tag != "cache_local" && tag != "cache_remote" {
+	if !cacheTag(tag) {
 		return fmt.Errorf("unsupported cache tag %q", tag)
 	}
 	return c.request(ctx, http.MethodGet, "/plugins/"+tag+"/flush", nil, nil)
 }
+func (c *HTTPClient) NegativeCache(ctx context.Context, tag string) (NegativeCacheSettings, error) {
+	if !cacheTag(tag) {
+		return NegativeCacheSettings{}, fmt.Errorf("unsupported cache tag %q", tag)
+	}
+	var value NegativeCacheSettings
+	return value, c.request(ctx, http.MethodGet, "/plugins/"+tag+"/negative-cache", nil, &value)
+}
+func (c *HTTPClient) SetNegativeCache(ctx context.Context, tag string, settings NegativeCacheSettings) (NegativeCacheSettings, error) {
+	if !cacheTag(tag) {
+		return NegativeCacheSettings{}, fmt.Errorf("unsupported cache tag %q", tag)
+	}
+	var value NegativeCacheSettings
+	err := c.request(ctx, http.MethodPut, "/plugins/"+tag+"/negative-cache", settings, &value)
+	if err == nil && value != settings {
+		err = errors.New("negative cache setting was not applied")
+	}
+	return value, err
+}
+func cacheTag(tag string) bool { return tag == "cache_local" || tag == "cache_remote" }
 func (c *HTTPClient) SetCacheEnabled(ctx context.Context, enabled bool) error {
 	var local, remote struct {
 		Enabled bool `json:"enabled"`

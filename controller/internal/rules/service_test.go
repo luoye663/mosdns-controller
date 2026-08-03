@@ -48,6 +48,12 @@ func (f *fakeMosdns) Flush(_ context.Context, tag string) error {
 }
 func (f *fakeMosdns) SetCacheEnabled(context.Context, bool) error { return nil }
 func (f *fakeMosdns) SetCacheTTL(context.Context, int) error      { return nil }
+func (f *fakeMosdns) NegativeCache(context.Context, string) (mosdnsclient.NegativeCacheSettings, error) {
+	return mosdnsclient.NegativeCacheSettings{}, nil
+}
+func (f *fakeMosdns) SetNegativeCache(_ context.Context, _ string, settings mosdnsclient.NegativeCacheSettings) (mosdnsclient.NegativeCacheSettings, error) {
+	return settings, nil
+}
 func (f *fakeMosdns) UpstreamStatus(context.Context, string) (mosdnsclient.UpstreamSnapshot, error) {
 	return mosdnsclient.UpstreamSnapshot{}, nil
 }

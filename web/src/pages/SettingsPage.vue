@@ -4,7 +4,7 @@ import { NAlert, NButton, NCard, NFormItem, NInputNumber, NModal, NSelect, NSwit
 import { api, type Settings } from '@/lib/api'
 import { notify } from '@/lib/notify'
 
-const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack' })
+const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, negative_cache_enabled: true, negative_cache_ttl: 30, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack' })
 const loading = ref(false)
 const saving = ref(false)
 const clearing = ref(false)
@@ -23,6 +23,7 @@ onMounted(load)
     </header>
     <div class="settings-grid"><NCard title="DNS 解析" size="small" class="settings-card">
       <NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem><NFormItem label="缓存 TTL（秒）"><NInputNumber v-model:value="settings.cache_ttl" :min="0" :max="604800" /></NFormItem><p class="field-hint">0 表示不延长缓存，响应有效期完全遵循上游 DNS 的 TTL。</p>
+      <NFormItem label="否定缓存"><NSwitch v-model:value="settings.negative_cache_enabled" /></NFormItem><NFormItem label="否定缓存 TTL（秒）"><NInputNumber v-model:value="settings.negative_cache_ttl" :min="1" :max="86400" :disabled="!settings.negative_cache_enabled" /></NFormItem>
       <NFormItem label="地址族策略"><NSelect v-model:value="settings.address_family_mode" :options="[{ label: '双栈', value: 'dual_stack' }, { label: '优先 IPv4', value: 'prefer_ipv4' }, { label: '优先 IPv6', value: 'prefer_ipv6' }, { label: '仅 IPv4', value: 'ipv4_only' }, { label: '仅 IPv6', value: 'ipv6_only' }]" /></NFormItem><p class="field-hint">优先模式会在首选地址存在时隐藏另一种地址；仅限模式会直接返回被禁用地址族的空响应。</p>
       <NAlert v-if="settings.address_family_mode === 'prefer_ipv4' || settings.address_family_mode === 'prefer_ipv6'" type="warning" :show-icon="false">优先模式会为非首选地址查询补发首选地址查询；缓存未命中时，上游查询 QPS 最高可能接近原来的两倍。</NAlert>
     </NCard>
