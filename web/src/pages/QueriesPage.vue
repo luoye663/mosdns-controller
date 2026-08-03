@@ -2,7 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NDatePicker, NInput, NModal, NPopover, NSelect, NSwitch, NTooltip } from 'naive-ui'
 import { CircleHelp } from '@lucide/vue'
-import { api, eventStream, type AnswerDiagnostics, type QueryEvent, type QueryParams, type Rule } from '@/lib/api'
+import { api, eventStream, type AnswerDiagnostics, type QueryEvent, type QueryParams, type QueryResultClass, type Rule } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
 import { notify } from '@/lib/notify'
 
@@ -32,7 +32,7 @@ const topScroller = ref<HTMLElement | null>(null)
 const topScrollContent = ref<HTMLElement | null>(null)
 const queriesTable = ref<HTMLTableElement | null>(null)
 const hasHorizontalScroll = ref(false)
-const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qtype: '', rcode: '', route: '', route_source: '', upstream_tag: '', protocol: '', cache_hit: '', has_error: '' })
+const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qtype: '', rcode: '', result_class: '', route: '', route_source: '', upstream_tag: '', protocol: '', cache_hit: '' })
 let stream: EventSource | undefined
 let tableResizeObserver: ResizeObserver | undefined
 
@@ -40,6 +40,7 @@ const routeOptions = [{ label: '全部路由', value: '' }, { label: '本地', v
 const booleanOptions = [{ label: '不限', value: '' }, { label: '是', value: 'true' }, { label: '否', value: 'false' }]
 const typeOptions = [{ label: '全部类型', value: '' }, { label: 'A', value: '1' }, { label: 'AAAA', value: '28' }, { label: 'CNAME', value: '5' }, { label: 'MX', value: '15' }, { label: 'TXT', value: '16' }, { label: 'PTR', value: '12' }, { label: 'HTTPS', value: '65' }]
 const rcodeOptions = [{ label: '全部结果', value: '' }, { label: 'NOERROR', value: '0' }, { label: 'FORMERR', value: '1' }, { label: 'SERVFAIL', value: '2' }, { label: 'NXDOMAIN', value: '3' }, { label: 'REFUSED', value: '5' }]
+const resultClassOptions = [{ label: '全部分类', value: '' }, { label: '成功', value: 'success' }, { label: '负向应答', value: 'negative_answer' }, { label: '策略拦截', value: 'policy_block' }, { label: '处理错误', value: 'processing_error' }]
 const actionOptions = [{ label: '拦截', value: 'block' }, { label: '放行', value: 'allow' }, { label: '强制本地', value: 'local' }, { label: '强制远程', value: 'remote' }, { label: '不记录', value: 'no_log' }]
 const timeShortcuts = {
   '1 小时': () => { const now = Date.now(); return [now - 60 * 60 * 1000, now] as [number, number] },
@@ -59,6 +60,7 @@ function qtypeLabel(value: number) { return ({ 1: 'A', 5: 'CNAME', 12: 'PTR', 15
 function qclassLabel(value: number) { return value === 1 ? 'IN' : `类别 ${value}` }
 function rcodeLabel(value: number) { return ({ 0: '成功', 1: '格式错误', 2: '服务器失败', 3: '域名不存在', 4: '未实现', 5: '已拒绝' } as Record<number, string>)[value] ?? `返回码 ${value}` }
 function routeLabel(value: string) { return ({ local: '本地', remote: '远程', block: '拦截' } as Record<string, string>)[value] ?? value }
+function resultClassLabel(value: QueryResultClass) { return ({ success: '成功', negative_answer: '负向应答', policy_block: '策略拦截', processing_error: '处理错误' } as Record<QueryResultClass, string>)[value] }
 function formatTTL(value: number | null) { return value === null ? '-' : `${value} s` }
 function ruleLabel(rule: Rule) {
   return ({
@@ -77,7 +79,7 @@ function routeSourceLabel(row: QueryEvent) {
   return ruleLabels.value[row.route_rule_id] ?? ruleLabels.value[row.access_rule_id] ?? '已删除规则'
 }
 function errorText(row: QueryEvent) { return row.error_text || row.error_code || (row.rcode !== 0 ? rcodeLabel(row.rcode) : '') }
-function hasError(row: QueryEvent) { return Boolean(row.error_code || row.error_text || row.rcode !== 0) }
+function hasError(row: QueryEvent) { return row.result_class === 'processing_error' }
 function updateTopScrollbar() {
   const scroller = tableScroller.value
   const content = topScrollContent.value
@@ -183,9 +185,8 @@ onBeforeUnmount(() => { closeStream(); tableResizeObserver?.disconnect() })
       <div class="time-filter"><NDatePicker v-model:value="range" type="datetimerange" clearable :shortcuts="timeShortcuts" /></div>
       <NInput v-model:value="filters.client_ip" placeholder="客户端 IP" clearable />
       <div class="domain-filter"><NInput v-model:value="filters.qname" placeholder="查询域名" clearable /><NSelect v-model:value="filters.qname_match" :options="[{ label: '包含', value: 'contains' }, { label: '精确', value: 'exact' }]" /></div>
-      <NSelect v-model:value="filters.qtype" :options="typeOptions" /><NSelect v-model:value="filters.rcode" :options="rcodeOptions" /><NSelect v-model:value="filters.route" :options="routeOptions" />
+      <NSelect v-model:value="filters.qtype" :options="typeOptions" /><NSelect v-model:value="filters.rcode" :options="rcodeOptions" /><NSelect v-model:value="filters.result_class" :options="resultClassOptions" /><NSelect v-model:value="filters.route" :options="routeOptions" />
       <NSelect v-model:value="filters.cache_hit" :options="booleanOptions.map((item) => ({ ...item, label: item.value === '' ? '全部缓存' : `缓存${item.label}` }))" />
-      <NSelect v-model:value="filters.has_error" :options="booleanOptions.map((item) => ({ ...item, label: item.value === '' ? '全部状态' : item.value === 'true' ? '仅错误' : '无错误' }))" />
       <NInput v-model:value="filters.route_source" placeholder="路由来源" clearable /><NInput v-model:value="filters.upstream_tag" placeholder="上游标签" clearable />
       <NSelect v-model:value="filters.protocol" :options="[{ label: '全部协议', value: '' }, { label: 'UDP', value: 'udp' }, { label: 'TCP', value: 'tcp' }]" />
       <NSelect v-model:value="pageSize" :options="[{ label: '每页 50 条', value: 50 }, { label: '每页 100 条', value: 100 }, { label: '每页 200 条', value: 200 }]" />
@@ -194,7 +195,7 @@ onBeforeUnmount(() => { closeStream(); tableResizeObserver?.disconnect() })
     <div class="inline-controls query-presets"><NSelect v-model:value="selectedSaved" :options="savedFilters.map((item) => ({ label: item.label, value: item.label }))" placeholder="保存的筛选" clearable @update:value="applySaved" /><NButton @click="saveFilter">保存筛选</NButton><NButton :disabled="!selectedSaved" @click="removeSaved">删除</NButton><span v-if="paused && pending.length" class="muted">已暂停 {{ pending.length }} 条新查询</span></div>
     <div v-show="hasHorizontalScroll" ref="topScroller" class="queries-top-scrollbar" aria-label="查询表格横向滚动" @scroll="syncTableScroll"><div ref="topScrollContent"></div></div>
     <div ref="tableScroller" class="table-wrap queries-table-wrap" @scroll="syncTopScroll"><table ref="queriesTable"><colgroup><col class="query-time-column"><col class="query-client-column"><col class="query-domain-column"><col class="query-result-column"><col class="query-route-column"><col class="query-cache-column"><col class="query-ttl-column"><col class="query-latency-column"><col class="query-rules-column"><col class="query-diagnostics-column"><col class="query-actions-column"></colgroup><thead><tr><th>时间</th><th>客户端</th><th>域名 / 类型</th><th>结果</th><th>路由</th><th>缓存</th><th>TTL</th><th>延迟</th><th>规则 / 版本</th><th>诊断</th><th>操作</th></tr></thead><tbody>
-      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td><NTooltip :delay="300"><template #trigger><div class="query-cell-text">{{ formatClient(row) }}</div></template>{{ formatClient(row) }}</NTooltip></td><td><NTooltip :delay="300"><template #trigger><div class="query-cell-text mono">{{ row.qname }}</div></template>{{ row.qname }}</NTooltip><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td :class="{ 'query-error': hasError(row) }">{{ rcodeLabel(row.rcode) }}</td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td><span class="cache-status" :class="row.cache_hit ? 'hit' : 'miss'">{{ row.cache_hit ? '命中' : '未命中' }}</span></td><td>{{ formatTTL(row.answer_min_ttl_seconds) }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div class="query-cell-text">访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)"><div v-if="hasError(row)" class="query-cell-text">{{ errorText(row) }}</div><div v-if="row.answer_count"><NButton size="tiny" text @click="openDiagnostics(row)">{{ row.answer_count }} 条 DNS 应答</NButton></div></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
+      <tr v-for="row in rows" :key="row.event_id"><td>{{ formatTime(row.timestamp_unix_ms) }}</td><td><NTooltip :delay="300"><template #trigger><div class="query-cell-text">{{ formatClient(row) }}</div></template>{{ formatClient(row) }}</NTooltip></td><td><NTooltip :delay="300"><template #trigger><div class="query-cell-text mono">{{ row.qname }}</div></template>{{ row.qname }}</NTooltip><small>{{ row.protocol.toUpperCase() }} / {{ qtypeLabel(row.qtype) }} / {{ qclassLabel(row.qclass) }}</small></td><td><span class="result-class" :class="row.result_class">{{ resultClassLabel(row.result_class) }}</span><small>{{ rcodeLabel(row.rcode) }}</small></td><td class="route-upstream"><div class="route-cell"><span class="route-tag" :class="row.route">{{ routeLabel(row.route) }}</span><span class="upstream-tag mono" :title="row.upstream_tag || '未记录上游'">{{ row.upstream_tag || '-' }}</span></div><small>{{ routeSourceLabel(row) }}</small></td><td><span class="cache-status" :class="row.cache_hit ? 'hit' : 'miss'">{{ row.cache_hit ? '命中' : '未命中' }}</span></td><td>{{ formatTTL(row.answer_min_ttl_seconds) }}</td><td>{{ formatLatencyMs(row.latency_us) }}</td><td><div class="query-cell-text">访问 {{ row.access_rule_id || '-' }} / 路由 {{ row.route_rule_id || '-' }}</div><small>快照 {{ row.snapshot_version }}</small></td><td :title="errorText(row)"><div v-if="hasError(row)" class="query-cell-text query-error">{{ errorText(row) }}</div><div v-if="row.answer_count"><NButton size="tiny" text @click="openDiagnostics(row)">{{ row.answer_count }} 条 DNS 应答</NButton></div></td><td><NButton size="small" @click="ruleTarget = row">建规则</NButton></td></tr>
       <tr v-if="!loading && !rows.length"><td colspan="11" class="empty-cell">暂无查询日志</td></tr>
     </tbody></table></div>
     <footer class="table-footer"><span>已显示 {{ rows.length }} 条；查询使用 cursor 分页</span><NButton v-if="cursor" :loading="loading" @click="load(cursor)">加载下一页</NButton></footer>

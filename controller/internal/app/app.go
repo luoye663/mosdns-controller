@@ -531,7 +531,7 @@ func queryFromRequest(r *http.Request) (queryingest.Query, error) {
 		rcodePtr = &rcode
 	}
 	qname := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(values.Get("qname"))), ".")
-	return queryingest.Query{Limit: limit, Cursor: values.Get("cursor"), FromMS: from, ToMS: to, ClientIP: values.Get("client_ip"), Route: values.Get("route"), RouteSource: values.Get("route_source"), UpstreamTag: values.Get("upstream_tag"), Protocol: values.Get("protocol"), QName: qname, QNameMatch: values.Get("qname_match"), QType: qtype, RCode: rcodePtr, CacheHit: cacheHit, HasError: hasError}, nil
+	return queryingest.Query{Limit: limit, Cursor: values.Get("cursor"), FromMS: from, ToMS: to, ClientIP: values.Get("client_ip"), Route: values.Get("route"), RouteSource: values.Get("route_source"), UpstreamTag: values.Get("upstream_tag"), Protocol: values.Get("protocol"), QName: qname, QNameMatch: values.Get("qname_match"), QType: qtype, RCode: rcodePtr, CacheHit: cacheHit, HasError: hasError, ResultClass: values.Get("result_class")}, nil
 }
 func (a *App) summary(w http.ResponseWriter, r *http.Request) {
 	result, err := a.ingest.Summary(r.Context())

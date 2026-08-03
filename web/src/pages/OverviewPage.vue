@@ -8,11 +8,10 @@ import { notify } from '@/lib/notify'
 
 type StatItem = { value: string | number; query_count: number }
 const loading = ref(true)
-const summary = ref<DashboardSummary>({ query_count: 0, last_hour_query_count: 0, average_latency_us: 0, p95_latency_us: 0, p95_sample_count: 0, max_latency_us: 0, error_count: 0, cache_hit_count: 0 })
+const summary = ref<DashboardSummary>({ query_count: 0, last_hour_query_count: 0, average_latency_us: 0, p95_latency_us: 0, p95_sample_count: 0, max_latency_us: 0, error_count: 0, processing_error_count: 0, success_count: 0, negative_answer_count: 0, policy_block_count: 0, cache_hit_count: 0 })
 const domains = ref<StatItem[]>([])
 const clients = ref<StatItem[]>([])
 const routes = ref<StatItem[]>([])
-const rcodes = ref<StatItem[]>([])
 const latency = ref<LatencyPoint[]>([])
 const status = ref<SystemStatus | null>(null)
 const trendElement = ref<HTMLElement | null>(null)
@@ -22,7 +21,6 @@ let distributionChart: echarts.ECharts | undefined
 
 function percent(value: number, total = summary.value.query_count) { return total ? `${((value / total) * 100).toFixed(1)}%` : '0.0%' }
 function routeCount(name: string) { return routes.value.find((item) => String(item.value) === name)?.query_count ?? 0 }
-function rcodeCount(code: number) { return rcodes.value.find((item) => Number(item.value) === code)?.query_count ?? 0 }
 function chartLabel(timestamp: number) { return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
 function memory(bytes?: number) { return bytes && bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(1)} MiB` : '-' }
 function renderCharts() {
@@ -54,12 +52,11 @@ function renderCharts() {
 async function load() {
   loading.value = true
   try {
-    const [nextSummary, nextDomains, nextClients, nextRoutes, nextRCodes, nextLatency, nextStatus] = await Promise.all([api.summary(), api.statistic('domains'), api.statistic('clients'), api.statistic('routes'), api.statistic('rcode'), api.latency(), api.systemStatus()])
+    const [nextSummary, nextDomains, nextClients, nextRoutes, nextLatency, nextStatus] = await Promise.all([api.summary(), api.statistic('domains'), api.statistic('clients'), api.statistic('routes'), api.latency(), api.systemStatus()])
     summary.value = nextSummary
     domains.value = nextDomains.items
     clients.value = nextClients.items
     routes.value = nextRoutes.items
-    rcodes.value = nextRCodes.items
     latency.value = nextLatency.items
     status.value = nextStatus
     await nextTick()
@@ -92,7 +89,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
       <div class="metric-grid overview-metrics">
         <article><span>近 24 小时查询</span><strong>{{ summary.query_count.toLocaleString() }}</strong><small>最近 1 小时 {{ summary.last_hour_query_count.toLocaleString() }} 次</small></article>
         <article><span>缓存命中率</span><strong>{{ percent(summary.cache_hit_count) }}</strong><small>{{ summary.cache_hit_count.toLocaleString() }} 次命中</small></article>
-        <article><span>错误率</span><strong>{{ percent(summary.error_count) }}</strong><small>NXDOMAIN {{ percent(rcodeCount(3)) }} / SERVFAIL {{ percent(rcodeCount(2)) }}</small></article>
+        <article><span>处理错误率</span><strong>{{ percent(summary.processing_error_count) }}</strong><small>{{ summary.processing_error_count.toLocaleString() }} 次，负向应答不计错误</small></article>
         <article><span>P95 延迟</span><strong>{{ formatLatencyMs(summary.p95_latency_us) }}</strong><small>{{ summary.p95_sample_count < summary.query_count ? '采集期样本' : '完整窗口' }}，平均 {{ formatLatencyMs(summary.average_latency_us) }}</small></article>
       </div>
 
@@ -104,7 +101,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
       <div class="dashboard-grid dashboard-secondary">
         <section class="data-panel"><header><h2>Top 域名</h2><span>24 小时</span></header><ol class="rank-list"><li v-for="item in domains" :key="String(item.value)"><span>{{ item.value }}</span><b>{{ item.query_count.toLocaleString() }}</b></li><li v-if="!domains.length" class="muted">暂无查询数据</li></ol></section>
         <section class="data-panel"><header><h2>Top 客户端</h2><span>24 小时</span></header><ol class="rank-list"><li v-for="item in clients" :key="String(item.value)"><span>{{ item.value }}</span><b>{{ item.query_count.toLocaleString() }}</b></li><li v-if="!clients.length" class="muted">暂无查询数据</li></ol></section>
-        <section class="data-panel"><header><h2>返回码监控</h2><span>24 小时</span></header><dl class="compact-stats"><div><dt>成功</dt><dd>{{ percent(rcodeCount(0)) }}</dd></div><div><dt>NXDOMAIN</dt><dd>{{ percent(rcodeCount(3)) }}</dd></div><div><dt>SERVFAIL</dt><dd>{{ percent(rcodeCount(2)) }}</dd></div><div><dt>其他错误</dt><dd>{{ Math.max(0, summary.error_count - rcodeCount(2) - rcodeCount(3)).toLocaleString() }}</dd></div></dl></section>
+        <section class="data-panel"><header><h2>结果分类</h2><span>24 小时</span></header><dl class="compact-stats"><div><dt>成功</dt><dd>{{ percent(summary.success_count) }}</dd></div><div><dt>负向应答</dt><dd>{{ percent(summary.negative_answer_count) }}</dd></div><div><dt>策略拦截</dt><dd>{{ percent(summary.policy_block_count) }}</dd></div><div><dt>处理错误</dt><dd>{{ percent(summary.processing_error_count) }}</dd></div></dl></section>
         <section class="data-panel"><header><h2>审计与存储</h2><span>运行时</span></header><dl class="compact-stats"><div><dt>审计队列</dt><dd>{{ status?.audit ? `${status.audit.queue_depth} / ${status.audit.queue_capacity}` : '-' }}</dd></div><div><dt>接收队列</dt><dd>{{ status?.ingest_queue_depth ?? '-' }}</dd></div><div><dt>审计丢弃</dt><dd>{{ status?.audit?.dropped_events ?? '-' }}</dd></div><div><dt>数据库</dt><dd>{{ status ? `${(status.database.bytes / 1024 / 1024).toFixed(1)} MiB` : '-' }}</dd></div></dl></section>
       </div>
     </NSpin>

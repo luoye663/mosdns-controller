@@ -12,7 +12,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, migration := range []struct {
 		version    int
 		statements []string
-	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}, {9, migrationV9}, {10, migrationV10}} {
+	}{{1, migrationV1}, {2, migrationV2}, {3, migrationV3}, {4, migrationV4}, {5, migrationV5}, {6, migrationV6}, {7, migrationV7}, {8, migrationV8}, {9, migrationV9}, {10, migrationV10}, {11, migrationV11}} {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&count); err != nil {
 			return err
@@ -102,4 +102,22 @@ var migrationV9 = []string{
 
 var migrationV10 = []string{
 	`CREATE INDEX idx_admin_audit_created_id ON admin_audit_logs(created_at_ms DESC,id DESC)`,
+}
+
+// migrationV11 classifies DNS outcomes without changing the ingest wire format.
+// Existing aggregate NOERROR rows are initially treated as successful, then
+// corrected exactly where the retained raw rows cover the complete aggregate.
+var migrationV11 = []string{
+	`ALTER TABLE dns_queries ADD COLUMN result_class TEXT NOT NULL DEFAULT 'success' CHECK(result_class IN ('success','negative_answer','policy_block','processing_error'))`,
+	`UPDATE dns_queries SET result_class=CASE WHEN route='block' THEN 'policy_block' WHEN COALESCE(error_code,'')<>'' OR COALESCE(error_text,'')<>'' OR COALESCE(rcode,0) NOT IN (0,3) THEN 'processing_error' WHEN COALESCE(rcode,0)=3 OR (COALESCE(rcode,0)=0 AND answer_count=0) THEN 'negative_answer' ELSE 'success' END`,
+	`CREATE INDEX idx_dns_queries_result_class_time ON dns_queries(result_class,timestamp_unix_ms DESC,id DESC)`,
+	`ALTER TABLE dns_stats_hourly_global ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE dns_stats_hourly_global ADD COLUMN negative_answer_count INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE dns_stats_hourly_global ADD COLUMN policy_block_count INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE dns_stats_hourly_global ADD COLUMN processing_error_count INTEGER NOT NULL DEFAULT 0`,
+	`UPDATE dns_stats_hourly_global SET success_count=CASE WHEN route<>'block' AND rcode=0 THEN query_count ELSE 0 END,negative_answer_count=CASE WHEN route<>'block' AND rcode=3 THEN query_count ELSE 0 END,policy_block_count=CASE WHEN route='block' THEN query_count ELSE 0 END,processing_error_count=CASE WHEN route<>'block' AND rcode NOT IN (0,3) THEN query_count ELSE 0 END,error_count=CASE WHEN route<>'block' AND rcode NOT IN (0,3) THEN query_count ELSE 0 END`,
+	`CREATE TEMP TABLE migration_v11_result_counts (hour_start_ms INTEGER NOT NULL,route TEXT NOT NULL,qtype INTEGER NOT NULL,rcode INTEGER NOT NULL,query_count INTEGER NOT NULL,success_count INTEGER NOT NULL,negative_answer_count INTEGER NOT NULL,policy_block_count INTEGER NOT NULL,processing_error_count INTEGER NOT NULL,PRIMARY KEY(hour_start_ms,route,qtype,rcode)) WITHOUT ROWID`,
+	`INSERT INTO migration_v11_result_counts SELECT timestamp_unix_ms/3600000*3600000,route,qtype,COALESCE(rcode,0),COUNT(*),SUM(result_class='success'),SUM(result_class='negative_answer'),SUM(result_class='policy_block'),SUM(result_class='processing_error') FROM dns_queries GROUP BY 1,2,3,4`,
+	`UPDATE dns_stats_hourly_global AS g SET success_count=(SELECT success_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),negative_answer_count=(SELECT negative_answer_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),policy_block_count=(SELECT policy_block_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),processing_error_count=(SELECT processing_error_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode),error_count=(SELECT processing_error_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode) WHERE query_count=(SELECT query_count FROM migration_v11_result_counts m WHERE m.hour_start_ms=g.hour_start_ms AND m.route=g.route AND m.qtype=g.qtype AND m.rcode=g.rcode)`,
+	`DROP TABLE migration_v11_result_counts`,
 }

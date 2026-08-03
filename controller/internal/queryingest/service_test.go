@@ -129,6 +129,62 @@ func TestSummaryUsesHourlyAggregatesAndLatencyBuckets(t *testing.T) {
 	}
 }
 
+func TestResultClassificationAndSummary(t *testing.T) {
+	s := testService(t)
+	now := time.Now().UnixMilli()
+	success := validEvent("classified-success")
+	success.TimestampMS, success.AnswerCount = now, 1
+	negative := validEvent("classified-negative")
+	negative.TimestampMS, negative.RCode = now, 3
+	nodata := validEvent("classified-nodata")
+	nodata.TimestampMS = now
+	blocked := validEvent("classified-blocked")
+	blocked.TimestampMS, blocked.Route, blocked.RCode, blocked.ErrorCode = now, "block", 2, "DNS_PROCESSING_ERROR"
+	failed := validEvent("classified-failed")
+	failed.TimestampMS, failed.RCode, failed.ErrorCode = now, 2, "DNS_PROCESSING_ERROR"
+	textOnlyFailure := validEvent("classified-text-only-failed")
+	textOnlyFailure.TimestampMS, textOnlyFailure.ErrorText = now, "upstream transport failed"
+
+	stored, err := s.persist(context.Background(), []Event{success, negative, nodata, blocked, failed, textOnlyFailure})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"success", "negative_answer", "negative_answer", "policy_block", "processing_error", "processing_error"}
+	for i := range stored {
+		if stored[i].ResultClass != want[i] {
+			t.Fatalf("event %s class=%q, want %q", stored[i].EventID, stored[i].ResultClass, want[i])
+		}
+	}
+	summary, err := s.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"success_count", "policy_block_count"} {
+		if summary[key] != int64(1) {
+			t.Fatalf("%s=%v, want 1; summary=%+v", key, summary[key], summary)
+		}
+	}
+	if summary["negative_answer_count"] != int64(2) {
+		t.Fatalf("negative_answer_count=%v, want 2; summary=%+v", summary["negative_answer_count"], summary)
+	}
+	for _, key := range []string{"processing_error_count", "error_count"} {
+		if summary[key] != int64(2) {
+			t.Fatalf("%s=%v, want 2; summary=%+v", key, summary[key], summary)
+		}
+	}
+	page, err := s.Queries(context.Background(), Query{ResultClass: "negative_answer", HasError: boolPtr(false)})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("negative result filter page=%+v err=%v", page.Items, err)
+	}
+	page, err = s.Queries(context.Background(), Query{HasError: boolPtr(true)})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("processing error compatibility filter page=%+v err=%v", page.Items, err)
+	}
+	if _, err := s.Queries(context.Background(), Query{ResultClass: "unknown"}); err == nil {
+		t.Fatal("unknown result class was accepted")
+	}
+}
+
 func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
 	s := testService(t)
 	event := validEvent("upstream-tag")
@@ -243,7 +299,6 @@ func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	second.TimestampMS = time.Now().Add(-time.Second).UnixMilli()
 	second.QName = "two.example"
 	second.RCode = 3
-	second.ErrorCode = "NXDOMAIN"
 	second.Route = "local"
 	if _, err := s.persist(context.Background(), []Event{first, second}); err != nil {
 		t.Fatal(err)
@@ -258,7 +313,7 @@ func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	if len(page.Items) != 1 || page.Items[0].EventID != first.EventID || page.Items[0].DeviceName != "laptop" {
 		t.Fatalf("filtered page=%+v", page.Items)
 	}
-	page, err = s.Queries(context.Background(), Query{FromMS: first.TimestampMS - 100, ToMS: second.TimestampMS + 100, QName: "two", QNameMatch: "contains", HasError: boolPtr(true)})
+	page, err = s.Queries(context.Background(), Query{FromMS: first.TimestampMS - 100, ToMS: second.TimestampMS + 100, QName: "two", QNameMatch: "contains", ResultClass: "negative_answer", HasError: boolPtr(false)})
 	if err != nil || len(page.Items) != 1 || page.Items[0].EventID != second.EventID {
 		t.Fatalf("contains error filter page=%+v err=%v", page.Items, err)
 	}
