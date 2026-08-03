@@ -142,12 +142,26 @@ func reconcilePeriodically(ctx context.Context, application *app.App, logger *sl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if state, err := application.Reconcile(ctx); err != nil {
-				logger.Warn("periodic reconcile failed", "error", err)
-			} else {
-				logger.Info("periodic reconcile completed", "state", state)
-			}
+			reconcileControlPlane(ctx, application, logger)
 		}
+	}
+}
+
+type controlPlaneReconciler interface {
+	Reconcile(context.Context) (string, error)
+	SyncSettings(context.Context) error
+}
+
+func reconcileControlPlane(ctx context.Context, application controlPlaneReconciler, logger *slog.Logger) {
+	if state, err := application.Reconcile(ctx); err != nil {
+		logger.Warn("periodic reconcile failed", "error", err)
+	} else {
+		logger.Info("periodic reconcile completed", "state", state)
+	}
+	if err := application.SyncSettings(ctx); err != nil {
+		logger.Warn("periodic settings sync failed", "error", err)
+	} else {
+		logger.Info("periodic settings sync completed")
 	}
 }
 func refreshSubscriptionsPeriodically(ctx context.Context, application *app.App) {

@@ -66,6 +66,16 @@ func (f *fakeMosdns) ECSStatus(context.Context, string) (mosdnsclient.ECSSnapsho
 func (f *fakeMosdns) ApplyECS(context.Context, string, mosdnsclient.ECSSnapshot) (mosdnsclient.ECSSnapshot, error) {
 	return mosdnsclient.ECSSnapshot{}, nil
 }
+func (f *fakeMosdns) RegistryStatus(context.Context) (mosdnsclient.RegistrySnapshot, error) {
+	return mosdnsclient.RegistrySnapshot{}, nil
+}
+func (f *fakeMosdns) ApplyRegistry(context.Context, mosdnsclient.RegistrySnapshot) (mosdnsclient.RegistrySnapshot, error) {
+	return mosdnsclient.RegistrySnapshot{}, nil
+}
+func (f *fakeMosdns) FlushRegistry(_ context.Context, group string, _ uint64) error {
+	f.flushes = append(f.flushes, group)
+	return nil
+}
 func (f *fakeMosdns) AddressFamilyStatus(context.Context) (mosdnsclient.AddressFamilySnapshot, error) {
 	return mosdnsclient.AddressFamilySnapshot{Version: 1, Mode: "dual_stack"}, nil
 }
@@ -148,7 +158,7 @@ func TestPublishAndRouteCacheFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.flushes) != 2 {
+	if len(fake.flushes) != 1 || fake.flushes[0] != "" {
 		t.Fatalf("route change flushes=%v", fake.flushes)
 	}
 	listed, err := service.List(context.Background())
@@ -164,7 +174,7 @@ func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
 	if err != nil || source.RuleCount != 2 || published.Version != 1 {
 		t.Fatalf("source=%+v version=%+v err=%v", source, published, err)
 	}
-	if fake.subscriptions["subscription_local"].RuleCount != 2 || len(fake.flushes) != 2 {
+	if fake.subscriptions["subscription_local"].RuleCount != 2 || len(fake.flushes) != 1 || fake.flushes[0] != "" {
 		t.Fatalf("snapshot=%+v flushes=%v", fake.current, fake.flushes)
 	}
 	manual, err := service.List(context.Background())

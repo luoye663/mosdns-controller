@@ -78,111 +78,55 @@ plugins:
         subscription_allow: 1304
         cache_hit: 2101
 
-  # local 与 remote 使用独立缓存，避免不同上游组的结果串用。
-  - tag: cache_local
-    type: cache
+  # Registry 原子管理任意上游组及其 ECS、缓存和调度运行时。
+  - tag: dynamic_upstreams
+    type: dynamic_upstream_registry
     args:
-      # 最大条目数；lazy_cache_ttl 为 0 时严格遵循上游 TTL。
-      size: ${CACHE_SIZE}
-      lazy_cache_ttl: 0
-      # cache dump 持久化路径和周期；auth token 保护 cache runtime API。
-      dump_file: "${MOSDNS_STATE_DIR}/cache-local.dump"
-      dump_interval: ${CACHE_DUMP_INTERVAL}
+      snapshot_file: "${MOSDNS_STATE_DIR}/upstream-registry.json"
+      backup_file: "${MOSDNS_STATE_DIR}/upstream-registry.json.bak"
       auth_token_file: "${MOSDNS_TOKEN_FILE}"
-
-  # 本地上游 ECS。默认关闭；WebUI 可热更新客户端网段或固定 IPv4/IPv6 网段。
-  - tag: ecs_local
-    type: dynamic_ecs
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/ecs-local.json"
-      backup_file: "${MOSDNS_STATE_DIR}/ecs-local.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
-
-  # 远程上游专用缓存。
-  - tag: cache_remote
-    type: cache
-    args:
-      size: ${CACHE_SIZE}
-      lazy_cache_ttl: 0
-      dump_file: "${MOSDNS_STATE_DIR}/cache-remote.dump"
-      dump_interval: ${CACHE_DUMP_INTERVAL}
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-
-  # 远程上游 ECS，与本地上游独立配置和持久化。
-  - tag: ecs_remote
-    type: dynamic_ecs
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/ecs-remote.json"
-      backup_file: "${MOSDNS_STATE_DIR}/ecs-remote.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
-
-  # local 上游组。snapshot 由 WebUI 热发布，initial 仅首次启动时使用。
-  - tag: local_dns
-    type: dynamic_forward
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/local-upstreams.json"
-      backup_file: "${MOSDNS_STATE_DIR}/local-upstreams.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial:
+      legacy_groups:
+        - id: local_dns
+          forward_snapshot_file: "${MOSDNS_STATE_DIR}/local-upstreams.json"
+          forward_backup_file: "${MOSDNS_STATE_DIR}/local-upstreams.json.bak"
+          ecs_snapshot_file: "${MOSDNS_STATE_DIR}/ecs-local.json"
+          ecs_backup_file: "${MOSDNS_STATE_DIR}/ecs-local.json.bak"
+        - id: remote_dns
+          forward_snapshot_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json"
+          forward_backup_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json.bak"
+          ecs_snapshot_file: "${MOSDNS_STATE_DIR}/ecs-remote.json"
+          ecs_backup_file: "${MOSDNS_STATE_DIR}/ecs-remote.json.bak"
+      initial_snapshot:
         version: 1
-        concurrent: ${LOCAL_CONCURRENT}
-        # 并发上游数和可选 SOCKS5 代理；空字符串表示不使用代理。
-        socks5: "${LOCAL_SOCKS5}"
-        upstreams:
-          - tag: ${LOCAL_UPSTREAM_1_TAG}
-            addr: "${LOCAL_UPSTREAM_1_ADDR}"
-          - tag: ${LOCAL_UPSTREAM_2_TAG}
-            addr: "${LOCAL_UPSTREAM_2_ADDR}"
+        default_group_id: remote_dns
+        cache:
+          enabled: true
+          lazy_ttl: 0
+          negative: { enabled: true, ttl: 30 }
+        groups:
+          - id: local_dns
+            name: 本地上游
+            enabled: true
+            mode: race
+            concurrent: ${LOCAL_CONCURRENT}
+            socks5: "${LOCAL_SOCKS5}"
+            ecs: { mode: off, mask4: 24, mask6: 48 }
+            cache: { enabled: true, size: ${CACHE_SIZE} }
+            upstreams:
+              - { tag: ${LOCAL_UPSTREAM_1_TAG}, addr: "${LOCAL_UPSTREAM_1_ADDR}", priority: 100, weight: 1 }
+              - { tag: ${LOCAL_UPSTREAM_2_TAG}, addr: "${LOCAL_UPSTREAM_2_ADDR}", priority: 100, weight: 1 }
+          - id: remote_dns
+            name: 远程上游
+            enabled: true
+            mode: race
+            concurrent: ${REMOTE_CONCURRENT}
+            socks5: "${REMOTE_SOCKS5}"
+            ecs: { mode: off, mask4: 24, mask6: 48 }
+            cache: { enabled: true, size: ${CACHE_SIZE} }
+            upstreams:
+              - { tag: ${REMOTE_UPSTREAM_TAG}, addr: "${REMOTE_UPSTREAM_ADDR}", priority: 100, weight: 1 }
 
-  # remote 上游组，与 local 组独立快照、调度和缓存。
-  - tag: remote_dns
-    type: dynamic_forward
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json"
-      backup_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial:
-        version: 1
-        concurrent: ${REMOTE_CONCURRENT}
-        socks5: "${REMOTE_SOCKS5}"
-        upstreams:
-          - tag: ${REMOTE_UPSTREAM_TAG}
-            addr: "${REMOTE_UPSTREAM_ADDR}"
-
-  # 路由 sequence：先写入 ECS，再查询对应 cache，未命中后才访问上游。
-  - tag: route_local
-    type: sequence
-    args:
-      - exec: mark 1101
-      - exec: $ecs_local
-      - exec: $cache_local
-      - matches:
-          - has_resp
-        exec: mark 2101
-      - matches:
-          - has_resp
-        exec: accept
-      - exec: $local_dns
-      - exec: accept
-
-  - tag: route_remote
-    type: sequence
-    args:
-      - exec: mark 1102
-      - exec: $ecs_remote
-      - exec: $cache_remote
-      - matches:
-          - has_resp
-        exec: mark 2101
-      - matches:
-          - has_resp
-        exec: accept
-      - exec: $remote_dns
-      - exec: accept
-
-  - tag: subscription_routes
+  - tag: forward_routes
     type: sequence
     args:
       - matches:
@@ -190,14 +134,15 @@ plugins:
         exec: mark 1301
       - matches:
           - mark 1301
-        exec: goto route_local
+        exec: mark 1101
       - matches:
           - qname $subscription_remote
         exec: mark 1302
       - matches:
           - mark 1302
-        exec: goto route_remote
-      - exec: goto route_remote
+        exec: mark 1102
+      - exec: $dynamic_upstreams
+      - exec: accept
 
   # DNS 主入口：动态 block 必须先于任何 cache。
   - tag: main
@@ -214,26 +159,26 @@ plugins:
       - exec: $address_family
       - matches:
           - mark 1101
-        exec: goto route_local
+        exec: goto forward_routes
       - matches:
           - mark 1102
-        exec: goto route_remote
+        exec: goto forward_routes
       - matches:
           - mark 1002
-        exec: goto subscription_routes
+        exec: goto forward_routes
       - matches:
           - qname $subscription_allow
         exec: mark 1304
       - matches:
           - mark 1304
-        exec: goto subscription_routes
+        exec: goto forward_routes
       - matches:
           - qname $subscription_block
         exec: mark 1303
       - matches:
           - mark 1303
         exec: reject 3
-      - exec: goto subscription_routes
+      - exec: goto forward_routes
 
   # DNS UDP/TCP 监听地址；生产通常为 :53，集成测试使用 :5353。
   - tag: udp_server

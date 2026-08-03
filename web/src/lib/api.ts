@@ -13,7 +13,11 @@ export interface AuditLog { id: number; admin_username: string; action: string; 
 export interface Upstream { tag: string; addr: string; priority: number; weight: number }
 export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
 export interface ECSSnapshot { version: number; expected_current_version: number; mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }
-export interface Settings { cache_enabled: boolean; cache_ttl: number; negative_cache_enabled: boolean; negative_cache_ttl: number; query_retention_days: number; database_max_size_gib: number; address_family_mode: 'dual_stack' | 'prefer_ipv4' | 'prefer_ipv6' | 'ipv4_only' | 'ipv6_only' }
+export interface UpstreamGroup { id: string; name: string; enabled: boolean; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; ecs: { mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }; cache: { enabled: boolean; size: number } }
+export interface UpstreamRegistry { version: number; expected_current_version: number; default_group_id: string; groups: UpstreamGroup[]; cache: { enabled: boolean; lazy_ttl: number; negative: { enabled: boolean; ttl: number } } }
+export interface Settings { cache_enabled: boolean; cache_ttl: number; negative_cache_enabled: boolean; negative_cache_ttl: number; query_retention_days: number; database_max_size_gib: number; address_family_mode: 'dual_stack' | 'prefer_ipv4' | 'prefer_ipv6' | 'ipv4_only' | 'ipv6_only'; default_upstream_group_id: string; upstream_registry_version: number }
+export interface UpstreamGroupWrite { expected_current_version: number; group: UpstreamGroup }
+export interface VersionPrecondition { expected_current_version: number }
 export interface RuleSubscription { id: number; category: string; action: string; kind: 'url' | 'upload'; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean; rule_count: number; last_checked_at_ms: number; last_success_at_ms: number; last_error: string; created_at_ms: number; updated_at_ms: number }
 export interface RuleSubscriptionInput { category: string; action: string; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean }
 export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; processing_error_count: number; success_count: number; negative_answer_count: number; policy_block_count: number; cache_hit_count: number }
@@ -89,6 +93,11 @@ export const api = {
   upstreams: () => request<{ local: UpstreamSnapshot; remote: UpstreamSnapshot; local_ecs: ECSSnapshot; remote_ecs: ECSSnapshot }>('/upstreams'),
   updateUpstream: (group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) => request<UpstreamSnapshot>(`/upstreams/${group}`, { method: 'PUT', body: JSON.stringify(snapshot) }),
   updateECS: (group: 'local_dns' | 'remote_dns', snapshot: ECSSnapshot) => request<ECSSnapshot>(`/upstreams/${group}/ecs`, { method: 'PUT', body: JSON.stringify(snapshot) }),
+  upstreamGroups: () => request<UpstreamRegistry>('/upstream-groups'),
+  createUpstreamGroup: (input: UpstreamGroupWrite) => request<UpstreamRegistry>('/upstream-groups', { method: 'POST', body: JSON.stringify(input) }),
+  updateUpstreamGroup: (input: UpstreamGroupWrite) => request<UpstreamRegistry>(`/upstream-groups/${encodeURIComponent(input.group.id)}`, { method: 'PUT', body: JSON.stringify(input) }),
+  deleteUpstreamGroup: (id: string, input: VersionPrecondition) => request<UpstreamRegistry>(`/upstream-groups/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(input) }),
+  flushUpstreamGroup: (id: string, input: VersionPrecondition) => request<{ flushed: boolean }>(`/upstream-groups/${encodeURIComponent(id)}/cache/flush`, { method: 'POST', body: JSON.stringify(input) }),
   settings: () => request<Settings>('/settings'),
   updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   clearQueryHistory: () => request<{ cleared: boolean }>('/settings/query-history/clear', { method: 'POST', body: '{}' }),

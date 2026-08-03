@@ -12,17 +12,19 @@ import (
 )
 
 type fakeMosdns struct {
-	flushes       []string
-	flushErr      map[string]error
-	statusErr     error
-	upstreams     map[string]mosdnsclient.UpstreamSnapshot
-	cacheEnabled  bool
-	cacheTTL      int
-	negativeCache map[string]mosdnsclient.NegativeCacheSettings
-	negativeCalls []string
-	negativeErr   map[string]error
-	ecs           map[string]mosdnsclient.ECSSnapshot
-	addressFamily mosdnsclient.AddressFamilySnapshot
+	flushes          []string
+	flushErr         map[string]error
+	statusErr        error
+	upstreams        map[string]mosdnsclient.UpstreamSnapshot
+	cacheEnabled     bool
+	cacheTTL         int
+	negativeCache    map[string]mosdnsclient.NegativeCacheSettings
+	negativeCalls    []string
+	negativeErr      map[string]error
+	ecs              map[string]mosdnsclient.ECSSnapshot
+	addressFamily    mosdnsclient.AddressFamilySnapshot
+	registry         mosdnsclient.RegistrySnapshot
+	registryApplyErr error
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -94,6 +96,34 @@ func (f *fakeMosdns) ApplyECS(_ context.Context, group string, snapshot mosdnscl
 	}
 	f.ecs[group] = snapshot
 	return snapshot, nil
+}
+func (f *fakeMosdns) RegistryStatus(context.Context) (mosdnsclient.RegistrySnapshot, error) {
+	if f.registry.Version == 0 {
+		f.registry = testRegistry()
+	}
+	return cloneRegistry(f.registry), nil
+}
+func (f *fakeMosdns) ApplyRegistry(_ context.Context, snapshot mosdnsclient.RegistrySnapshot) (mosdnsclient.RegistrySnapshot, error) {
+	if f.registry.Version == 0 {
+		f.registry = testRegistry()
+	}
+	if snapshot.ExpectedCurrentVersion != f.registry.Version {
+		return mosdnsclient.RegistrySnapshot{}, mosdnsclient.ErrConflict
+	}
+	snapshot.ExpectedCurrentVersion = 0
+	f.registry = cloneRegistry(snapshot)
+	return cloneRegistry(snapshot), f.registryApplyErr
+}
+func (f *fakeMosdns) FlushRegistry(_ context.Context, group string, _ uint64) error {
+	f.flushes = append(f.flushes, group)
+	return f.flushErr[group]
+}
+
+func testRegistry() mosdnsclient.RegistrySnapshot {
+	group := func(id, name string) mosdnsclient.UpstreamGroup {
+		return mosdnsclient.UpstreamGroup{ID: id, Name: name, Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: id, Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}
+	}
+	return mosdnsclient.RegistrySnapshot{Version: 1, DefaultGroupID: "remote_dns", Groups: []mosdnsclient.UpstreamGroup{group("local_dns", "Local"), group("remote_dns", "Remote")}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
 }
 func (f *fakeMosdns) AddressFamilyStatus(context.Context) (mosdnsclient.AddressFamilySnapshot, error) {
 	if f.addressFamily.Version == 0 {
@@ -169,12 +199,12 @@ func TestDevicesUpdateAndAudit(t *testing.T) {
 }
 
 func TestFlushAttemptsBothCachesAndAuditsFailure(t *testing.T) {
-	fake := &fakeMosdns{flushErr: map[string]error{"cache_local": errors.New("local unavailable")}}
+	fake := &fakeMosdns{flushErr: map[string]error{"": errors.New("registry unavailable")}}
 	s := testService(t, fake)
 	if err := s.FlushCaches(context.Background(), 1, "req-flush", "192.0.2.10"); err == nil {
 		t.Fatal("expected flush error")
 	}
-	if len(fake.flushes) != 2 || fake.flushes[0] != "cache_local" || fake.flushes[1] != "cache_remote" {
+	if len(fake.flushes) != 1 || fake.flushes[0] != "" {
 		t.Fatalf("flushes=%v", fake.flushes)
 	}
 	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
@@ -209,7 +239,7 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 	if err != nil || updated.Version != 2 {
 		t.Fatalf("updated=%+v err=%v", updated, err)
 	}
-	if len(fake.flushes) != 1 || fake.flushes[0] != "cache_local" {
+	if len(fake.flushes) != 1 || fake.flushes[0] != "local_dns" {
 		t.Fatalf("flushes=%v", fake.flushes)
 	}
 	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
@@ -221,30 +251,28 @@ func TestUpdateUpstreamFlushesTheAffectedCacheAndAudits(t *testing.T) {
 func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheEnabled: false, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err != nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheEnabled: false, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only", DefaultUpstreamGroupID: "remote_dns", UpstreamRegistryVersion: 1}, 1, "req-settings", "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := s.Settings(context.Background())
-	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.NegativeCacheEnabled || settings.NegativeCacheTTL != 45 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || fake.cacheEnabled || fake.cacheTTL != 60 || fake.addressFamily.Mode != "ipv4_only" {
+	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.NegativeCacheEnabled || settings.NegativeCacheTTL != 45 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || settings.DefaultUpstreamGroupID != "remote_dns" || fake.addressFamily.Mode != "ipv4_only" {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
 	}
-	for _, tag := range []string{"cache_local", "cache_remote"} {
-		if got := fake.negativeCache[tag]; got.Enabled || got.TTLSeconds != 45 {
-			t.Fatalf("negative cache %s=%+v", tag, got)
-		}
+	if fake.registry.Cache.Negative.Enabled || fake.registry.Cache.Negative.TTL != 45 {
+		t.Fatalf("negative cache=%+v", fake.registry.Cache.Negative)
 	}
-	if len(fake.flushes) != 2 || fake.flushes[0] != "cache_local" || fake.flushes[1] != "cache_remote" {
+	if len(fake.flushes) != 1 || fake.flushes[0] != "" {
 		t.Fatalf("flushes=%v", fake.flushes)
 	}
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0, AddressFamilyMode: "ipv4_only"}, 1, "req-settings", "192.0.2.10"); err == nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 0, AddressFamilyMode: "ipv4_only", DefaultUpstreamGroupID: "remote_dns", UpstreamRegistryVersion: fake.registry.Version}, 1, "req-settings", "192.0.2.10"); err == nil {
 		t.Fatal("invalid database size accepted")
 	}
 }
 
 func TestUpdateSettingsPersistsAddressFamilyWhenCacheFlushFails(t *testing.T) {
-	fake := &fakeMosdns{flushErr: map[string]error{"cache_local": errors.New("cache unavailable")}}
+	fake := &fakeMosdns{flushErr: map[string]error{"": errors.New("cache unavailable")}}
 	s := testService(t, fake)
-	settings := Settings{CacheEnabled: true, CacheTTL: 0, NegativeCacheEnabled: true, NegativeCacheTTL: 30, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "ipv6_only"}
+	settings := Settings{CacheEnabled: true, CacheTTL: 0, NegativeCacheEnabled: true, NegativeCacheTTL: 30, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "ipv6_only", DefaultUpstreamGroupID: "remote_dns", UpstreamRegistryVersion: 1}
 	if err := s.UpdateSettings(context.Background(), settings, 1, "req-settings", "192.0.2.10"); err == nil {
 		t.Fatal("expected cache flush error")
 	}
@@ -253,7 +281,7 @@ func TestUpdateSettingsPersistsAddressFamilyWhenCacheFlushFails(t *testing.T) {
 		t.Fatalf("persisted=%+v runtime=%+v err=%v", persisted, fake.addressFamily, err)
 	}
 	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
-	if err != nil || len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "CACHE_FLUSH_FAILED" {
+	if err != nil || len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "SETTINGS_PARTIAL_FAILURE" {
 		t.Fatalf("audit=%+v err=%v", page.Items, err)
 	}
 }
@@ -274,43 +302,90 @@ func TestSettingsNegativeCacheDefaultsAndValidation(t *testing.T) {
 	}
 }
 
-func TestUpdateSettingsPersistsAndAuditsPartialNegativeCacheFailure(t *testing.T) {
-	fake := &fakeMosdns{negativeErr: map[string]error{"cache_local": errors.New("local unavailable")}}
+func TestUpstreamGroupCRUDProtectsStableAndBuiltinIDs(t *testing.T) {
+	fake := &fakeMosdns{}
 	s := testService(t, fake)
+	group := mosdnsclient.UpstreamGroup{ID: "office_dns", Name: "Office", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "office", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}
+	created, err := s.CreateUpstreamGroup(context.Background(), UpstreamGroupWrite{ExpectedCurrentVersion: 1, Group: group}, 1, "req-create", "192.0.2.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Groups) != 3 || created.Groups[2].ID != group.ID {
+		t.Fatalf("created=%+v", created.Groups)
+	}
+	group.ID = "renamed"
+	if _, err := s.UpdateUpstreamGroup(context.Background(), "office_dns", UpstreamGroupWrite{ExpectedCurrentVersion: 2, Group: group}, 1, "req-update", "192.0.2.10"); err == nil {
+		t.Fatal("mutable group id accepted")
+	}
+	if _, err := s.DeleteUpstreamGroup(context.Background(), "remote_dns", 2, 1, "req-delete", "192.0.2.10"); !errors.Is(err, ErrProtectedGroup) {
+		t.Fatalf("default group delete error=%v", err)
+	}
+	if _, err := s.DeleteUpstreamGroup(context.Background(), "local_dns", 2, 1, "req-delete", "192.0.2.10"); !errors.Is(err, ErrProtectedGroup) {
+		t.Fatalf("builtin group delete error=%v", err)
+	}
+	deleted, err := s.DeleteUpstreamGroup(context.Background(), "office_dns", 2, 1, "req-delete", "192.0.2.10")
+	if err != nil || len(deleted.Groups) != 2 {
+		t.Fatalf("deleted=%+v err=%v", deleted.Groups, err)
+	}
+}
+
+func TestUpstreamGroupMutationsRequireCurrentVersionAndKeepBuiltinsEnabled(t *testing.T) {
+	fake := &fakeMosdns{}
+	s := testService(t, fake)
+	group, _ := registryGroup(testRegistry(), "local_dns")
+	group.Enabled = false
+	if _, err := s.UpdateUpstreamGroup(context.Background(), group.ID, UpstreamGroupWrite{ExpectedCurrentVersion: 1, Group: group}, 1, "req-update", "192.0.2.10"); !errors.Is(err, ErrProtectedGroup) {
+		t.Fatalf("disable local_dns error=%v", err)
+	}
+	group.Enabled = true
+	if _, err := s.UpdateUpstreamGroup(context.Background(), group.ID, UpstreamGroupWrite{ExpectedCurrentVersion: 99, Group: group}, 1, "req-update", "192.0.2.10"); !errors.Is(err, mosdnsclient.ErrConflict) {
+		t.Fatalf("stale update error=%v", err)
+	}
+	if err := s.FlushUpstreamGroup(context.Background(), "local_dns", 99, 1, "req-flush", "192.0.2.10"); !errors.Is(err, mosdnsclient.ErrConflict) {
+		t.Fatalf("stale flush error=%v", err)
+	}
+	if len(fake.flushes) != 0 {
+		t.Fatalf("stale flush reached runtime: %v", fake.flushes)
+	}
+}
+
+func TestUpdateSettingsRequiresRegistryVersion(t *testing.T) {
+	s := testService(t, &fakeMosdns{})
 	settings, err := s.Settings(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings.NegativeCacheEnabled = false
-	settings.NegativeCacheTTL = 60
-	if err := s.UpdateSettings(context.Background(), settings, 1, "req-negative", "192.0.2.10"); err == nil {
-		t.Fatal("expected negative cache sync error")
-	}
-	if len(fake.negativeCalls) != 2 || fake.negativeCalls[0] != "cache_local" || fake.negativeCalls[1] != "cache_remote" {
-		t.Fatalf("negative cache calls=%v", fake.negativeCalls)
-	}
-	persisted, err := s.Settings(context.Background())
-	if err != nil || persisted.NegativeCacheEnabled || persisted.NegativeCacheTTL != 60 {
-		t.Fatalf("persisted=%+v err=%v", persisted, err)
-	}
-	page, err := s.AuditLogs(context.Background(), AuditLogQuery{Limit: 10})
-	if err != nil || len(page.Items) != 1 || page.Items[0].Result != "failed" || page.Items[0].ErrorCode != "NEGATIVE_CACHE_APPLY_FAILED" {
-		t.Fatalf("audit=%+v err=%v", page.Items, err)
+	settings.UpstreamRegistryVersion++
+	if err := s.UpdateSettings(context.Background(), settings, 1, "req-settings", "192.0.2.10"); !errors.Is(err, mosdnsclient.ErrConflict) {
+		t.Fatalf("stale settings error=%v", err)
 	}
 }
 
-func TestSyncSettingsAttemptsBothNegativeCaches(t *testing.T) {
-	fake := &fakeMosdns{negativeErr: map[string]error{"cache_local": errors.New("local unavailable")}}
+func TestSyncSettingsPreservesUnpersistedRegistryDefault(t *testing.T) {
+	fake := &fakeMosdns{}
+	fake.registry = testRegistry()
+	fake.registry.DefaultGroupID = "local_dns"
 	s := testService(t, fake)
-	if err := s.SyncSettings(context.Background()); err == nil {
-		t.Fatal("expected startup settings sync error")
+	if err := s.SyncSettings(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if len(fake.negativeCalls) != 2 || fake.negativeCalls[0] != "cache_local" || fake.negativeCalls[1] != "cache_remote" {
-		t.Fatalf("negative cache calls=%v", fake.negativeCalls)
+	settings, err := s.Settings(context.Background())
+	if err != nil || settings.DefaultUpstreamGroupID != "local_dns" {
+		t.Fatalf("settings=%+v err=%v", settings, err)
 	}
-	want := mosdnsclient.NegativeCacheSettings{Enabled: true, TTLSeconds: 30}
-	if got := fake.negativeCache["cache_remote"]; got != want {
-		t.Fatalf("remote negative cache=%+v", got)
+	var persisted string
+	if err := s.db.QueryRow(`SELECT value_json FROM system_state WHERE key='default_upstream_group_id'`).Scan(&persisted); err != nil || persisted != "local_dns" {
+		t.Fatalf("persisted=%q err=%v", persisted, err)
+	}
+}
+
+func TestRegistryUnknownOutcomeIsReconciled(t *testing.T) {
+	fake := &fakeMosdns{registryApplyErr: mosdnsclient.ErrUnknown}
+	s := testService(t, fake)
+	group := mosdnsclient.UpstreamGroup{ID: "unknown_ok", Name: "Unknown", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "test", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}
+	updated, err := s.CreateUpstreamGroup(context.Background(), UpstreamGroupWrite{ExpectedCurrentVersion: 1, Group: group}, 1, "req-unknown", "192.0.2.10")
+	if err != nil || len(updated.Groups) != 3 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
 	}
 }
 

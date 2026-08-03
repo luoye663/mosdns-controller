@@ -352,9 +352,11 @@ func (s *Service) legacySubscriptionDomains(ctx context.Context, id int64) ([]st
 }
 
 func (s *Service) flushSubscriptionRoute(ctx context.Context) error {
-	localErr := s.mosdns.Flush(ctx, "cache_local")
-	remoteErr := s.mosdns.Flush(ctx, "cache_remote")
-	return errors.Join(localErr, remoteErr)
+	registry, err := s.mosdns.RegistryStatus(ctx)
+	if err != nil {
+		return err
+	}
+	return s.mosdns.FlushRegistry(ctx, "", registry.Version)
 }
 
 func (s *Service) applySubscriptionCategory(ctx context.Context, category, action string) error {

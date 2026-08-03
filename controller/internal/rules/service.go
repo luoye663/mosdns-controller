@@ -370,10 +370,11 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 		return v, err
 	}
 	if routeChanged {
-		if err := s.mosdns.Flush(ctx, "cache_local"); err != nil {
-			return v, err
+		registry, statusErr := s.mosdns.RegistryStatus(ctx)
+		if statusErr != nil {
+			return v, statusErr
 		}
-		if err := s.mosdns.Flush(ctx, "cache_remote"); err != nil {
+		if err := s.mosdns.FlushRegistry(ctx, "", registry.Version); err != nil {
 			return v, err
 		}
 	}

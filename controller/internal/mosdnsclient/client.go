@@ -16,6 +16,7 @@ import (
 
 var ErrConflict = errors.New("mosdns snapshot version conflict")
 var ErrUnknown = errors.New("mosdns request outcome unknown")
+var ErrRejected = errors.New("mosdns rejected request")
 
 type Client interface {
 	Status(context.Context) (Status, error)
@@ -31,11 +32,52 @@ type Client interface {
 	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
 	ECSStatus(context.Context, string) (ECSSnapshot, error)
 	ApplyECS(context.Context, string, ECSSnapshot) (ECSSnapshot, error)
+	RegistryStatus(context.Context) (RegistrySnapshot, error)
+	ApplyRegistry(context.Context, RegistrySnapshot) (RegistrySnapshot, error)
+	FlushRegistry(context.Context, string, uint64) error
 	AddressFamilyStatus(context.Context) (AddressFamilySnapshot, error)
 	ApplyAddressFamily(context.Context, AddressFamilySnapshot) (AddressFamilySnapshot, error)
 	AuditStatus(context.Context) (AuditStatus, error)
 	SubscriptionStatus(context.Context, string) (DomainSetStatus, error)
 	ApplySubscription(context.Context, string, DomainSetSnapshot) (DomainSetStatus, error)
+}
+type RegistrySnapshot struct {
+	Version                uint64              `json:"version"`
+	ExpectedCurrentVersion uint64              `json:"expected_current_version"`
+	DefaultGroupID         string              `json:"default_group_id"`
+	Groups                 []UpstreamGroup     `json:"groups"`
+	Cache                  RegistryCacheConfig `json:"cache"`
+}
+type UpstreamGroup struct {
+	ID         string           `json:"id"`
+	Name       string           `json:"name"`
+	Enabled    bool             `json:"enabled"`
+	Mode       string           `json:"mode"`
+	Concurrent int              `json:"concurrent"`
+	Socks5     string           `json:"socks5,omitempty"`
+	Upstreams  []Upstream       `json:"upstreams"`
+	ECS        ECSConfig        `json:"ecs"`
+	Cache      GroupCacheConfig `json:"cache"`
+}
+type ECSConfig struct {
+	Mode    string `json:"mode"`
+	Mask4   int    `json:"mask4"`
+	Mask6   int    `json:"mask6"`
+	Preset4 string `json:"preset4,omitempty"`
+	Preset6 string `json:"preset6,omitempty"`
+}
+type GroupCacheConfig struct {
+	Enabled bool `json:"enabled"`
+	Size    int  `json:"size"`
+}
+type RegistryCacheConfig struct {
+	Enabled  bool                `json:"enabled"`
+	LazyTTL  int                 `json:"lazy_ttl"`
+	Negative NegativeCacheConfig `json:"negative"`
+}
+type NegativeCacheConfig struct {
+	Enabled bool   `json:"enabled"`
+	TTL     uint32 `json:"ttl"`
 }
 type UpstreamSnapshot struct {
 	Version                uint64     `json:"version"`
@@ -249,6 +291,60 @@ func (c *HTTPClient) ApplyECS(ctx context.Context, group string, snapshot ECSSna
 	var value ECSSnapshot
 	return value, c.request(ctx, http.MethodPut, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/snapshot", snapshot, &value)
 }
+func (c *HTTPClient) RegistryStatus(ctx context.Context) (RegistrySnapshot, error) {
+	var value RegistrySnapshot
+	err := c.request(ctx, http.MethodGet, "/plugins/dynamic_upstreams/status", nil, &value)
+	if err == nil && !validRegistrySnapshot(value, value.Version) {
+		err = errors.New("dynamic upstream registry returned an invalid snapshot")
+	}
+	return value, err
+}
+func (c *HTTPClient) ApplyRegistry(ctx context.Context, snapshot RegistrySnapshot) (RegistrySnapshot, error) {
+	var value RegistrySnapshot
+	err := c.request(ctx, http.MethodPut, "/plugins/dynamic_upstreams/snapshot", snapshot, &value)
+	if err == nil && !validRegistrySnapshot(value, snapshot.Version) {
+		err = fmt.Errorf("%w: dynamic upstream registry returned an invalid applied snapshot", ErrUnknown)
+	}
+	return value, err
+}
+func (c *HTTPClient) FlushRegistry(ctx context.Context, groupID string, expectedCurrentVersion uint64) error {
+	var value struct {
+		Flushed bool   `json:"flushed"`
+		GroupID string `json:"group_id"`
+	}
+	input := struct {
+		GroupID                string `json:"group_id"`
+		ExpectedCurrentVersion uint64 `json:"expected_current_version"`
+	}{GroupID: groupID, ExpectedCurrentVersion: expectedCurrentVersion}
+	if err := c.request(ctx, http.MethodPost, "/plugins/dynamic_upstreams/flush", input, &value); err != nil {
+		return err
+	}
+	if !value.Flushed || value.GroupID != groupID {
+		return fmt.Errorf("%w: dynamic upstream registry flush response does not match the request", ErrUnknown)
+	}
+	return nil
+}
+
+func validRegistrySnapshot(snapshot RegistrySnapshot, expectedVersion uint64) bool {
+	if snapshot.Version != expectedVersion || snapshot.Version == 0 || snapshot.ExpectedCurrentVersion != 0 || len(snapshot.Groups) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(snapshot.Groups))
+	defaultEnabled := false
+	for _, group := range snapshot.Groups {
+		if group.ID == "" {
+			return false
+		}
+		if _, exists := seen[group.ID]; exists {
+			return false
+		}
+		seen[group.ID] = struct{}{}
+		if group.ID == snapshot.DefaultGroupID {
+			defaultEnabled = group.Enabled
+		}
+	}
+	return defaultEnabled
+}
 func (c *HTTPClient) AddressFamilyStatus(ctx context.Context) (AddressFamilySnapshot, error) {
 	var value AddressFamilySnapshot
 	return value, c.request(ctx, http.MethodGet, "/plugins/address_family/status", nil, &value)
@@ -279,6 +375,13 @@ func subscriptionTag(tag string) bool {
 	return tag == "subscription_allow" || tag == "subscription_block" || tag == "subscription_local" || tag == "subscription_remote"
 }
 func (c *HTTPClient) request(ctx context.Context, method, path string, input, output any) error {
+	isWrite := (method != http.MethodGet && method != http.MethodHead) || strings.HasSuffix(path, "/flush")
+	unknown := func(err error) error {
+		if !isWrite {
+			return err
+		}
+		return fmt.Errorf("%w: %v", ErrUnknown, err)
+	}
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -297,10 +400,7 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, input, ou
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return ErrUnknown
-		}
-		return err
+		return unknown(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusConflict {
@@ -308,15 +408,27 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, input, ou
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("mosdns API %s %s: %s: %s", method, path, resp.Status, responseSummary(body))
+		err := fmt.Errorf("mosdns API %s %s: %s: %s", method, path, resp.Status, responseSummary(body))
+		if isWrite && (resp.StatusCode < 400 || resp.StatusCode >= 500) {
+			return unknown(err)
+		}
+		if isWrite {
+			return fmt.Errorf("%w: %v", ErrRejected, err)
+		}
+		return err
 	}
 	if output != nil {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err != nil {
-			return fmt.Errorf("read mosdns API %s %s: %w", method, path, err)
+			return unknown(fmt.Errorf("read mosdns API %s %s: %w", method, path, err))
 		}
-		if err := json.Unmarshal(body, output); err != nil {
-			return fmt.Errorf("mosdns API %s %s returned non-JSON data; the required plugin endpoint may be unavailable: %s", method, path, responseSummary(body))
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(output); err != nil {
+			return unknown(fmt.Errorf("mosdns API %s %s returned non-JSON data; the required plugin endpoint may be unavailable: %s", method, path, responseSummary(body)))
+		}
+		if decoder.Decode(&struct{}{}) != io.EOF {
+			return unknown(fmt.Errorf("mosdns API %s %s returned trailing JSON data", method, path))
 		}
 	}
 	return nil

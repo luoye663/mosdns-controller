@@ -43,10 +43,10 @@ function renderCharts() {
   }, true)
   distributionChart.setOption({
     animationDuration: 250,
-    color: ['#087e8b', '#e7793c', '#d15252'],
+    color: ['#087e8b', '#e7793c', '#4f6fad', '#d15252'],
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
     legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12 } },
-    series: [{ type: 'pie', radius: ['48%', '72%'], center: ['50%', '44%'], label: { show: false }, data: [{ name: '本地', value: routeCount('local') }, { name: '远程', value: routeCount('remote') }, { name: '拦截', value: routeCount('block') }] }],
+    series: [{ type: 'pie', radius: ['48%', '72%'], center: ['50%', '44%'], label: { show: false }, data: [{ name: '动态上游', value: routeCount('forward') }, { name: '本地', value: routeCount('local') }, { name: '远程', value: routeCount('remote') }, { name: '拦截', value: routeCount('block') }] }],
   }, true)
 }
 async function load() {
@@ -95,7 +95,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
 
       <div class="dashboard-grid dashboard-primary">
         <section class="chart-panel wide"><header><div><h2>查询与延迟趋势</h2><p>最近 24 小时，按小时聚合</p></div></header><div ref="trendElement" class="chart-canvas"></div></section>
-        <section class="chart-panel"><header><div><h2>路由分布</h2><p>local / remote / block</p></div></header><div ref="distributionElement" class="chart-canvas"></div></section>
+        <section class="chart-panel"><header><div><h2>路由分布</h2><p>动态组与历史 local / remote / block</p></div></header><div ref="distributionElement" class="chart-canvas"></div></section>
       </div>
 
       <div class="dashboard-grid dashboard-secondary">

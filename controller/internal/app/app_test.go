@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
@@ -40,15 +41,18 @@ func testAppWithClient(t *testing.T, client mosdnsclient.Client) *App {
 	return application
 }
 
-func TestSettingsAPIIncludesAndUpdatesNegativeCache(t *testing.T) {
+func TestSettingsAPIUsesRegistrySnapshot(t *testing.T) {
 	var tags []string
+	registry := mosdnsclient.RegistrySnapshot{Version: 1, DefaultGroupID: "remote_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "remote_dns", Name: "Remote", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "remote", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tags = append(tags, r.URL.Path)
-		var settings mosdnsclient.NegativeCacheSettings
-		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
-			t.Errorf("decode negative cache request: %v", err)
+		if r.Method == http.MethodPut {
+			if err := json.NewDecoder(r.Body).Decode(&registry); err != nil {
+				t.Errorf("decode registry request: %v", err)
+			}
+			registry.ExpectedCurrentVersion = 0
 		}
-		_ = json.NewEncoder(w).Encode(settings)
+		_ = json.NewEncoder(w).Encode(registry)
 	}))
 	defer server.Close()
 	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
@@ -62,7 +66,7 @@ func TestSettingsAPIIncludesAndUpdatesNegativeCache(t *testing.T) {
 		t.Fatalf("get settings=%d: %s", getRec.Code, getRec.Body.String())
 	}
 
-	body := `{"cache_enabled":true,"cache_ttl":0,"negative_cache_enabled":false,"negative_cache_ttl":60,"query_retention_days":7,"database_max_size_gib":2,"address_family_mode":"dual_stack"}`
+	body := `{"cache_enabled":true,"cache_ttl":0,"negative_cache_enabled":false,"negative_cache_ttl":60,"query_retention_days":7,"database_max_size_gib":2,"address_family_mode":"dual_stack","default_upstream_group_id":"remote_dns","upstream_registry_version":1}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewBufferString(body))
 	req = req.WithContext(context.WithValue(req.Context(), adminKey, auth.Admin{ID: 1, Username: "admin"}))
 	rec := httptest.NewRecorder()
@@ -70,9 +74,47 @@ func TestSettingsAPIIncludesAndUpdatesNegativeCache(t *testing.T) {
 	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_enabled":false`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_ttl":60`)) {
 		t.Fatalf("update settings=%d: %s", rec.Code, rec.Body.String())
 	}
-	want := []string{"/plugins/cache_local/negative-cache", "/plugins/cache_remote/negative-cache"}
+	want := []string{"/plugins/dynamic_upstreams/status", "/plugins/dynamic_upstreams/status", "/plugins/dynamic_upstreams/snapshot", "/plugins/dynamic_upstreams/status"}
 	if len(tags) != len(want) || tags[0] != want[0] || tags[1] != want[1] {
 		t.Fatalf("negative cache paths=%v", tags)
+	}
+}
+
+func TestUpstreamGroupAPIMapsVersionConflictAndUnknownOutcome(t *testing.T) {
+	registry := mosdnsclient.RegistrySnapshot{Version: 1, DefaultGroupID: "remote_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "remote_dns", Name: "Remote", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "remote", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
+	puts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(registry)
+	}))
+	defer server.Close()
+	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
+	if _, err := application.store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'admin','x',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	group := registry.Groups[0]
+	group.Name = "Changed"
+	request := func(version uint64) *http.Request {
+		body, _ := json.Marshal(map[string]any{"expected_current_version": version, "group": group})
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/upstream-groups/remote_dns", bytes.NewReader(body))
+		route := chi.NewRouteContext()
+		route.URLParams.Add("id", "remote_dns")
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, route)
+		return req.WithContext(context.WithValue(ctx, adminKey, auth.Admin{ID: 1, Username: "admin"}))
+	}
+	conflict := httptest.NewRecorder()
+	application.updateUpstreamGroup(conflict, request(99))
+	if conflict.Code != http.StatusConflict || puts != 0 {
+		t.Fatalf("conflict status=%d puts=%d body=%s", conflict.Code, puts, conflict.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	application.updateUpstreamGroup(unknown, request(1))
+	if unknown.Code != http.StatusBadGateway || puts != 1 {
+		t.Fatalf("unknown status=%d puts=%d body=%s", unknown.Code, puts, unknown.Body.String())
 	}
 }
 func TestHealthEndpoints(t *testing.T) {

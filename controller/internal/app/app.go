@@ -103,6 +103,11 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Get("/upstreams", a.upstreams)
 			protected.Put("/upstreams/{group}", a.requireCSRF(a.updateUpstream))
 			protected.Put("/upstreams/{group}/ecs", a.requireCSRF(a.updateECS))
+			protected.Get("/upstream-groups", a.upstreamGroups)
+			protected.Post("/upstream-groups", a.requireCSRF(a.createUpstreamGroup))
+			protected.Put("/upstream-groups/{id}", a.requireCSRF(a.updateUpstreamGroup))
+			protected.Delete("/upstream-groups/{id}", a.requireCSRF(a.deleteUpstreamGroup))
+			protected.Post("/upstream-groups/{id}/cache/flush", a.requireCSRF(a.flushUpstreamGroup))
 			protected.Get("/settings", a.settings)
 			protected.Put("/settings", a.requireCSRF(a.updateSettings))
 			protected.Post("/settings/query-history/clear", a.requireCSRF(a.clearQueryHistory))
@@ -622,8 +627,20 @@ func (a *App) updateUpstream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream configuration changed; refresh and retry")
 		return
 	}
-	if err != nil {
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "upstream update outcome could not be reconciled")
+		return
+	}
+	if errors.Is(err, operations.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "upstream group not found")
+		return
+	}
+	if errors.Is(err, operations.ErrValidation) || errors.Is(err, mosdnsclient.ErrRejected) {
 		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "upstream runtime configuration is unavailable")
 		return
 	}
 	writeData(w, r, 200, updated)
@@ -639,16 +656,103 @@ func (a *App) updateECS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "ECS configuration changed; refresh and retry")
 		return
 	}
-	if err != nil {
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "ECS update outcome could not be reconciled")
+		return
+	}
+	if errors.Is(err, operations.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "upstream group not found")
+		return
+	}
+	if errors.Is(err, operations.ErrValidation) || errors.Is(err, mosdnsclient.ErrRejected) {
 		writeError(w, r, 400, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "ECS runtime configuration is unavailable")
 		return
 	}
 	writeData(w, r, 200, updated)
 }
+func (a *App) upstreamGroups(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := a.ops.UpstreamGroups(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "upstream registry runtime configuration is unavailable")
+		return
+	}
+	writeData(w, r, http.StatusOK, snapshot)
+}
+func (a *App) createUpstreamGroup(w http.ResponseWriter, r *http.Request) {
+	var input operations.UpstreamGroupWrite
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	a.writeUpstreamGroupMutation(w, r, http.StatusCreated, func(admin auth.Admin) (mosdnsclient.RegistrySnapshot, error) {
+		return a.ops.CreateUpstreamGroup(r.Context(), input, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) updateUpstreamGroup(w http.ResponseWriter, r *http.Request) {
+	var input operations.UpstreamGroupWrite
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	a.writeUpstreamGroupMutation(w, r, http.StatusOK, func(admin auth.Admin) (mosdnsclient.RegistrySnapshot, error) {
+		return a.ops.UpdateUpstreamGroup(r.Context(), chi.URLParam(r, "id"), input, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) deleteUpstreamGroup(w http.ResponseWriter, r *http.Request) {
+	var input operations.VersionPrecondition
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	a.writeUpstreamGroupMutation(w, r, http.StatusOK, func(admin auth.Admin) (mosdnsclient.RegistrySnapshot, error) {
+		return a.ops.DeleteUpstreamGroup(r.Context(), chi.URLParam(r, "id"), input.ExpectedCurrentVersion, admin.ID, requestID(r), remoteIP(r))
+	})
+}
+func (a *App) writeUpstreamGroupMutation(w http.ResponseWriter, r *http.Request, status int, operation func(auth.Admin) (mosdnsclient.RegistrySnapshot, error)) {
+	value, err := operation(r.Context().Value(adminKey).(auth.Admin))
+	switch {
+	case errors.Is(err, mosdnsclient.ErrConflict):
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream registry changed; refresh and retry")
+	case errors.Is(err, operations.ErrNotFound):
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "upstream group not found")
+	case errors.Is(err, operations.ErrProtectedGroup), errors.Is(err, operations.ErrGroupReferenced):
+		writeError(w, r, http.StatusConflict, "UPSTREAM_GROUP_PROTECTED", err.Error())
+	case errors.Is(err, mosdnsclient.ErrUnknown):
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "upstream registry update outcome could not be reconciled")
+	case errors.Is(err, operations.ErrValidation), errors.Is(err, mosdnsclient.ErrRejected):
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+	case err != nil:
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "upstream registry runtime configuration is unavailable")
+	default:
+		writeData(w, r, status, value)
+	}
+}
+func (a *App) flushUpstreamGroup(w http.ResponseWriter, r *http.Request) {
+	var input operations.VersionPrecondition
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	admin := r.Context().Value(adminKey).(auth.Admin)
+	err := a.ops.FlushUpstreamGroup(r.Context(), chi.URLParam(r, "id"), input.ExpectedCurrentVersion, admin.ID, requestID(r), remoteIP(r))
+	if errors.Is(err, mosdnsclient.ErrConflict) {
+		writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream registry changed; refresh and retry")
+		return
+	}
+	if errors.Is(err, operations.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "upstream group not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "cache flush failed")
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string]bool{"flushed": true})
+}
 func (a *App) settings(w http.ResponseWriter, r *http.Request) {
 	settings, err := a.ops.Settings(r.Context())
 	if err != nil {
-		writeError(w, r, 500, "INTERNAL_ERROR", "read settings failed")
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "read settings failed")
 		return
 	}
 	writeData(w, r, 200, settings)
@@ -660,10 +764,19 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	admin := r.Context().Value(adminKey).(auth.Admin)
 	if err := a.ops.UpdateSettings(r.Context(), settings, admin.ID, requestID(r), remoteIP(r)); err != nil {
+		if errors.Is(err, mosdnsclient.ErrConflict) {
+			writeError(w, r, http.StatusConflict, "VERSION_CONFLICT", "upstream registry changed; refresh and retry")
+			return
+		}
 		writeError(w, r, 502, "SETTINGS_APPLY_FAILED", err.Error())
 		return
 	}
-	writeData(w, r, 200, settings)
+	applied, err := a.ops.Settings(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "SETTINGS_APPLY_FAILED", "settings were applied but could not be read back")
+		return
+	}
+	writeData(w, r, 200, applied)
 }
 func (a *App) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	items, err := a.rules.Subscriptions(r.Context(), r.URL.Query().Get("category"), r.URL.Query().Get("action"))

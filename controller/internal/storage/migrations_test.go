@@ -21,8 +21,18 @@ func TestMigrateFromEmptyDatabase(t *testing.T) {
 	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='admins'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("admins table count=%d err=%v", count, err)
 	}
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='upstream_groups'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("upstream groups must remain registry-owned: count=%d err=%v", count, err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO system_state(key,value_json,updated_at_ms) VALUES('default_upstream_group_id','office_dns',1)`); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("repeat migration: %v", err)
+	}
+	var defaultGroup string
+	if err := store.DB().QueryRow(`SELECT value_json FROM system_state WHERE key='default_upstream_group_id'`).Scan(&defaultGroup); err != nil || defaultGroup != "office_dns" {
+		t.Fatalf("default group state=%q err=%v", defaultGroup, err)
 	}
 }
 
