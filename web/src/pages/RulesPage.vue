@@ -23,10 +23,10 @@ const draft = reactive({ category: 'access', action: 'block', match_type: 'domai
 const sourceDraft = reactive({ url: '', refresh_minutes: 1440, upstream_group_id: '', priority: 100 })
 const bindingDraft = reactive({ upstream_group_id: '', priority: 100 })
 const tabs = [
-  { key: 'allow', label: '白名单', category: 'access', action: 'allow' },
-  { key: 'block', label: '黑名单', category: 'access', action: 'block' },
-  { key: 'route', label: '路由规则', category: 'route', action: '' },
-  { key: 'no_log', label: '不记录', category: 'logging', action: 'no_log' },
+  { key: 'allow', label: '白名单', category: 'access', action: 'allow', description: '作为黑名单的放行例外，适合处理订阅误拦截；未命中黑名单时不会改变正常解析结果。' },
+  { key: 'block', label: '黑名单', category: 'access', action: 'block', description: '拦截匹配域名并返回 NXDOMAIN。规则在缓存前生效，新增拦截无需等待已有缓存过期。' },
+  { key: 'route', label: '路由规则', category: 'route', action: '', description: '将匹配域名交给指定解析线路或上游组。手工路由优先于订阅源绑定。' },
+  { key: 'no_log', label: '不记录', category: 'logging', action: 'no_log', description: '匹配域名仍会正常解析，但不会写入查询日志，也不会进入基于查询日志生成的统计。' },
 ]
 const selected = computed(() => tabs.find((tab) => tab.key === active.value) ?? tabs[1]!)
 const visibleRules = computed(() => rules.value.filter((rule) => rule.category === selected.value.category && (!selected.value.action || rule.action === selected.value.action)))
@@ -96,7 +96,7 @@ onMounted(load)
   <section class="page">
     <header class="page-heading"><div><p class="eyebrow">动态策略</p><h1>规则管理</h1></div></header>
     <nav class="rule-tabs"><button v-for="tab in tabs" :key="tab.key" :class="{ active: active === tab.key }" @click="selectTab(tab.key)">{{ tab.label }} <small>{{ tabRuleCount(tab.category, tab.action).toLocaleString() }}</small></button></nav>
-    <div v-if="supportsSubscriptions" class="rule-context"><nav class="rule-view-tabs" aria-label="规则来源"><button :class="{ active: ruleView === 'manual' }" @click="ruleView = 'manual'">手工规则 <small>{{ visibleRules.length }}</small></button><button :class="{ active: ruleView === 'subscription' }" @click="ruleView = 'subscription'">订阅源 <small>{{ visibleSubscriptions.length }}</small></button></nav></div>
+    <div class="rule-context" :class="{ 'description-only': !supportsSubscriptions }"><p class="rule-description">{{ selected.description }}</p><nav v-if="supportsSubscriptions" class="rule-view-tabs" aria-label="规则来源"><button :class="{ active: ruleView === 'manual' }" @click="ruleView = 'manual'">手工规则 <small>{{ visibleRules.length }}</small></button><button :class="{ active: ruleView === 'subscription' }" @click="ruleView = 'subscription'">订阅源 <small>{{ visibleSubscriptions.length }}</small></button></nav></div>
     <section v-if="!supportsSubscriptions || ruleView === 'manual'" class="manual-rules">
       <header class="rule-section-heading"><div><p class="eyebrow">{{ selected.label }}</p><h2>手工规则</h2></div><NButton size="small" type="primary" @click="openCreate">添加规则</NButton></header>
       <div class="table-wrap"><table><thead><tr><th>ID</th><th>域名</th><th v-if="selected.category === 'route'">线路</th><th>匹配</th><th>优先级</th><th>备注</th><th>启用</th><th></th></tr></thead><tbody><tr v-for="rule in visibleRules" :key="rule.id"><td>{{ rule.id }}</td><td class="mono">{{ rule.pattern }}</td><td v-if="selected.category === 'route'">{{ rule.action === 'local' ? '本地' : '远程' }}</td><td>{{ rule.match_type }}</td><td>{{ rule.priority }}</td><td>{{ rule.comment || '-' }}</td><td><NSwitch :value="rule.enabled" @update:value="switchRule(rule, $event)" /></td><td class="actions"><NButton size="small" @click="openEdit(rule)">编辑</NButton><NButton size="small" type="error" secondary @click="remove(rule)">删除</NButton></td></tr><tr v-if="!loading && !visibleRules.length"><td :colspan="selected.category === 'route' ? 8 : 7" class="empty-cell">暂无手工规则</td></tr></tbody></table></div>

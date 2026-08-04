@@ -22,19 +22,20 @@ onMounted(load)
       <div><p class="eyebrow">系统配置</p><h1>设置</h1></div>
       <NButton :loading="loading" @click="load">刷新</NButton>
     </header>
-    <div class="settings-grid"><NCard title="DNS 解析" size="small" class="settings-card">
-      <NFormItem label="默认上游组"><NSelect v-model:value="settings.default_upstream_group_id" :options="groups.filter((group) => group.enabled).map((group) => ({ label: `${group.name} (${group.id})`, value: group.id }))" /></NFormItem>
-      <NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem><NFormItem label="缓存 TTL（秒）"><NInputNumber v-model:value="settings.cache_ttl" :min="0" :max="604800" /></NFormItem><p class="field-hint">0 表示不延长缓存，响应有效期完全遵循上游 DNS 的 TTL。</p>
-      <NFormItem label="否定缓存"><NSwitch v-model:value="settings.negative_cache_enabled" /></NFormItem><NFormItem label="否定缓存 TTL（秒）"><NInputNumber v-model:value="settings.negative_cache_ttl" :min="1" :max="86400" :disabled="!settings.negative_cache_enabled" /></NFormItem>
-      <NFormItem label="地址族策略"><NSelect v-model:value="settings.address_family_mode" :options="[{ label: '双栈', value: 'dual_stack' }, { label: '优先 IPv4', value: 'prefer_ipv4' }, { label: '优先 IPv6', value: 'prefer_ipv6' }, { label: '仅 IPv4', value: 'ipv4_only' }, { label: '仅 IPv6', value: 'ipv6_only' }]" /></NFormItem><p class="field-hint">优先模式会在首选地址存在时隐藏另一种地址；仅限模式会直接返回被禁用地址族的空响应。</p>
+    <div class="settings-grid"><NCard title="DNS 解析" size="small" class="settings-card"><div class="settings-fields">
+      <div class="setting-field"><NFormItem label="默认上游组"><NSelect v-model:value="settings.default_upstream_group_id" :options="groups.filter((group) => group.enabled).map((group) => ({ label: `${group.name} (${group.id})`, value: group.id }))" /></NFormItem><p class="field-hint">查询未命中手工路由或订阅绑定时，使用该上游组完成解析。</p></div>
+      <div class="setting-field"><NFormItem label="启用缓存"><NSwitch v-model:value="settings.cache_enabled" /></NFormItem><p class="field-hint">统一控制所有上游组是否复用已取得的 DNS 响应；关闭后每次查询都会访问上游。</p></div>
+      <div class="setting-field"><NFormItem label="缓存 TTL（秒）"><NInputNumber v-model:value="settings.cache_ttl" :min="0" :max="604800" /></NFormItem><p class="field-hint">0 表示不保留过期响应，完全遵循上游 TTL；大于 0 时可在刷新期间短暂复用过期响应。</p></div>
+      <div class="setting-field"><NFormItem label="否定缓存"><NSwitch v-model:value="settings.negative_cache_enabled" /></NFormItem><p class="field-hint">缓存上游返回的“域名不存在”或“无对应记录”结果；不会缓存超时、SERVFAIL 或黑名单拦截。</p></div>
+      <div class="setting-field"><NFormItem label="否定响应缓存上限（秒）"><NInputNumber v-model:value="settings.negative_cache_ttl" :min="1" :max="86400" :disabled="!settings.negative_cache_enabled" /></NFormItem><p class="field-hint">存在 SOA 时取该值与权威 TTL 的较小值；响应没有 SOA 时使用该值。</p></div>
+      <div class="setting-field"><NFormItem label="地址族策略"><NSelect v-model:value="settings.address_family_mode" :options="[{ label: '双栈', value: 'dual_stack' }, { label: '优先 IPv4', value: 'prefer_ipv4' }, { label: '优先 IPv6', value: 'prefer_ipv6' }, { label: '仅 IPv4', value: 'ipv4_only' }, { label: '仅 IPv6', value: 'ipv6_only' }]" /></NFormItem><p class="field-hint">优先模式会在首选地址存在时隐藏另一种地址；仅限模式会直接返回被禁用地址族的空响应。</p></div>
       <NAlert v-if="settings.address_family_mode === 'prefer_ipv4' || settings.address_family_mode === 'prefer_ipv6'" type="warning" :show-icon="false">优先模式会为非首选地址查询补发首选地址查询；缓存未命中时，上游查询 QPS 最高可能接近原来的两倍。</NAlert>
-    </NCard>
-    <NCard title="查询日志" size="small" class="settings-card">
-      <NFormItem label="保留天数"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem>
-      <NFormItem label="数据库上限（GiB）"><NInputNumber v-model:value="settings.database_max_size_gib" :min="1" :max="128" /></NFormItem>
-      <NAlert type="info" :show-icon="false">查询日志按保留天数滚动删除。数据库主文件与 WAL 合计达到所设上限的 90% 时，也会优先清理最旧的原始查询记录。默认上限为 2 GiB。管理员审计、规则和设备资料不会被自动清除。</NAlert>
+    </div></NCard>
+    <NCard title="查询日志" size="small" class="settings-card"><div class="settings-fields">
+      <div class="setting-field"><NFormItem label="保留天数"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem><p class="field-hint">超过该天数的查询明细会滚动删除，相关查询统计也不再包含这些记录。</p></div>
+      <div class="setting-field"><NFormItem label="数据库上限（GiB）"><NInputNumber v-model:value="settings.database_max_size_gib" :min="1" :max="128" /></NFormItem><p class="field-hint">主文件与 WAL 合计达到上限的 90% 时优先清理最旧查询；管理员审计、规则和设备资料不会被自动清除。</p></div>
       <div class="inline-controls settings-save-action"><NButton type="primary" :loading="saving" @click="save">保存设置</NButton><NButton type="error" secondary :loading="clearing" @click="showClearConfirmation = true">清空日志</NButton></div>
-    </NCard></div>
+    </div></NCard></div>
     <NModal v-model:show="showClearConfirmation" preset="card" title="清空查询日志" class="rule-modal"><NAlert type="warning">此操作会删除全部 DNS 查询明细和统计聚合，无法恢复。管理员审计、规则和设备资料不会删除；新的查询仍会继续写入。</NAlert><div class="modal-actions"><NButton :disabled="clearing" @click="showClearConfirmation = false">取消</NButton><NButton type="error" :loading="clearing" @click="clearQueryHistory">确认清空</NButton></div></NModal>
   </section>
 </template>
