@@ -311,6 +311,8 @@ func TestErrorMessagesAreChinese(t *testing.T) {
 	}{
 		{"AUTH_REQUIRED", "authentication required", "需要登录"},
 		{"VALIDATION_ERROR", "regexp exceeds 512 bytes", "正则表达式不能超过 512 字节"},
+		{"VALIDATION_ERROR", "mosdns rejected request: group remote_dns forward: upstream 1 address must be a valid [protocol://]host[:port][/path]", "上游地址格式无效，请输入 IP、主机名或带协议的完整地址"},
+		{"VALIDATION_ERROR", "mosdns rejected request: group remote_dns forward: upstream 1 uses an unsupported scheme", "上游地址协议不受支持，请使用 udp、tcp、tls、https 或 quic"},
 		{"MOSDNS_UNAVAILABLE", "mosdns API GET /plugins/status: 503 Service Unavailable", "mosdns 服务不可用"},
 	}
 	for _, test := range tests {

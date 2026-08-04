@@ -1200,6 +1200,14 @@ func chineseErrorMessage(code, message string) string {
 	}[message]; ok {
 		return localized
 	}
+	if code == "VALIDATION_ERROR" {
+		switch {
+		case strings.Contains(message, "address must be a valid"):
+			return "上游地址格式无效，请输入 IP、主机名或带协议的完整地址"
+		case strings.Contains(message, "uses an unsupported scheme"):
+			return "上游地址协议不受支持，请使用 udp、tcp、tls、https 或 quic"
+		}
+	}
 
 	switch code {
 	case "VALIDATION_ERROR":
