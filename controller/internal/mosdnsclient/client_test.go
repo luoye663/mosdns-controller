@@ -11,7 +11,7 @@ import (
 )
 
 func registrySnapshot(version uint64) RegistrySnapshot {
-	return RegistrySnapshot{Version: version, DefaultGroupID: "remote_dns", Groups: []UpstreamGroup{{ID: "remote_dns", Name: "Remote", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []Upstream{{Tag: "remote", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: RegistryCacheConfig{Enabled: true, Negative: NegativeCacheConfig{Enabled: true, TTL: 30}}}
+	return RegistrySnapshot{SchemaVersion: 1, Version: version, DefaultGroupID: "default_dns", Groups: []UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []Upstream{{Tag: "default", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: RegistryCacheConfig{Enabled: true, Negative: NegativeCacheConfig{Enabled: true, TTL: 30}}}
 }
 
 func TestRegistryEndpointsAndStrictConsistency(t *testing.T) {
@@ -54,7 +54,7 @@ func TestRegistryEndpointsAndStrictConsistency(t *testing.T) {
 	if applied, err := client.ApplyRegistry(context.Background(), next); err != nil || applied.Version != 2 {
 		t.Fatalf("applied=%+v err=%v", applied, err)
 	}
-	if err := client.FlushRegistry(context.Background(), "remote_dns", 2); err != nil {
+	if err := client.FlushRegistry(context.Background(), "office_dns", 2); err != nil {
 		t.Fatal(err)
 	}
 }

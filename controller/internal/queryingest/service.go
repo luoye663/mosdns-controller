@@ -78,14 +78,14 @@ type Batch struct {
 }
 
 type Query struct {
-	Limit                                          int
-	FromMS, ToMS                                   int64
-	QType                                          int
-	RCode                                          *int
-	CacheHit, HasError                             *bool
-	Cursor, ClientIP, Route, QName                 string
-	QNameMatch, RouteSource, UpstreamTag, Protocol string
-	ResultClass                                    string
+	Limit                                                         int
+	FromMS, ToMS                                                  int64
+	QType                                                         int
+	RCode                                                         *int
+	CacheHit, HasError                                            *bool
+	Cursor, ClientIP, Route, QName                                string
+	QNameMatch, RouteSource, UpstreamGroup, UpstreamTag, Protocol string
+	ResultClass                                                   string
 }
 type Page struct {
 	Items      []StoredEvent `json:"items"`
@@ -240,7 +240,7 @@ func (s *Service) Enqueue(batch Batch) error {
 var ErrOverloaded = errors.New("ingestion queue is full")
 
 func validateBatch(batch Batch) error {
-	if batch.SchemaVersion != 1 || len(batch.SenderID) == 0 || len(batch.SenderID) > 128 || batch.SentAtMS <= 0 || len(batch.Events) == 0 || len(batch.Events) > maxBatchEvents {
+	if batch.SchemaVersion != 2 || len(batch.SenderID) == 0 || len(batch.SenderID) > 128 || batch.SentAtMS <= 0 || len(batch.Events) == 0 || len(batch.Events) > maxBatchEvents {
 		return errors.New("invalid event batch")
 	}
 	for _, e := range batch.Events {
@@ -251,7 +251,7 @@ func validateBatch(batch Batch) error {
 	return nil
 }
 func validateEvent(e Event) error {
-	if e.SchemaVersion != 1 || len(e.EventID) == 0 || len(e.EventID) > 128 || e.TimestampMS <= 0 {
+	if e.SchemaVersion != 2 || len(e.EventID) == 0 || len(e.EventID) > 128 || e.TimestampMS <= 0 {
 		return errors.New("invalid event")
 	}
 	if _, err := netip.ParseAddr(e.ClientIP); err != nil || len(e.QName) == 0 || len(e.QName) > 253 || strings.ToLower(strings.TrimSuffix(e.QName, ".")) != e.QName {
@@ -260,7 +260,7 @@ func validateEvent(e Event) error {
 	if e.QType == 0 || e.QClass == 0 || e.RCode < 0 || e.RCode > 23 || e.LatencyUS < 0 || e.AnswerCount < 0 || e.SubscriptionBindingID < 0 || (e.AnswerMinTTLSeconds != nil && (*e.AnswerMinTTLSeconds < 0 || *e.AnswerMinTTLSeconds > 1<<32-1)) || e.Snapshot > uint64(^uint64(0)>>1) {
 		return errors.New("invalid event values")
 	}
-	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "local" && e.Route != "remote" && e.Route != "forward" && e.Route != "block") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule" && e.RouteSource != "subscription") {
+	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "forward" && e.Route != "block") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule" && e.RouteSource != "subscription") {
 		return errors.New("invalid event route")
 	}
 	for _, field := range []struct {
@@ -401,6 +401,12 @@ func (s *Service) aggregate(tx *sql.Tx, e Event, now int64) error {
 		{`INSERT INTO dns_stats_hourly_domain VALUES(?,?,?,?,?,?,?) ON CONFLICT(hour_start_ms,qname,route) DO UPDATE SET query_count=query_count+1,error_count=error_count+excluded.error_count,cache_hit_count=cache_hit_count+excluded.cache_hit_count,latency_sum_us=latency_sum_us+excluded.latency_sum_us`, []any{hour, e.QName, e.Route, 1, errCount, hit, e.LatencyUS}},
 		{`INSERT INTO dns_stats_hourly_client VALUES(?,?,?,?,?,?,?) ON CONFLICT(hour_start_ms,client_ip,route) DO UPDATE SET query_count=query_count+1,error_count=error_count+excluded.error_count,cache_hit_count=cache_hit_count+excluded.cache_hit_count,latency_sum_us=latency_sum_us+excluded.latency_sum_us`, []any{hour, e.ClientIP, e.Route, 1, errCount, hit, e.LatencyUS}},
 		{`INSERT INTO dns_stats_hourly_client_domain VALUES(?,?,?,?,?) ON CONFLICT(hour_start_ms,client_ip,qname,route) DO UPDATE SET query_count=query_count+1`, []any{hour, e.ClientIP, e.QName, e.Route, 1}}}
+	if e.UpstreamGroup != "" {
+		statements = append(statements, struct {
+			q string
+			a []any
+		}{`INSERT INTO dns_stats_hourly_upstream_group(hour_start_ms,upstream_group_id,query_count,error_count,cache_hit_count,latency_sum_us,latency_max_us) VALUES(?,?,1,?,?,?,?) ON CONFLICT(hour_start_ms,upstream_group_id) DO UPDATE SET query_count=query_count+1,error_count=error_count+excluded.error_count,cache_hit_count=cache_hit_count+excluded.cache_hit_count,latency_sum_us=latency_sum_us+excluded.latency_sum_us,latency_max_us=MAX(latency_max_us,excluded.latency_max_us)`, []any{hour, e.UpstreamGroup, errCount, hit, e.LatencyUS, e.LatencyUS}})
+	}
 	for _, st := range statements {
 		if _, err := tx.Exec(st.q, st.a...); err != nil {
 			return err
@@ -557,7 +563,7 @@ func queryConditions(q Query) ([]string, []any, error) {
 			return nil, nil, errors.New("invalid client_ip")
 		}
 	}
-	if q.Route != "" && q.Route != "local" && q.Route != "remote" && q.Route != "forward" && q.Route != "block" {
+	if q.Route != "" && q.Route != "forward" && q.Route != "block" {
 		return nil, nil, errors.New("invalid route")
 	}
 	if q.QNameMatch != "" && q.QNameMatch != "exact" && q.QNameMatch != "contains" {
@@ -598,6 +604,9 @@ func queryConditions(q Query) ([]string, []any, error) {
 	if q.UpstreamTag != "" {
 		add("q.upstream_tag=?", q.UpstreamTag)
 	}
+	if q.UpstreamGroup != "" {
+		add("q.upstream_group=?", q.UpstreamGroup)
+	}
 	if q.Protocol != "" {
 		add("q.protocol=?", q.Protocol)
 	}
@@ -635,7 +644,7 @@ func escapeLike(value string) string {
 }
 
 func queryMatches(event StoredEvent, q Query) bool {
-	if q.FromMS != 0 && event.TimestampMS < q.FromMS || q.ToMS != 0 && event.TimestampMS > q.ToMS || q.ClientIP != "" && event.ClientIP != q.ClientIP || q.Route != "" && event.Route != q.Route || q.RouteSource != "" && event.RouteSource != q.RouteSource || q.UpstreamTag != "" && event.UpstreamTag != q.UpstreamTag || q.Protocol != "" && event.Protocol != q.Protocol || q.QType != 0 && event.QType != q.QType || q.RCode != nil && event.RCode != *q.RCode || q.CacheHit != nil && event.CacheHit != *q.CacheHit {
+	if q.FromMS != 0 && event.TimestampMS < q.FromMS || q.ToMS != 0 && event.TimestampMS > q.ToMS || q.ClientIP != "" && event.ClientIP != q.ClientIP || q.Route != "" && event.Route != q.Route || q.RouteSource != "" && event.RouteSource != q.RouteSource || q.UpstreamGroup != "" && event.UpstreamGroup != q.UpstreamGroup || q.UpstreamTag != "" && event.UpstreamTag != q.UpstreamTag || q.Protocol != "" && event.Protocol != q.Protocol || q.QType != 0 && event.QType != q.QType || q.RCode != nil && event.RCode != *q.RCode || q.CacheHit != nil && event.CacheHit != *q.CacheHit {
 		return false
 	}
 	if q.HasError != nil && (event.ResultClass == "processing_error") != *q.HasError {
@@ -739,6 +748,8 @@ func (s *Service) Top(ctx context.Context, kind string, limit int) ([]map[string
 		table, column = "dns_stats_hourly_global", "route"
 	case "rcode":
 		table, column = "dns_stats_hourly_global", "rcode"
+	case "upstream_groups":
+		table, column = "dns_stats_hourly_upstream_group", "upstream_group_id"
 	default:
 		return nil, errors.New("invalid statistic")
 	}
@@ -799,7 +810,7 @@ func (s *Service) retain() error {
 	for _, item := range []struct {
 		table, column string
 		before        time.Time
-	}{{"dns_stats_hourly_client_domain", "hour_start_ms", now.AddDate(0, 0, -90)}, {"dns_stats_hourly_domain", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_client", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_global", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_latency_bucket", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"admin_audit_logs", "created_at_ms", now.AddDate(-1, 0, 0)}} {
+	}{{"dns_stats_hourly_client_domain", "hour_start_ms", now.AddDate(0, 0, -90)}, {"dns_stats_hourly_domain", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_client", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_global", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_upstream_group", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"dns_stats_hourly_latency_bucket", "hour_start_ms", now.AddDate(-1, 0, 0)}, {"admin_audit_logs", "created_at_ms", now.AddDate(-1, 0, 0)}} {
 		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+item.table+" WHERE "+item.column+" < ?", item.before.UnixMilli()); err != nil {
 			return err
 		}

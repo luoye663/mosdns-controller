@@ -31,4 +31,4 @@ chmod 0440 /etc/mosdns-manager/mosdns_control_token
 
 systemctl daemon-reload
 systemctl enable mosdns.service mosdns-controller.service
-printf '%s\n' 'Installed. The default remote DoH upstream is Cloudflare. Start both services.'
+printf '%s\n' 'Installed. The default DNS group uses Cloudflare DoH. Start both services.'

@@ -20,14 +20,13 @@ import (
 )
 
 type fakeMosdns struct {
-	mu            sync.Mutex
-	current       mosdnsclient.Snapshot
-	unknown       bool
-	statusErr     error
-	applyErr      error
-	flushes       []string
-	subscriptions map[string]mosdnsclient.DomainSetStatus
-	registry      mosdnsclient.RegistrySnapshot
+	mu        sync.Mutex
+	current   mosdnsclient.Snapshot
+	unknown   bool
+	statusErr error
+	applyErr  error
+	flushes   []string
+	registry  mosdnsclient.RegistrySnapshot
 }
 
 func (f *fakeMosdns) Status(context.Context) (mosdnsclient.Status, error) {
@@ -56,10 +55,10 @@ func (f *fakeMosdns) Apply(_ context.Context, s mosdnsclient.Snapshot) (mosdnscl
 
 func routeSubscriptionInput(group string, priority int) SubscriptionInput {
 	version := uint64(1)
-	return SubscriptionInput{Category: "route", Action: "local", Name: "route.txt", RefreshIntervalSeconds: 86400, Enabled: true, UpstreamGroupID: group, Priority: &priority, ExpectedUpstreamRegistryVersion: &version}
+	return SubscriptionInput{Category: "route", Action: "upstream", Name: "route.txt", RefreshIntervalSeconds: 86400, Enabled: true, UpstreamGroupID: group, Priority: &priority, ExpectedUpstreamRegistryVersion: &version}
 }
 func (f *fakeMosdns) Match(context.Context, string) (any, error) {
-	return map[string]string{"route": "remote"}, nil
+	return map[string]string{"route": "upstream", "upstream_group_id": "default_dns"}, nil
 }
 func (f *fakeMosdns) Flush(_ context.Context, tag string) error {
 	f.mu.Lock()
@@ -75,23 +74,11 @@ func (f *fakeMosdns) NegativeCache(context.Context, string) (mosdnsclient.Negati
 func (f *fakeMosdns) SetNegativeCache(_ context.Context, _ string, settings mosdnsclient.NegativeCacheSettings) (mosdnsclient.NegativeCacheSettings, error) {
 	return settings, nil
 }
-func (f *fakeMosdns) UpstreamStatus(context.Context, string) (mosdnsclient.UpstreamSnapshot, error) {
-	return mosdnsclient.UpstreamSnapshot{}, nil
-}
-func (f *fakeMosdns) ApplyUpstream(context.Context, string, mosdnsclient.UpstreamSnapshot) (mosdnsclient.UpstreamSnapshot, error) {
-	return mosdnsclient.UpstreamSnapshot{}, nil
-}
-func (f *fakeMosdns) ECSStatus(context.Context, string) (mosdnsclient.ECSSnapshot, error) {
-	return mosdnsclient.ECSSnapshot{}, nil
-}
-func (f *fakeMosdns) ApplyECS(context.Context, string, mosdnsclient.ECSSnapshot) (mosdnsclient.ECSSnapshot, error) {
-	return mosdnsclient.ECSSnapshot{}, nil
-}
 func (f *fakeMosdns) RegistryStatus(context.Context) (mosdnsclient.RegistrySnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.registry.Version == 0 {
-		f.registry = mosdnsclient.RegistrySnapshot{Version: 1, DefaultGroupID: "remote_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "local_dns", Enabled: true}, {ID: "remote_dns", Enabled: true}}}
+		f.registry = mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Enabled: true}, {ID: "office_dns", Enabled: true}}}
 	}
 	result := f.registry
 	result.Groups = append([]mosdnsclient.UpstreamGroup(nil), f.registry.Groups...)
@@ -120,24 +107,6 @@ func (f *fakeMosdns) ApplyAddressFamily(context.Context, mosdnsclient.AddressFam
 func (f *fakeMosdns) AuditStatus(context.Context) (mosdnsclient.AuditStatus, error) {
 	return mosdnsclient.AuditStatus{}, nil
 }
-func (f *fakeMosdns) SubscriptionStatus(_ context.Context, tag string) (mosdnsclient.DomainSetStatus, error) {
-	if f.subscriptions == nil {
-		f.subscriptions = map[string]mosdnsclient.DomainSetStatus{}
-	}
-	return f.subscriptions[tag], nil
-}
-func (f *fakeMosdns) ApplySubscription(_ context.Context, tag string, snapshot mosdnsclient.DomainSetSnapshot) (mosdnsclient.DomainSetStatus, error) {
-	if f.subscriptions == nil {
-		f.subscriptions = map[string]mosdnsclient.DomainSetStatus{}
-	}
-	current := f.subscriptions[tag]
-	if current.Version != snapshot.ExpectedCurrentVersion {
-		return mosdnsclient.DomainSetStatus{}, mosdnsclient.ErrConflict
-	}
-	current.Version, current.RuleCount = snapshot.Version, len(strings.Fields(snapshot.Rules))
-	f.subscriptions[tag] = current
-	return current, nil
-}
 
 func testService(t *testing.T) (*Service, *fakeMosdns) {
 	t.Helper()
@@ -159,7 +128,8 @@ func blockRule(pattern string) Rule {
 	return Rule{Category: "access", Action: "block", MatchType: "domain", Pattern: pattern, Priority: 100, Enabled: true}
 }
 func routeRule() Rule {
-	return Rule{Category: "route", Action: "remote", MatchType: "domain", Pattern: "route.example", Priority: 100, Enabled: true}
+	version := uint64(1)
+	return Rule{Category: "route", Action: "upstream", UpstreamGroupID: "default_dns", MatchType: "domain", Pattern: "route.example", Priority: 0, Enabled: true, ExpectedUpstreamRegistryVersion: &version}
 }
 
 func TestEmptyListsReturnArrays(t *testing.T) {
@@ -202,15 +172,41 @@ func TestRulePublishDoesNotFlushRegistryCache(t *testing.T) {
 	}
 }
 
+func TestRouteRuleRequiresEnabledGroupAndPreservesPriorityZero(t *testing.T) {
+	service, fake := testService(t)
+	version := uint64(1)
+	invalid := Rule{Category: "route", Action: "upstream", UpstreamGroupID: "missing_dns", MatchType: "domain", Pattern: "missing.example", Priority: 0, Enabled: true, ExpectedUpstreamRegistryVersion: &version}
+	if _, err := service.Create(context.Background(), invalid, 1, "invalid", ""); err == nil {
+		t.Fatal("missing upstream group was accepted")
+	}
+	first := blockRule("later.example")
+	first.Priority = 100
+	if _, err := service.Create(context.Background(), first, 1, "first", ""); err != nil {
+		t.Fatal(err)
+	}
+	second := blockRule("first.example")
+	second.Priority = 0
+	if _, err := service.Create(context.Background(), second, 1, "second", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.current.Rules) != 2 || fake.current.Rules[0].Priority != 0 || fake.current.Rules[0].Pattern != "first.example" {
+		t.Fatalf("snapshot rules=%+v", fake.current.Rules)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil || len(listed) != 2 || listed[0].Priority != 0 {
+		t.Fatalf("listed rules=%+v err=%v", listed, err)
+	}
+}
+
 func TestUploadSubscriptionPublishesRouteRulesAndCanBeDisabled(t *testing.T) {
 	service, fake := testService(t)
 	priority, registryVersion := 250, uint64(1)
-	input := SubscriptionInput{Category: "route", Action: "local", Name: "domestic.txt", RefreshIntervalSeconds: 86400, Enabled: true, UpstreamGroupID: "local_dns", Priority: &priority, ExpectedUpstreamRegistryVersion: &registryVersion}
+	input := SubscriptionInput{Category: "route", Action: "upstream", Name: "domestic.txt", RefreshIntervalSeconds: 86400, Enabled: true, UpstreamGroupID: "default_dns", Priority: &priority, ExpectedUpstreamRegistryVersion: &registryVersion}
 	source, published, err := service.CreateUploadSubscription(context.Background(), input, "domestic.txt", []byte("# comment\nExample.CN.\napi.example.cn\nexample.cn\n"), 1, "sub-create", "127.0.0.1")
 	if err != nil || source.RuleCount != 2 || published.Version != 1 {
 		t.Fatalf("source=%+v version=%+v err=%v", source, published, err)
 	}
-	if len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Action != "upstream" || fake.current.SubscriptionSets[0].UpstreamGroupID != "local_dns" || fake.current.SubscriptionSets[0].Priority != priority || len(fake.flushes) != 0 {
+	if len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Action != "upstream" || fake.current.SubscriptionSets[0].UpstreamGroupID != "default_dns" || fake.current.SubscriptionSets[0].Priority != priority || len(fake.flushes) != 0 {
 		t.Fatalf("snapshot=%+v flushes=%v", fake.current, fake.flushes)
 	}
 	manual, err := service.List(context.Background())
@@ -243,54 +239,6 @@ func TestDeleteSubscriptionRemovesOnlyItsRules(t *testing.T) {
 	}
 }
 
-func TestSubscriptionSetsMigratesLegacyDomainsWithSingleConnection(t *testing.T) {
-	service, _ := testService(t)
-	source, _, err := service.CreateUploadSubscription(context.Background(), SubscriptionInput{Category: "access", Action: "block", Name: "legacy.txt", RefreshIntervalSeconds: 86400, Enabled: true}, "legacy.txt", []byte("current.example\n"), 1, "legacy-create", "127.0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	version, err := service.activeVersion(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.store.DB().Exec(`UPDATE rule_subscriptions SET domains_json=NULL WHERE id=?`, source.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.store.DB().Exec(`INSERT INTO domain_rules(id,version,category,action,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, 999, version, "access", "block", "domain", "legacy.example", "legacy.example", 100, subscriptionSource(source.ID), "", 1, 1, 1); err != nil {
-		t.Fatal(err)
-	}
-	service.store.DB().SetMaxOpenConns(1)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	sets, err := service.subscriptionSets(ctx)
-	if err != nil || len(sets) != 1 || len(sets[0].Domains) != 1 || sets[0].Domains[0] != "legacy.example" {
-		t.Fatalf("sets=%+v err=%v", sets, err)
-	}
-}
-
-func TestSubscriptionSetsSkipsEmptyLegacySubscription(t *testing.T) {
-	service, _ := testService(t)
-	source, _, err := service.CreateUploadSubscription(context.Background(), SubscriptionInput{Category: "access", Action: "block", Name: "empty-legacy.txt", RefreshIntervalSeconds: 86400, Enabled: true}, "empty-legacy.txt", []byte("old.example\n"), 1, "empty-legacy-create", "127.0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.store.DB().Exec(`UPDATE rule_subscriptions SET domains_json=NULL WHERE id=?`, source.ID); err != nil {
-		t.Fatal(err)
-	}
-	sets, err := service.subscriptionSets(context.Background())
-	if err != nil || len(sets) != 0 {
-		t.Fatalf("sets=%+v err=%v", sets, err)
-	}
-	var raw string
-	var count int
-	if err := service.store.DB().QueryRow(`SELECT domains_json,rule_count FROM rule_subscriptions WHERE id=?`, source.ID).Scan(&raw, &count); err != nil {
-		t.Fatal(err)
-	}
-	if raw != "[]" || count != 0 {
-		t.Fatalf("domains_json=%q rule_count=%d", raw, count)
-	}
-}
-
 func TestDownloadSubscriptionAcceptsHTTPSource(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("example.test\n")) }))
 	defer server.Close()
@@ -311,6 +259,53 @@ func TestReserveRuleIDsAllocatesContiguousRange(t *testing.T) {
 		t.Fatalf("ids=%v err=%v", ids, err)
 	}
 }
+
+func TestUpdateRejectsStaleRule(t *testing.T) {
+	service, _ := testService(t)
+	if _, err := service.Create(context.Background(), blockRule("stale.example"), 1, "create", ""); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("rules=%+v err=%v", listed, err)
+	}
+	patch := listed[0]
+	patch.Comment = "first update"
+	if _, err := service.Update(context.Background(), patch.ID, patch, 1, "update", ""); err != nil {
+		t.Fatal(err)
+	}
+	patch.Comment = "stale update"
+	if _, err := service.Update(context.Background(), patch.ID, patch, 1, "stale", ""); !errors.Is(err, ErrRuleConflict) {
+		t.Fatalf("stale update error=%v", err)
+	}
+}
+
+func TestImportAlwaysAllocatesFreshRuleIDs(t *testing.T) {
+	service, _ := testService(t)
+	if _, err := service.Create(context.Background(), blockRule("first.example"), 1, "create", ""); err != nil {
+		t.Fatal(err)
+	}
+	incoming := blockRule("imported.example")
+	incoming.ID = 1
+	if _, err := service.Import(context.Background(), []Rule{incoming}, 1, "import", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Create(context.Background(), blockRule("third.example"), 1, "create-third", ""); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil || len(listed) != 3 {
+		t.Fatalf("rules=%+v err=%v", listed, err)
+	}
+	seen := map[int64]bool{}
+	for _, rule := range listed {
+		seen[rule.ID] = true
+	}
+	if !seen[1] || !seen[2] || !seen[3] {
+		t.Fatalf("allocated IDs=%v", seen)
+	}
+}
+
 func TestDeleteLastRulePublishesEmptySnapshot(t *testing.T) {
 	service, fake := testService(t)
 	created, err := service.Create(context.Background(), blockRule("only.example"), 1, "r1", "127.0.0.1")
@@ -336,6 +331,14 @@ func TestDeleteLastRulePublishesEmptySnapshot(t *testing.T) {
 		t.Fatalf("rules=%+v, want no rules", listed)
 	}
 }
+
+func TestReconcilePublishesInitialEmptySnapshot(t *testing.T) {
+	service, fake := testService(t)
+	state, err := service.Reconcile(context.Background())
+	if err != nil || state != "republished" || fake.current.SchemaVersion != 4 || fake.current.Version != 1 {
+		t.Fatalf("state=%q snapshot=%+v err=%v", state, fake.current, err)
+	}
+}
 func TestUnknownApplyIsReconciled(t *testing.T) {
 	service, fake := testService(t)
 	fake.unknown = true
@@ -353,11 +356,11 @@ func TestUnknownApplyIsReconciled(t *testing.T) {
 	}
 }
 
-func TestSnapshotV3CanonicalContract(t *testing.T) {
+func TestSnapshotV4CanonicalContract(t *testing.T) {
 	generatedAt := time.Date(2026, time.August, 4, 1, 2, 3, 0, time.UTC)
-	snapshot := mosdnsclient.Snapshot{SchemaVersion: 3, Version: 9, ExpectedCurrentVersion: 8, GeneratedAt: generatedAt, BlockRCode: 3, Rules: []mosdnsclient.Rule{}, SubscriptionSets: []mosdnsclient.SubscriptionSet{{SourceID: 12, SourceName: "route", Category: "route", Action: "upstream", BindingID: 34, UpstreamGroupID: "office_dns", Priority: 250, Domains: []string{"a.example", "b.example"}}}}
-	const canonical = `{"schema_version":3,"version":9,"expected_current_version":8,"generated_at":"2026-08-04T01:02:03Z","block_rcode":3,"rules":[],"subscription_sets":[{"source_id":12,"source_name":"route","category":"route","action":"upstream","binding_id":34,"upstream_group_id":"office_dns","priority":250,"domains":["a.example","b.example"]}]}`
-	const expectedChecksum = "sha256:9b3a894989a102ee98c867c9ff0d9ba85659bbda38923f6d057540b1a2d1bbba"
+	snapshot := mosdnsclient.Snapshot{SchemaVersion: 4, Version: 9, ExpectedCurrentVersion: 8, GeneratedAt: generatedAt, BlockRCode: 3, Rules: []mosdnsclient.Rule{}, SubscriptionSets: []mosdnsclient.SubscriptionSet{{SourceID: 12, SourceName: "route", Category: "route", Action: "upstream", BindingID: 34, UpstreamGroupID: "office_dns", Priority: 250, Domains: []string{"a.example", "b.example"}}}}
+	const canonical = `{"schema_version":4,"version":9,"expected_current_version":8,"generated_at":"2026-08-04T01:02:03Z","block_rcode":3,"rules":[],"subscription_sets":[{"source_id":12,"source_name":"route","category":"route","action":"upstream","binding_id":34,"upstream_group_id":"office_dns","priority":250,"domains":["a.example","b.example"]}]}`
+	const expectedChecksum = "sha256:bbecc751a87323a29d3e671208dbfddedeccbd014185943d0f36f8c6df6a6433"
 	got := snapshotCanonicalJSON(snapshot)
 	if string(got) != canonical {
 		t.Fatalf("canonical JSON changed:\n%s", got)
@@ -381,7 +384,7 @@ func TestRollbackCreatesMonotonicVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rolled, err := service.Rollback(context.Background(), first.Version, 1, "r3", "")
+	rolled, err := service.Rollback(context.Background(), first.Version, nil, 1, "r3", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,19 +397,62 @@ func TestRollbackCreatesMonotonicVersion(t *testing.T) {
 	}
 }
 
+func TestRollbackRestoresHistoricalDisabledRules(t *testing.T) {
+	service, _ := testService(t)
+	disabled := blockRule("disabled.example")
+	disabled.Enabled = false
+	first, err := service.Create(context.Background(), disabled, 1, "disabled", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Create(context.Background(), blockRule("later.example"), 1, "later", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Rollback(context.Background(), first.Version, nil, 1, "rollback", ""); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("rules=%+v err=%v", listed, err)
+	}
+	if listed[0].Pattern != "disabled.example" || listed[0].Enabled {
+		t.Fatalf("historical disabled rule=%+v", listed[0])
+	}
+}
+
+func TestFinalizeUnknownCandidatePreservesDisabledRules(t *testing.T) {
+	service, _ := testService(t)
+	disabled := blockRule("disabled.example")
+	disabled.Enabled = false
+	version, err := service.Create(context.Background(), disabled, 1, "disabled", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.DB().Exec(`UPDATE rule_versions SET status='unknown' WHERE version=?`, version.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.finalize(context.Background(), version.Version); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].Enabled {
+		t.Fatalf("rules=%+v err=%v", listed, err)
+	}
+}
+
 func TestSubscriptionMutationsRollbackDatabaseStateOnPublishFailure(t *testing.T) {
 	service, fake := testService(t)
-	input := routeSubscriptionInput("local_dns", 200)
+	input := routeSubscriptionInput("default_dns", 200)
 	source, _, err := service.CreateUploadSubscription(context.Background(), input, "route.txt", []byte("route.example\n"), 1, "create", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake.applyErr = errors.New("apply failed")
-	if _, _, err := service.UpdateSubscriptionBinding(context.Background(), source.ID, BindingInput{UpstreamGroupID: "remote_dns", Priority: 300, ExpectedUpstreamRegistryVersion: 1}, 1, "binding", ""); err == nil {
+	if _, _, err := service.UpdateSubscriptionBinding(context.Background(), source.ID, BindingInput{UpstreamGroupID: "office_dns", Priority: 300, ExpectedUpstreamRegistryVersion: 1}, 1, "binding", ""); err == nil {
 		t.Fatal("binding update succeeded while publish failed")
 	}
 	current, err := service.subscription(context.Background(), source.ID)
-	if err != nil || current.Binding == nil || current.Binding.UpstreamGroupID != "local_dns" || current.Binding.Priority != 200 {
+	if err != nil || current.Binding == nil || current.Binding.UpstreamGroupID != "default_dns" || current.Binding.Priority != 200 {
 		t.Fatalf("binding was not restored: source=%+v err=%v", current, err)
 	}
 	if _, _, err := service.SetSubscriptionEnabled(context.Background(), source.ID, false, 1, "disable", ""); err == nil {
@@ -428,7 +474,7 @@ func TestSubscriptionMutationsRollbackDatabaseStateOnPublishFailure(t *testing.T
 func TestFailedCreateRemovesSubscriptionAndBinding(t *testing.T) {
 	service, fake := testService(t)
 	fake.applyErr = errors.New("apply failed")
-	if _, _, err := service.CreateUploadSubscription(context.Background(), routeSubscriptionInput("local_dns", 100), "route.txt", []byte("route.example\n"), 1, "create", ""); err == nil {
+	if _, _, err := service.CreateUploadSubscription(context.Background(), routeSubscriptionInput("default_dns", 100), "route.txt", []byte("route.example\n"), 1, "create", ""); err == nil {
 		t.Fatal("create succeeded while publish failed")
 	}
 	var subscriptions, bindings int
@@ -447,7 +493,7 @@ func TestUnknownCreateKeepsSourceStateForForwardReconcile(t *testing.T) {
 	service, fake := testService(t)
 	fake.unknown = true
 	fake.statusErr = errors.New("status unavailable")
-	_, version, err := service.CreateUploadSubscription(context.Background(), routeSubscriptionInput("local_dns", 100), "route.txt", []byte("route.example\n"), 1, "create", "")
+	_, version, err := service.CreateUploadSubscription(context.Background(), routeSubscriptionInput("default_dns", 100), "route.txt", []byte("route.example\n"), 1, "create", "")
 	if !errors.Is(err, mosdnsclient.ErrUnknown) || version.Status != statusUnknown {
 		t.Fatalf("version=%+v err=%v", version, err)
 	}
@@ -470,12 +516,12 @@ func TestUnknownCreateKeepsSourceStateForForwardReconcile(t *testing.T) {
 		t.Fatalf("subscriptions=%+v err=%v", items, err)
 	}
 	fake.statusErr = errors.New("status unavailable")
-	_, bindingVersion, err := service.UpdateSubscriptionBinding(context.Background(), items[0].ID, BindingInput{UpstreamGroupID: "remote_dns", Priority: 300, ExpectedUpstreamRegistryVersion: 1}, 1, "binding", "")
+	_, bindingVersion, err := service.UpdateSubscriptionBinding(context.Background(), items[0].ID, BindingInput{UpstreamGroupID: "office_dns", Priority: 300, ExpectedUpstreamRegistryVersion: 1}, 1, "binding", "")
 	if !errors.Is(err, mosdnsclient.ErrUnknown) || bindingVersion.Status != statusUnknown {
 		t.Fatalf("binding version=%+v err=%v", bindingVersion, err)
 	}
 	updated, err := service.subscription(context.Background(), items[0].ID)
-	if err != nil || updated.Binding == nil || updated.Binding.UpstreamGroupID != "remote_dns" || updated.Binding.Priority != 300 {
+	if err != nil || updated.Binding == nil || updated.Binding.UpstreamGroupID != "office_dns" || updated.Binding.Priority != 300 {
 		t.Fatalf("unknown binding was rolled backward: source=%+v err=%v", updated, err)
 	}
 }
@@ -490,10 +536,10 @@ func TestRollbackKeepsCurrentSubscriptionSets(t *testing.T) {
 	if _, _, err := service.CreateUploadSubscription(context.Background(), input, "block.txt", []byte("sub.example\n"), 1, "subscription", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Rollback(context.Background(), first.Version, 1, "rollback", ""); err != nil {
+	if _, err := service.Rollback(context.Background(), first.Version, nil, 1, "rollback", ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "sub.example" || fake.current.SchemaVersion != 3 {
+	if len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "sub.example" || fake.current.SchemaVersion != 4 {
 		t.Fatalf("rollback snapshot=%+v", fake.current)
 	}
 }
@@ -642,27 +688,6 @@ func TestRefreshDoesNotOverwriteConcurrentSubscriptionMutation(t *testing.T) {
 	}
 }
 
-func TestReconcileUpgradesLegacyActiveSnapshotToV3(t *testing.T) {
-	service, fake := testService(t)
-	input := SubscriptionInput{Category: "access", Action: "allow", Name: "allow.txt", RefreshIntervalSeconds: 86400, Enabled: true}
-	_, first, err := service.CreateUploadSubscription(context.Background(), input, "allow.txt", []byte("allow.example\n"), 1, "create", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := fake.current
-	legacy.SchemaVersion = 2
-	legacy.SubscriptionSets = nil
-	raw, _ := json.Marshal(legacy)
-	if _, err := service.store.DB().Exec(`UPDATE rule_versions SET schema_version=2,snapshot_json=? WHERE version=?`, raw, first.Version); err != nil {
-		t.Fatal(err)
-	}
-	fake.current = legacy
-	state, err := service.Reconcile(context.Background())
-	if err != nil || state != "republished" || fake.current.SchemaVersion != 3 || len(fake.current.SubscriptionSets) != 1 || fake.current.Version <= first.Version {
-		t.Fatalf("state=%q snapshot=%+v err=%v", state, fake.current, err)
-	}
-}
-
 func TestReconcileCandidateRepublishesWhenSourcesDiverged(t *testing.T) {
 	service, fake := testService(t)
 	input := SubscriptionInput{Category: "access", Action: "block", Name: "block.txt", RefreshIntervalSeconds: 86400, Enabled: true}
@@ -676,7 +701,7 @@ func TestReconcileCandidateRepublishesWhenSourcesDiverged(t *testing.T) {
 	}
 	candidate := buildSnapshot(active.Version+1, active.Version, nil, sets)
 	raw, _ := json.Marshal(candidate)
-	if _, err := service.store.DB().Exec(`INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rule_count,regexp_rule_count,snapshot_json,created_at_ms) VALUES(?,3,?,'unknown',?,1,0,?,?)`, candidate.Version, candidate.Checksum, active.Version, raw, time.Now().UnixMilli()); err != nil {
+	if _, err := service.store.DB().Exec(`INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rule_count,regexp_rule_count,snapshot_json,rules_json,created_at_ms) VALUES(?,4,?,'unknown',?,1,0,?,'[]',?)`, candidate.Version, candidate.Checksum, active.Version, raw, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.store.DB().Exec(`UPDATE rule_subscriptions SET domains_json='["new.example"]' WHERE id=?`, source.ID); err != nil {
@@ -685,30 +710,6 @@ func TestReconcileCandidateRepublishesWhenSourcesDiverged(t *testing.T) {
 	fake.current = candidate
 	state, err := service.Reconcile(context.Background())
 	if err != nil || state != "republished" || fake.current.Version <= candidate.Version || len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "new.example" {
-		t.Fatalf("state=%q snapshot=%+v err=%v", state, fake.current, err)
-	}
-}
-
-func TestReconcileMigratesLegacySubscriptionBeforeFinalizingCandidate(t *testing.T) {
-	service, fake := testService(t)
-	active, err := service.Create(context.Background(), blockRule("legacy.example"), 1, "legacy-rule", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.store.DB().Exec(`UPDATE domain_rules SET source='subscription:1' WHERE normalized_pattern='legacy.example'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.store.DB().Exec(`INSERT INTO rule_subscriptions(id,category,action,kind,name,refresh_interval_seconds,enabled,rule_count,created_at_ms,updated_at_ms,domains_json) VALUES(1,'access','block','upload','legacy',86400,1,1,1,1,NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	candidate := buildSnapshot(active.Version+1, active.Version, nil, nil)
-	raw, _ := json.Marshal(candidate)
-	if _, err := service.store.DB().Exec(`INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rule_count,regexp_rule_count,snapshot_json,created_at_ms) VALUES(?,3,?,'unknown',?,0,0,?,?)`, candidate.Version, candidate.Checksum, active.Version, raw, time.Now().UnixMilli()); err != nil {
-		t.Fatal(err)
-	}
-	fake.current = candidate
-	state, err := service.Reconcile(context.Background())
-	if err != nil || state != "republished" || len(fake.current.SubscriptionSets) != 1 || len(fake.current.SubscriptionSets[0].Domains) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "legacy.example" {
 		t.Fatalf("state=%q snapshot=%+v err=%v", state, fake.current, err)
 	}
 }
@@ -725,7 +726,7 @@ func TestBindingCreateAndGroupDeleteAreSerialized(t *testing.T) {
 	if _, err := store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'tester','hash',1,1)`); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeMosdns{registry: mosdnsclient.RegistrySnapshot{Version: 1, DefaultGroupID: "remote_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "local_dns", Enabled: true}, {ID: "remote_dns", Enabled: true}, {ID: "office_dns", Enabled: true}}}}
+	fake := &fakeMosdns{registry: mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Enabled: true}, {ID: "office_dns", Enabled: true}}}}
 	lock := &coordination.UpstreamBindings{}
 	ruleService := New(store, fake, lock)
 	operationService := operations.New(store.DB(), ":memory:", fake, nil, lock)
@@ -782,7 +783,7 @@ func TestBindingCreateAndGroupDisableAreSerialized(t *testing.T) {
 		t.Fatal(err)
 	}
 	office := mosdnsclient.UpstreamGroup{ID: "office_dns", Name: "Office", Enabled: true, Mode: "race", Concurrent: 1}
-	fake := &fakeMosdns{registry: mosdnsclient.RegistrySnapshot{Version: 1, DefaultGroupID: "remote_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "local_dns", Enabled: true}, {ID: "remote_dns", Enabled: true}, office}}}
+	fake := &fakeMosdns{registry: mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Enabled: true}, office}}}
 	lock := &coordination.UpstreamBindings{}
 	ruleService := New(store, fake, lock)
 	operationService := operations.New(store.DB(), ":memory:", fake, nil, lock)

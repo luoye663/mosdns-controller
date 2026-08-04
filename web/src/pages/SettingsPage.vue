@@ -4,7 +4,7 @@ import { NAlert, NButton, NCard, NFormItem, NInputNumber, NModal, NSelect, NSwit
 import { api, type Settings, type UpstreamGroup } from '@/lib/api'
 import { notify } from '@/lib/notify'
 
-const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, negative_cache_enabled: true, negative_cache_ttl: 30, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack', default_upstream_group_id: 'remote_dns', upstream_registry_version: 0 })
+const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, negative_cache_enabled: true, negative_cache_ttl: 30, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack', default_upstream_group_id: 'default_dns', upstream_registry_version: 0 })
 const groups = ref<UpstreamGroup[]>([])
 const loading = ref(false)
 const saving = ref(false)

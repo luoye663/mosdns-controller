@@ -28,20 +28,15 @@ type Client interface {
 	SetCacheTTL(context.Context, int) error
 	NegativeCache(context.Context, string) (NegativeCacheSettings, error)
 	SetNegativeCache(context.Context, string, NegativeCacheSettings) (NegativeCacheSettings, error)
-	UpstreamStatus(context.Context, string) (UpstreamSnapshot, error)
-	ApplyUpstream(context.Context, string, UpstreamSnapshot) (UpstreamSnapshot, error)
-	ECSStatus(context.Context, string) (ECSSnapshot, error)
-	ApplyECS(context.Context, string, ECSSnapshot) (ECSSnapshot, error)
 	RegistryStatus(context.Context) (RegistrySnapshot, error)
 	ApplyRegistry(context.Context, RegistrySnapshot) (RegistrySnapshot, error)
 	FlushRegistry(context.Context, string, uint64) error
 	AddressFamilyStatus(context.Context) (AddressFamilySnapshot, error)
 	ApplyAddressFamily(context.Context, AddressFamilySnapshot) (AddressFamilySnapshot, error)
 	AuditStatus(context.Context) (AuditStatus, error)
-	SubscriptionStatus(context.Context, string) (DomainSetStatus, error)
-	ApplySubscription(context.Context, string, DomainSetSnapshot) (DomainSetStatus, error)
 }
 type RegistrySnapshot struct {
+	SchemaVersion          uint32              `json:"schema_version"`
 	Version                uint64              `json:"version"`
 	ExpectedCurrentVersion uint64              `json:"expected_current_version"`
 	DefaultGroupID         string              `json:"default_group_id"`
@@ -79,29 +74,11 @@ type NegativeCacheConfig struct {
 	Enabled bool   `json:"enabled"`
 	TTL     uint32 `json:"ttl"`
 }
-type UpstreamSnapshot struct {
-	Version                uint64     `json:"version"`
-	ExpectedCurrentVersion uint64     `json:"expected_current_version"`
-	Mode                   string     `json:"mode"`
-	Concurrent             int        `json:"concurrent"`
-	Socks5                 string     `json:"socks5,omitempty"`
-	Upstreams              []Upstream `json:"upstreams"`
-	Checksum               string     `json:"checksum,omitempty"`
-}
 type Upstream struct {
 	Tag      string `json:"tag"`
 	Addr     string `json:"addr"`
 	Priority int    `json:"priority"`
 	Weight   int    `json:"weight"`
-}
-type ECSSnapshot struct {
-	Version                uint64 `json:"version"`
-	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
-	Mode                   string `json:"mode"`
-	Mask4                  int    `json:"mask4"`
-	Mask6                  int    `json:"mask6"`
-	Preset4                string `json:"preset4,omitempty"`
-	Preset6                string `json:"preset6,omitempty"`
 }
 type AddressFamilySnapshot struct {
 	Version                uint64 `json:"version"`
@@ -130,17 +107,6 @@ type AuditStatus struct {
 	QueueDepth    int   `json:"queue_depth"`
 	QueueCapacity int   `json:"queue_capacity"`
 	DroppedEvents int64 `json:"dropped_events"`
-}
-type DomainSetStatus struct {
-	Version   uint64    `json:"version"`
-	Checksum  string    `json:"checksum"`
-	RuleCount int       `json:"rule_count"`
-	LoadedAt  time.Time `json:"loaded_at"`
-}
-type DomainSetSnapshot struct {
-	Version                uint64 `json:"version"`
-	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
-	Rules                  string `json:"rules"`
 }
 type ValidateResult struct {
 	Valid             bool     `json:"valid"`
@@ -180,14 +146,15 @@ type SubscriptionSet struct {
 	Domains         []string `json:"domains"`
 }
 type Rule struct {
-	ID        int64  `json:"id"`
-	Category  string `json:"category"`
-	Action    string `json:"action"`
-	MatchType string `json:"match_type"`
-	Pattern   string `json:"pattern"`
-	Priority  int    `json:"priority"`
-	Source    string `json:"source"`
-	Comment   string `json:"comment"`
+	ID              int64  `json:"id"`
+	Category        string `json:"category"`
+	Action          string `json:"action"`
+	UpstreamGroupID string `json:"upstream_group_id,omitempty"`
+	MatchType       string `json:"match_type"`
+	Pattern         string `json:"pattern"`
+	Priority        int    `json:"priority"`
+	Source          string `json:"source"`
+	Comment         string `json:"comment"`
 }
 type HTTPClient struct {
 	baseURL, token string
@@ -278,34 +245,6 @@ func (c *HTTPClient) SetCacheTTL(ctx context.Context, ttl int) error {
 	}
 	return nil
 }
-func (c *HTTPClient) UpstreamStatus(ctx context.Context, group string) (UpstreamSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return UpstreamSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
-	}
-	var value UpstreamSnapshot
-	return value, c.request(ctx, http.MethodGet, "/plugins/"+group+"/status", nil, &value)
-}
-func (c *HTTPClient) ApplyUpstream(ctx context.Context, group string, snapshot UpstreamSnapshot) (UpstreamSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return UpstreamSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
-	}
-	var value UpstreamSnapshot
-	return value, c.request(ctx, http.MethodPut, "/plugins/"+group+"/snapshot", snapshot, &value)
-}
-func (c *HTTPClient) ECSStatus(ctx context.Context, group string) (ECSSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return ECSSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
-	}
-	var value ECSSnapshot
-	return value, c.request(ctx, http.MethodGet, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/status", nil, &value)
-}
-func (c *HTTPClient) ApplyECS(ctx context.Context, group string, snapshot ECSSnapshot) (ECSSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return ECSSnapshot{}, fmt.Errorf("unsupported upstream group %q", group)
-	}
-	var value ECSSnapshot
-	return value, c.request(ctx, http.MethodPut, "/plugins/ecs_"+strings.TrimSuffix(group, "_dns")+"/snapshot", snapshot, &value)
-}
 func (c *HTTPClient) RegistryStatus(ctx context.Context) (RegistrySnapshot, error) {
 	var value RegistrySnapshot
 	err := c.request(ctx, http.MethodGet, "/plugins/dynamic_upstreams/status", nil, &value)
@@ -341,7 +280,7 @@ func (c *HTTPClient) FlushRegistry(ctx context.Context, groupID string, expected
 }
 
 func validRegistrySnapshot(snapshot RegistrySnapshot, expectedVersion uint64) bool {
-	if snapshot.Version != expectedVersion || snapshot.Version == 0 || snapshot.ExpectedCurrentVersion != 0 || len(snapshot.Groups) == 0 {
+	if snapshot.SchemaVersion != 1 || snapshot.Version != expectedVersion || snapshot.Version == 0 || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(snapshot.Groups))
@@ -371,23 +310,6 @@ func (c *HTTPClient) ApplyAddressFamily(ctx context.Context, snapshot AddressFam
 func (c *HTTPClient) AuditStatus(ctx context.Context) (AuditStatus, error) {
 	var value AuditStatus
 	return value, c.request(ctx, http.MethodGet, "/plugins/query_audit/status", nil, &value)
-}
-func (c *HTTPClient) SubscriptionStatus(ctx context.Context, tag string) (DomainSetStatus, error) {
-	if !subscriptionTag(tag) {
-		return DomainSetStatus{}, fmt.Errorf("unsupported subscription tag %q", tag)
-	}
-	var value DomainSetStatus
-	return value, c.request(ctx, http.MethodGet, "/plugins/"+tag+"/status", nil, &value)
-}
-func (c *HTTPClient) ApplySubscription(ctx context.Context, tag string, snapshot DomainSetSnapshot) (DomainSetStatus, error) {
-	if !subscriptionTag(tag) {
-		return DomainSetStatus{}, fmt.Errorf("unsupported subscription tag %q", tag)
-	}
-	var value DomainSetStatus
-	return value, c.request(ctx, http.MethodPut, "/plugins/"+tag+"/snapshot", snapshot, &value)
-}
-func subscriptionTag(tag string) bool {
-	return tag == "subscription_allow" || tag == "subscription_block" || tag == "subscription_local" || tag == "subscription_remote"
 }
 func (c *HTTPClient) request(ctx context.Context, method, path string, input, output any) error {
 	isWrite := (method != http.MethodGet && method != http.MethodHead) || strings.HasSuffix(path, "/flush")

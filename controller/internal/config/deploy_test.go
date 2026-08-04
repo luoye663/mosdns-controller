@@ -27,12 +27,12 @@ func TestMosdnsProfilesRenderDynamicUpstreamRegistry(t *testing.T) {
 				t.Fatal(err)
 			}
 			value := string(data)
-			for _, required := range []string{"tag: dynamic_upstreams", "type: dynamic_upstream_registry", "initial_snapshot:", "default_group_id: remote_dns", "legacy_groups:", "forward_snapshot_file:", "id: local_dns", "id: remote_dns", "exec: $dynamic_upstreams"} {
+			for _, required := range []string{"tag: dynamic_upstreams", "type: dynamic_upstream_registry", "initial_snapshot:", "schema_version: 1", "default_group_id: default_dns", "id: default_dns", "exec: $dynamic_upstreams"} {
 				if !strings.Contains(value, required) {
 					t.Fatalf("rendered config does not contain %q", required)
 				}
 			}
-			for _, forbidden := range []string{"tag: cache_local", "tag: cache_remote", "tag: ecs_local", "tag: ecs_remote", "type: dynamic_forward", "tag: route_local", "tag: route_remote", "type: dynamic_domain_set", "tag: subscription_allow", "tag: subscription_block", "tag: subscription_local", "tag: subscription_remote", "qname $subscription_"} {
+			for _, forbidden := range []string{"legacy_groups:", "forward_snapshot_file:", "id: local_dns", "id: remote_dns", "tag: cache_local", "tag: cache_remote", "tag: ecs_local", "tag: ecs_remote", "type: dynamic_forward", "tag: route_local", "tag: route_remote", "type: dynamic_domain_set", "tag: subscription_allow", "tag: subscription_block", "tag: subscription_local", "tag: subscription_remote", "qname $subscription_"} {
 				if strings.Contains(value, forbidden) {
 					t.Fatalf("rendered config still contains %q", forbidden)
 				}

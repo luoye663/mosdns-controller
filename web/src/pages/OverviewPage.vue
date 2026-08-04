@@ -11,7 +11,7 @@ const loading = ref(true)
 const summary = ref<DashboardSummary>({ query_count: 0, last_hour_query_count: 0, average_latency_us: 0, p95_latency_us: 0, p95_sample_count: 0, max_latency_us: 0, error_count: 0, processing_error_count: 0, success_count: 0, negative_answer_count: 0, policy_block_count: 0, cache_hit_count: 0 })
 const domains = ref<StatItem[]>([])
 const clients = ref<StatItem[]>([])
-const routes = ref<StatItem[]>([])
+const upstreamGroups = ref<StatItem[]>([])
 const latency = ref<LatencyPoint[]>([])
 const status = ref<SystemStatus | null>(null)
 const trendElement = ref<HTMLElement | null>(null)
@@ -20,7 +20,6 @@ let trendChart: echarts.ECharts | undefined
 let distributionChart: echarts.ECharts | undefined
 
 function percent(value: number, total = summary.value.query_count) { return total ? `${((value / total) * 100).toFixed(1)}%` : '0.0%' }
-function routeCount(name: string) { return routes.value.find((item) => String(item.value) === name)?.query_count ?? 0 }
 function chartLabel(timestamp: number) { return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
 function memory(bytes?: number) { return bytes && bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(1)} MiB` : '-' }
 function renderCharts() {
@@ -46,17 +45,17 @@ function renderCharts() {
     color: ['#087e8b', '#e7793c', '#4f6fad', '#d15252'],
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
     legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 12 } },
-    series: [{ type: 'pie', radius: ['48%', '72%'], center: ['50%', '44%'], label: { show: false }, data: [{ name: '动态上游', value: routeCount('forward') }, { name: '本地', value: routeCount('local') }, { name: '远程', value: routeCount('remote') }, { name: '拦截', value: routeCount('block') }] }],
+    series: [{ type: 'pie', radius: ['48%', '72%'], center: ['50%', '44%'], label: { show: false }, data: upstreamGroups.value.map((item) => ({ name: String(item.value), value: item.query_count })) }],
   }, true)
 }
 async function load() {
   loading.value = true
   try {
-    const [nextSummary, nextDomains, nextClients, nextRoutes, nextLatency, nextStatus] = await Promise.all([api.summary(), api.statistic('domains'), api.statistic('clients'), api.statistic('routes'), api.latency(), api.systemStatus()])
+    const [nextSummary, nextDomains, nextClients, nextUpstreamGroups, nextLatency, nextStatus] = await Promise.all([api.summary(), api.statistic('domains'), api.statistic('clients'), api.statistic('upstream_groups'), api.latency(), api.systemStatus()])
     summary.value = nextSummary
     domains.value = nextDomains.items
     clients.value = nextClients.items
-    routes.value = nextRoutes.items
+    upstreamGroups.value = nextUpstreamGroups.items
     latency.value = nextLatency.items
     status.value = nextStatus
     await nextTick()
@@ -95,7 +94,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
 
       <div class="dashboard-grid dashboard-primary">
         <section class="chart-panel wide"><header><div><h2>查询与延迟趋势</h2><p>最近 24 小时，按小时聚合</p></div></header><div ref="trendElement" class="chart-canvas"></div></section>
-        <section class="chart-panel"><header><div><h2>路由分布</h2><p>动态组与历史 local / remote / block</p></div></header><div ref="distributionElement" class="chart-canvas"></div></section>
+        <section class="chart-panel"><header><div><h2>上游组分布</h2><p>最近 24 小时的上游组查询占比</p></div></header><div ref="distributionElement" class="chart-canvas"></div></section>
       </div>
 
       <div class="dashboard-grid dashboard-secondary">

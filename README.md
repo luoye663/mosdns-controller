@@ -1,12 +1,12 @@
 # mosdns-controller
 
-本项目基于 `mosdns` 的插件系统扩展 DNS 数据面，并提供面向局域网的 DNS 管理 Web UI，用于分流解析国内外域名。
+本项目基于 `mosdns` 的插件系统扩展 DNS 数据面，并提供面向局域网的 DNS 管理 Web UI，用于管理访问规则、上游组和解析策略。
 
 
 ## 功能概览
 
-- 动态白名单、黑名单、强制 local/remote 路由，规则发布不重启 DNS 监听。
-- 独立 local/remote DNS 缓存，黑名单检查位于缓存之前。
+- 动态白名单、黑名单和上游组路由，规则发布不重启 DNS 监听。
+- 每个上游组使用独立缓存，黑名单检查位于缓存之前。
 - 查询审计、SQLite 统计、SSE 实时查询流，以及每次实际采纳响应的 `upstream_tag`。
 - controller 不可用时，mosdns 仍使用最近成功持久化的规则快照继续解析。
 - 管理员 session、CSRF 防护、内部 Bearer Token 和非 root 容器部署。
@@ -132,7 +132,7 @@ chmod 0444 deploy/secrets/mosdns_control_token
 mosdns 配置由 `deploy/mosdns/config.yaml.tmpl` 统一生成。
 1. 执行 `make configs` 会生成 Compose、本地和集成测试配置；
 2. `make binary-package` 会生成包内二进制配置。
-3. 首次启动后的上游管理通过 WebUI 完成，保存会原子热加载并清空对应缓存，无需重启 mosdns。
+3. 全新安装只预置并启用 `default_dns` 上游组；首次启动后可通过 WebUI 管理该组、创建其他组或切换默认组，保存会原子热加载并清空对应缓存，无需重启 mosdns。
 
 
 ### 2. 构建并启动
@@ -196,7 +196,7 @@ sudo systemctl start mosdns.service mosdns-controller.service
 
 安装脚本创建最小权限服务用户、运行数据目录和共享 token，并将 [mosdns.service](deploy/binary/mosdns.service) 与 [mosdns-controller.service](deploy/binary/mosdns-controller.service) 安装到 `/etc/systemd/system/`。
 
-远程 DoH 默认使用 Cloudflare（`https://cloudflare-dns.com/dns-query`）；DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
+初始 `default_dns` 上游组使用 Cloudflare DoH（`https://cloudflare-dns.com/dns-query`）；DNS `53/tcp`、`53/udp` 与 WebUI `8080/tcp` 对外监听，mosdns API `9091` 和 controller ingest `8081` 仅监听 `127.0.0.1`。详细目录结构与升级说明见 [deploy/binary/README.md](deploy/binary/README.md)。
 
 首次启动后，访问 `http://<部署主机IP>:8080` 初始化管理员，并使用 `curl -fsS http://127.0.0.1:8080/health/ready`、`dig @127.0.0.1 example.com A` 与 `dig @127.0.0.1 example.com A +tcp` 验证服务。
 
@@ -289,7 +289,7 @@ make local-controller
 
 ## 集成环境验证
 
-集成 Compose 会启动两个本地 CoreDNS mock upstream，并仅开放 `5353/udp` 和 `5353/tcp`。它不需要真实远程 DoH，适合在迁移 `53` 前验证 DNS 路径：
+集成 Compose 会启动一个 CoreDNS mock upstream，并仅开放 `5353/udp` 和 `5353/tcp`。配置只预置 `default_dns` 组，不访问公共 DNS；需要额外上游组的测试会在运行时创建：
 
 ```bash
 umask 077

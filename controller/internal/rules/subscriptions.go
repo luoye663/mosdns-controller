@@ -150,7 +150,12 @@ func (s *Service) createSubscription(ctx context.Context, input SubscriptionInpu
 	if err != nil {
 		return Subscription{}, Version{}, err
 	}
-	result, err := s.store.DB().ExecContext(ctx, `INSERT INTO rule_subscriptions(category,action,kind,name,source_url,refresh_interval_seconds,enabled,content_checksum,rule_count,last_checked_at_ms,last_success_at_ms,last_error,created_at_ms,updated_at_ms,domains_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, input.Category, input.Action, kind, strings.TrimSpace(input.Name), input.SourceURL, input.RefreshIntervalSeconds, input.Enabled, checksum(body), len(patterns), now, now, "", now, now, domains)
+	tx, err := s.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return Subscription{}, Version{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO rule_subscriptions(category,action,kind,name,source_url,refresh_interval_seconds,enabled,content_checksum,rule_count,last_checked_at_ms,last_success_at_ms,last_error,created_at_ms,updated_at_ms,domains_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, input.Category, input.Action, kind, strings.TrimSpace(input.Name), input.SourceURL, input.RefreshIntervalSeconds, input.Enabled, checksum(body), len(patterns), now, now, "", now, now, domains)
 	if err != nil {
 		return Subscription{}, Version{}, err
 	}
@@ -159,10 +164,12 @@ func (s *Service) createSubscription(ctx context.Context, input SubscriptionInpu
 		return Subscription{}, Version{}, err
 	}
 	if input.Category == "route" {
-		if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO subscription_bindings(subscription_id,upstream_group_id,priority,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?)`, id, strings.TrimSpace(input.UpstreamGroupID), *input.Priority, now, now); err != nil {
-			_, _ = s.store.DB().ExecContext(ctx, `DELETE FROM rule_subscriptions WHERE id=?`, id)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO subscription_bindings(subscription_id,upstream_group_id,priority,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?)`, id, strings.TrimSpace(input.UpstreamGroupID), *input.Priority, now, now); err != nil {
 			return Subscription{}, Version{}, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Subscription{}, Version{}, err
 	}
 	restore := func() error {
 		_, restoreErr := s.store.DB().ExecContext(ctx, `DELETE FROM rule_subscriptions WHERE id=?`, id)
@@ -206,6 +213,8 @@ func (s *Service) RefreshSubscription(ctx context.Context, id int64, adminID int
 		return Subscription{}, nil, s.subscriptionFailure(ctx, item, err)
 	}
 
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, err := s.subscription(ctx, id)
@@ -256,6 +265,8 @@ func (s *Service) RefreshSubscription(ctx context.Context, id int64, adminID int
 }
 
 func (s *Service) SetSubscriptionEnabled(ctx context.Context, id int64, enabled bool, adminID int64, requestID, ip string) (Subscription, Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, err := s.subscription(ctx, id)
@@ -347,7 +358,7 @@ func (s *Service) RefreshDue(ctx context.Context) {
 }
 
 func (s *Service) subscriptionSets(ctx context.Context) ([]mosdnsclient.SubscriptionSet, error) {
-	rows, err := s.store.DB().QueryContext(ctx, `SELECT s.id,s.name,s.category,s.action,s.enabled,s.domains_json,b.id,COALESCE(b.upstream_group_id,''),COALESCE(b.priority,100) FROM rule_subscriptions s LEFT JOIN subscription_bindings b ON b.subscription_id=s.id ORDER BY s.id`)
+	rows, err := s.store.DB().QueryContext(ctx, `SELECT s.id,s.name,s.category,s.action,s.enabled,s.domains_json,b.id,COALESCE(b.upstream_group_id,''),COALESCE(b.priority,100) FROM rule_subscriptions s LEFT JOIN subscription_bindings b ON b.subscription_id=s.id ORDER BY COALESCE(b.priority,100),s.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -379,19 +390,6 @@ func (s *Service) subscriptionSets(ctx context.Context) ([]mosdnsclient.Subscrip
 
 	sets := make([]mosdnsclient.SubscriptionSet, 0, len(sources))
 	for _, source := range sources {
-		if len(source.raw) == 0 {
-			legacy, err := s.legacySubscriptionDomains(ctx, source.id)
-			if err != nil {
-				return nil, err
-			}
-			source.raw, err = json.Marshal(legacy)
-			if err != nil {
-				return nil, err
-			}
-			if _, err = s.store.DB().ExecContext(ctx, `UPDATE rule_subscriptions SET domains_json=?,rule_count=?,updated_at_ms=? WHERE id=?`, source.raw, len(legacy), time.Now().UnixMilli(), source.id); err != nil {
-				return nil, err
-			}
-		}
 		if !source.enabled {
 			continue
 		}
@@ -408,7 +406,6 @@ func (s *Service) subscriptionSets(ctx context.Context) ([]mosdnsclient.Subscrip
 		sort.Strings(domains)
 		set := mosdnsclient.SubscriptionSet{SourceID: source.id, SourceName: source.name, Category: source.category, Action: source.action, Priority: 100, Domains: domains}
 		if source.category == "route" {
-			set.Action = "upstream"
 			set.BindingID = source.bindingID.Int64
 			set.UpstreamGroupID = source.upstreamGroupID
 			set.Priority = source.priority
@@ -416,26 +413,6 @@ func (s *Service) subscriptionSets(ctx context.Context) ([]mosdnsclient.Subscrip
 		sets = append(sets, set)
 	}
 	return sets, nil
-}
-
-func (s *Service) legacySubscriptionDomains(ctx context.Context, id int64) ([]string, error) {
-	rows, err := s.store.DB().QueryContext(ctx, `SELECT pattern FROM domain_rules WHERE source=? ORDER BY normalized_pattern`, subscriptionSource(id))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	domains := []string{}
-	for rows.Next() {
-		var domain string
-		if err := rows.Scan(&domain); err != nil {
-			return nil, err
-		}
-		domains = append(domains, domain)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return domains, nil
 }
 
 func (s *Service) subscription(ctx context.Context, id int64) (Subscription, error) {

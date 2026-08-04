@@ -7,6 +7,7 @@ type _GroupHasNoVersionPrecondition = Assert<Equal<Extract<keyof UpstreamGroup, 
 type _CreateInput = Assert<Equal<Parameters<typeof api.createUpstreamGroup>[0], UpstreamGroupWrite>>
 type _DeleteInput = Assert<Equal<Parameters<typeof api.deleteUpstreamGroup>[1], VersionPrecondition>>
 type _SettingsRegistryVersion = Assert<Equal<Settings['upstream_registry_version'], number>>
+type _RegistrySchemaVersion = Assert<Equal<Awaited<ReturnType<typeof api.upstreamGroups>>['schema_version'], 1>>
 type _BindingInput = Assert<Equal<Parameters<typeof api.updateRuleSubscriptionBinding>[1], SubscriptionBindingInput>>
 type _QueryBindingID = Assert<Equal<QueryEvent['subscription_binding_id'], number>>
 

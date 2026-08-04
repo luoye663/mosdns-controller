@@ -79,12 +79,6 @@ type SystemStatus struct {
 	Audit                    *mosdnsclient.AuditStatus `json:"audit,omitempty"`
 	AuditError               string                    `json:"audit_error,omitempty"`
 }
-type Upstreams struct {
-	Local     mosdnsclient.UpstreamSnapshot `json:"local"`
-	Remote    mosdnsclient.UpstreamSnapshot `json:"remote"`
-	LocalECS  mosdnsclient.ECSSnapshot      `json:"local_ecs"`
-	RemoteECS mosdnsclient.ECSSnapshot      `json:"remote_ecs"`
-}
 type Settings struct {
 	CacheEnabled            bool   `json:"cache_enabled"`
 	CacheTTL                int    `json:"cache_ttl"`
@@ -354,7 +348,7 @@ func (s *Service) databaseSettings(ctx context.Context) (Settings, bool, error) 
 	return settings, hasDefault, nil
 }
 func (s *Service) SyncSettings(ctx context.Context) error {
-	settings, hasDefault, err := s.databaseSettings(ctx)
+	settings, hasPersistedDefault, err := s.databaseSettings(ctx)
 	if err != nil {
 		return err
 	}
@@ -364,9 +358,14 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 	}
 	desired := cloneRegistry(registry)
 	desired.Cache = registryCache(settings)
-	if hasDefault {
-		desired.DefaultGroupID = settings.DefaultUpstreamGroupID
+	defaultGroupID := registry.DefaultGroupID
+	if hasPersistedDefault {
+		defaultGroupID = settings.DefaultUpstreamGroupID
 	}
+	if !enabledGroup(registry, defaultGroupID) {
+		return errors.New("default upstream group must exist and be enabled")
+	}
+	desired.DefaultGroupID = defaultGroupID
 	applied, err := s.applyRegistry(ctx, registry, desired)
 	if err != nil {
 		return err
@@ -564,7 +563,7 @@ func (s *Service) applyRegistry(ctx context.Context, current, desired mosdnsclie
 }
 
 func validAppliedRegistry(snapshot mosdnsclient.RegistrySnapshot, version uint64) bool {
-	if snapshot.Version != version || snapshot.ExpectedCurrentVersion != 0 || len(snapshot.Groups) == 0 {
+	if snapshot.SchemaVersion != 1 || snapshot.Version != version || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(snapshot.Groups))
@@ -597,7 +596,7 @@ func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestI
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"dns_queries", "dns_stats_hourly_global", "dns_stats_hourly_domain", "dns_stats_hourly_client", "dns_stats_hourly_client_domain", "dns_stats_hourly_latency_bucket"} {
+	for _, table := range []string{"dns_queries", "dns_stats_hourly_global", "dns_stats_hourly_domain", "dns_stats_hourly_client", "dns_stats_hourly_client_domain", "dns_stats_hourly_upstream_group", "dns_stats_hourly_latency_bucket"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -607,90 +606,6 @@ func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestI
 	}
 	return tx.Commit()
 }
-func (s *Service) Upstreams(ctx context.Context) (Upstreams, error) {
-	registry, err := s.mosdns.RegistryStatus(ctx)
-	if err != nil {
-		return Upstreams{}, err
-	}
-	local, ok := registryGroup(registry, "local_dns")
-	if !ok {
-		return Upstreams{}, fmt.Errorf("local_dns: %w", ErrNotFound)
-	}
-	remote, ok := registryGroup(registry, "remote_dns")
-	if !ok {
-		return Upstreams{}, fmt.Errorf("remote_dns: %w", ErrNotFound)
-	}
-	return Upstreams{Local: legacyUpstream(registry.Version, local), Remote: legacyUpstream(registry.Version, remote), LocalECS: legacyECS(registry.Version, local), RemoteECS: legacyECS(registry.Version, remote)}, nil
-}
-func (s *Service) UpdateECS(ctx context.Context, group string, snapshot mosdnsclient.ECSSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.ECSSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return mosdnsclient.ECSSnapshot{}, fmt.Errorf("%w: invalid upstream group", ErrValidation)
-	}
-	current, err := s.mosdns.RegistryStatus(ctx)
-	if err != nil {
-		return mosdnsclient.ECSSnapshot{}, err
-	}
-	if snapshot.ExpectedCurrentVersion != current.Version || snapshot.Version != current.Version+1 {
-		return mosdnsclient.ECSSnapshot{}, mosdnsclient.ErrConflict
-	}
-	desired := cloneRegistry(current)
-	index := groupIndex(desired, group)
-	if index < 0 {
-		return mosdnsclient.ECSSnapshot{}, ErrNotFound
-	}
-	desired.Groups[index].ECS = mosdnsclient.ECSConfig{Mode: snapshot.Mode, Mask4: snapshot.Mask4, Mask6: snapshot.Mask6, Preset4: snapshot.Preset4, Preset6: snapshot.Preset6}
-	updatedRegistry, err := s.applyRegistry(ctx, current, desired)
-	var updated mosdnsclient.ECSSnapshot
-	if err == nil {
-		updated = legacyECS(updatedRegistry.Version, updatedRegistry.Groups[index])
-	}
-	result, code := "success", ""
-	if err != nil {
-		result, code = "failed", "ECS_APPLY_FAILED"
-	} else {
-		if flushErr := s.mosdns.FlushRegistry(ctx, group, updatedRegistry.Version); flushErr != nil {
-			err, result, code = flushErr, "failed", "CACHE_FLUSH_FAILED"
-		}
-	}
-	if auditErr := s.Audit(ctx, adminID, "update", "ecs", group, requestID, clientIP, result, code); auditErr != nil && err == nil {
-		err = auditErr
-	}
-	return updated, err
-}
-func (s *Service) UpdateUpstream(ctx context.Context, group string, snapshot mosdnsclient.UpstreamSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.UpstreamSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return mosdnsclient.UpstreamSnapshot{}, fmt.Errorf("%w: invalid upstream group", ErrValidation)
-	}
-	current, err := s.mosdns.RegistryStatus(ctx)
-	if err != nil {
-		return mosdnsclient.UpstreamSnapshot{}, err
-	}
-	if snapshot.ExpectedCurrentVersion != current.Version || snapshot.Version != current.Version+1 {
-		return mosdnsclient.UpstreamSnapshot{}, mosdnsclient.ErrConflict
-	}
-	desired := cloneRegistry(current)
-	index := groupIndex(desired, group)
-	if index < 0 {
-		return mosdnsclient.UpstreamSnapshot{}, ErrNotFound
-	}
-	desired.Groups[index].Mode, desired.Groups[index].Concurrent, desired.Groups[index].Socks5, desired.Groups[index].Upstreams = snapshot.Mode, snapshot.Concurrent, snapshot.Socks5, append([]mosdnsclient.Upstream(nil), snapshot.Upstreams...)
-	updatedRegistry, err := s.applyRegistry(ctx, current, desired)
-	var updated mosdnsclient.UpstreamSnapshot
-	if err == nil {
-		updated = legacyUpstream(updatedRegistry.Version, updatedRegistry.Groups[index])
-	}
-	result, code := "success", ""
-	if err != nil {
-		result, code = "failed", "UPSTREAM_APPLY_FAILED"
-	} else if flushErr := s.mosdns.FlushRegistry(ctx, group, updatedRegistry.Version); flushErr != nil {
-		err, result, code = flushErr, "failed", "CACHE_FLUSH_FAILED"
-	}
-	if auditErr := s.Audit(ctx, adminID, "update", "upstream", group, requestID, clientIP, result, code); auditErr != nil && err == nil {
-		err = auditErr
-	}
-	return updated, err
-}
-
 func (s *Service) UpstreamGroups(ctx context.Context) (mosdnsclient.RegistrySnapshot, error) {
 	return s.mosdns.RegistryStatus(ctx)
 }
@@ -737,9 +652,6 @@ func (s *Service) UpdateUpstreamGroup(ctx context.Context, id string, input Upst
 	if index < 0 {
 		return mosdnsclient.RegistrySnapshot{}, ErrNotFound
 	}
-	if (id == "local_dns" || id == "remote_dns") && !group.Enabled {
-		return mosdnsclient.RegistrySnapshot{}, ErrProtectedGroup
-	}
 	if id == current.DefaultGroupID && !group.Enabled {
 		return mosdnsclient.RegistrySnapshot{}, ErrProtectedGroup
 	}
@@ -766,7 +678,7 @@ func (s *Service) DeleteUpstreamGroup(ctx context.Context, id string, expectedCu
 	if expectedCurrentVersion != current.Version {
 		return mosdnsclient.RegistrySnapshot{}, mosdnsclient.ErrConflict
 	}
-	if id == current.DefaultGroupID || id == "local_dns" || id == "remote_dns" {
+	if id == current.DefaultGroupID {
 		return mosdnsclient.RegistrySnapshot{}, ErrProtectedGroup
 	}
 	if _, exists := registryGroup(current, id); !exists {
@@ -787,11 +699,11 @@ func (s *Service) DeleteUpstreamGroup(ctx context.Context, id string, expectedCu
 
 func (s *Service) upstreamGroupReferencedBySubscriptions(ctx context.Context, id string) (bool, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM subscription_bindings WHERE upstream_group_id=?`, id).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM subscription_bindings WHERE upstream_group_id=?)+(SELECT COUNT(*) FROM domain_rules WHERE upstream_group_id=?)`, id, id).Scan(&count)
 	if err != nil || count > 0 {
 		return count > 0, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE status IN ('active','pending','unknown')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE status IN ('active','pending','unknown') AND schema_version=4`)
 	if err != nil {
 		return false, err
 	}
@@ -805,12 +717,13 @@ func (s *Service) upstreamGroupReferencedBySubscriptions(ctx context.Context, id
 		if err := json.Unmarshal(raw, &snapshot); err != nil {
 			return false, err
 		}
-		for _, set := range snapshot.SubscriptionSets {
-			groupID := set.UpstreamGroupID
-			if groupID == "" && set.Category == "route" {
-				groupID = map[string]string{"local": "local_dns", "remote": "remote_dns"}[set.Action]
+		for _, rule := range snapshot.Rules {
+			if rule.UpstreamGroupID == id {
+				return true, nil
 			}
-			if groupID == id {
+		}
+		for _, set := range snapshot.SubscriptionSets {
+			if set.UpstreamGroupID == id {
 				return true, nil
 			}
 		}
@@ -863,14 +776,6 @@ func groupIndex(snapshot mosdnsclient.RegistrySnapshot, id string) int {
 		}
 	}
 	return -1
-}
-
-func legacyUpstream(version uint64, group mosdnsclient.UpstreamGroup) mosdnsclient.UpstreamSnapshot {
-	return mosdnsclient.UpstreamSnapshot{Version: version, Mode: group.Mode, Concurrent: group.Concurrent, Socks5: group.Socks5, Upstreams: append([]mosdnsclient.Upstream(nil), group.Upstreams...)}
-}
-
-func legacyECS(version uint64, group mosdnsclient.UpstreamGroup) mosdnsclient.ECSSnapshot {
-	return mosdnsclient.ECSSnapshot{Version: version, Mode: group.ECS.Mode, Mask4: group.ECS.Mask4, Mask6: group.ECS.Mask6, Preset4: group.ECS.Preset4, Preset6: group.ECS.Preset6}
 }
 
 func (s *Service) DatabaseStatus() DatabaseStatus {
