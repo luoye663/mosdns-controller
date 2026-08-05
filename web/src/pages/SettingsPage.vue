@@ -20,7 +20,7 @@ onMounted(load)
   <section class="page">
     <header class="page-heading">
       <div><p class="eyebrow">系统配置</p><h1>设置</h1></div>
-      <NButton :loading="loading" @click="load">刷新</NButton>
+      <div class="inline-controls"><NButton :loading="loading" :disabled="saving" @click="load">刷新</NButton><NButton type="primary" :loading="saving" :disabled="loading" @click="save">保存设置</NButton></div>
     </header>
     <div class="settings-grid"><NCard title="DNS 解析" size="small" class="settings-card"><div class="settings-fields">
       <div class="setting-field"><NFormItem label="默认上游组" :show-feedback="false"><NSelect v-model:value="settings.default_upstream_group_id" :options="groups.filter((group) => group.enabled).map((group) => ({ label: `${group.name} (${group.id})`, value: group.id }))" /></NFormItem><p class="field-hint">查询未命中手工路由或订阅绑定时，使用该上游组完成解析。</p></div>
@@ -34,7 +34,7 @@ onMounted(load)
     <NCard title="查询日志" size="small" class="settings-card"><div class="settings-fields">
       <div class="setting-field"><NFormItem label="保留天数" :show-feedback="false"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem><p class="field-hint">超过该天数的查询明细会滚动删除，相关查询统计也不再包含这些记录。</p></div>
       <div class="setting-field"><NFormItem label="数据库上限（GiB）" :show-feedback="false"><NInputNumber v-model:value="settings.database_max_size_gib" :min="1" :max="128" /></NFormItem><p class="field-hint">主文件与 WAL 合计达到上限的 90% 时优先清理最旧查询；管理员审计、规则和设备资料不会被自动清除。</p></div>
-      <div class="inline-controls settings-save-action"><NButton type="primary" :loading="saving" @click="save">保存设置</NButton><NButton type="error" secondary :loading="clearing" @click="showClearConfirmation = true">清空日志</NButton></div>
+      <div class="settings-save-action"><NButton type="error" secondary :loading="clearing" @click="showClearConfirmation = true">清空日志</NButton></div>
     </div></NCard></div>
     <NModal v-model:show="showClearConfirmation" preset="card" title="清空查询日志" class="rule-modal"><NAlert type="warning">此操作会删除全部 DNS 查询明细和统计聚合，无法恢复。管理员审计、规则和设备资料不会删除；新的查询仍会继续写入。</NAlert><div class="modal-actions"><NButton :disabled="clearing" @click="showClearConfirmation = false">取消</NButton><NButton type="error" :loading="clearing" @click="clearQueryHistory">确认清空</NButton></div></NModal>
   </section>
