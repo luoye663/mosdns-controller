@@ -42,17 +42,20 @@ type RegistrySnapshot struct {
 	DefaultGroupID         string              `json:"default_group_id"`
 	Groups                 []UpstreamGroup     `json:"groups"`
 	Cache                  RegistryCacheConfig `json:"cache"`
+	Protection             ProtectionConfig    `json:"protection"`
 }
 type UpstreamGroup struct {
-	ID         string           `json:"id"`
-	Name       string           `json:"name"`
-	Enabled    bool             `json:"enabled"`
-	Mode       string           `json:"mode"`
-	Concurrent int              `json:"concurrent"`
-	Socks5     string           `json:"socks5,omitempty"`
-	Upstreams  []Upstream       `json:"upstreams"`
-	ECS        ECSConfig        `json:"ecs"`
-	Cache      GroupCacheConfig `json:"cache"`
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	Enabled        bool             `json:"enabled"`
+	Mode           string           `json:"mode"`
+	Concurrent     int              `json:"concurrent"`
+	Socks5         string           `json:"socks5,omitempty"`
+	MaxInFlight    *int             `json:"max_in_flight,omitempty"`
+	QueryTimeoutMS *int             `json:"query_timeout_ms,omitempty"`
+	Upstreams      []Upstream       `json:"upstreams"`
+	ECS            ECSConfig        `json:"ecs"`
+	Cache          GroupCacheConfig `json:"cache"`
 }
 type ECSConfig struct {
 	Mode    string `json:"mode"`
@@ -70,15 +73,22 @@ type RegistryCacheConfig struct {
 	LazyTTL  int                 `json:"lazy_ttl"`
 	Negative NegativeCacheConfig `json:"negative"`
 }
+type ProtectionConfig struct {
+	GlobalMaxInFlight          int    `json:"global_max_in_flight"`
+	DefaultGroupMaxInFlight    int    `json:"default_group_max_in_flight"`
+	DefaultGroupQueryTimeoutMS int    `json:"default_group_query_timeout_ms"`
+	OverloadAction             string `json:"overload_action"`
+}
 type NegativeCacheConfig struct {
 	Enabled bool   `json:"enabled"`
 	TTL     uint32 `json:"ttl"`
 }
 type Upstream struct {
-	Tag      string `json:"tag"`
-	Addr     string `json:"addr"`
-	Priority int    `json:"priority"`
-	Weight   int    `json:"weight"`
+	Tag       string `json:"tag"`
+	Addr      string `json:"addr"`
+	Priority  int    `json:"priority"`
+	Weight    int    `json:"weight"`
+	TimeoutMS int    `json:"timeout_ms"`
 }
 type AddressFamilySnapshot struct {
 	Version                uint64 `json:"version"`
@@ -280,7 +290,7 @@ func (c *HTTPClient) FlushRegistry(ctx context.Context, groupID string, expected
 }
 
 func validRegistrySnapshot(snapshot RegistrySnapshot, expectedVersion uint64) bool {
-	if snapshot.SchemaVersion != 1 || snapshot.Version != expectedVersion || snapshot.Version == 0 || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
+	if (snapshot.SchemaVersion != 1 && snapshot.SchemaVersion != 2) || snapshot.Version != expectedVersion || snapshot.Version == 0 || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(snapshot.Groups))

@@ -43,7 +43,7 @@ func testAppWithClient(t *testing.T, client mosdnsclient.Client) *App {
 
 func TestSettingsAPIUsesRegistrySnapshot(t *testing.T) {
 	var tags []string
-	registry := mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "default", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
+	registry := mosdnsclient.RegistrySnapshot{SchemaVersion: 2, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "default", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}, Protection: mosdnsclient.ProtectionConfig{GlobalMaxInFlight: 1000, DefaultGroupMaxInFlight: 100, DefaultGroupQueryTimeoutMS: 2000, OverloadAction: "servfail"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tags = append(tags, r.URL.Path)
 		if r.Method == http.MethodPut {
@@ -62,17 +62,20 @@ func TestSettingsAPIUsesRegistrySnapshot(t *testing.T) {
 
 	getRec := httptest.NewRecorder()
 	application.settings(getRec, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil))
-	if getRec.Code != http.StatusOK || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_enabled":true`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_ttl":30`)) {
+	if getRec.Code != http.StatusOK || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_enabled":true`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_ttl":30`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"global_max_in_flight":1000`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"default_group_max_in_flight":100`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"default_group_query_timeout_ms":2000`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"overload_action":"servfail"`)) {
 		t.Fatalf("get settings=%d: %s", getRec.Code, getRec.Body.String())
 	}
 
-	body := `{"cache_enabled":true,"cache_ttl":0,"negative_cache_enabled":false,"negative_cache_ttl":60,"query_retention_days":7,"database_max_size_gib":2,"address_family_mode":"dual_stack","default_upstream_group_id":"default_dns","upstream_registry_version":1}`
+	body := `{"cache_enabled":true,"cache_ttl":0,"negative_cache_enabled":false,"negative_cache_ttl":60,"query_retention_days":7,"database_max_size_gib":2,"address_family_mode":"dual_stack","default_upstream_group_id":"default_dns","global_max_in_flight":2000,"default_group_max_in_flight":200,"default_group_query_timeout_ms":1500,"overload_action":"drop","upstream_registry_version":1}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewBufferString(body))
 	req = req.WithContext(context.WithValue(req.Context(), adminKey, auth.Admin{ID: 1, Username: "admin"}))
 	rec := httptest.NewRecorder()
 	application.updateSettings(rec, req)
-	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_enabled":false`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_ttl":60`)) {
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_enabled":false`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_ttl":60`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"global_max_in_flight":2000`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"default_group_max_in_flight":200`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"default_group_query_timeout_ms":1500`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"overload_action":"drop"`)) {
 		t.Fatalf("update settings=%d: %s", rec.Code, rec.Body.String())
+	}
+	if registry.Protection != (mosdnsclient.ProtectionConfig{GlobalMaxInFlight: 2000, DefaultGroupMaxInFlight: 200, DefaultGroupQueryTimeoutMS: 1500, OverloadAction: "drop"}) || registry.Version != 2 {
+		t.Fatalf("saved registry=%+v", registry)
 	}
 	want := []string{"/plugins/dynamic_upstreams/status", "/plugins/dynamic_upstreams/status", "/plugins/dynamic_upstreams/snapshot", "/plugins/dynamic_upstreams/status"}
 	if len(tags) != len(want) || tags[0] != want[0] || tags[1] != want[1] {

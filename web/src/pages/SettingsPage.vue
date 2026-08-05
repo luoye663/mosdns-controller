@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NFormItem, NInputNumber, NModal, NSelect, NSwitch } from 'naive-ui'
 import { api, type Settings, type UpstreamGroup } from '@/lib/api'
 import { notify } from '@/lib/notify'
 
-const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, negative_cache_enabled: true, negative_cache_ttl: 30, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack', default_upstream_group_id: 'default_dns', upstream_registry_version: 0 })
+const settings = ref<Settings>({ cache_enabled: true, cache_ttl: 0, negative_cache_enabled: true, negative_cache_ttl: 30, query_retention_days: 7, database_max_size_gib: 2, address_family_mode: 'dual_stack', default_upstream_group_id: 'default_dns', upstream_registry_version: 0, global_max_in_flight: 1024, default_group_max_in_flight: 256, default_group_query_timeout_ms: 5000, overload_action: 'servfail' })
 const groups = ref<UpstreamGroup[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const clearing = ref(false)
 const showClearConfirmation = ref(false)
+const defaultGroupQueryTimeoutSeconds = computed({
+  get: () => Math.max(1, Math.min(30, Math.round(settings.value.default_group_query_timeout_ms / 1000))),
+  set: (value: number | null) => { if (value !== null) settings.value.default_group_query_timeout_ms = Math.max(1, Math.min(30, Math.round(value))) * 1000 },
+})
 async function load() { loading.value = true; try { const [nextSettings, registry] = await Promise.all([api.settings(), api.upstreamGroups()]); settings.value = nextSettings; groups.value = registry.groups } catch (e) { notify.error(e instanceof Error ? e.message : '无法读取设置') } finally { loading.value = false } }
-async function save() { saving.value = true; try { settings.value = await api.updateSettings(settings.value); notify.success('设置已保存') } catch (e) { notify.error(e instanceof Error ? e.message : '保存设置失败') } finally { saving.value = false } }
+async function save() { settings.value.global_max_in_flight = Math.max(1, Math.min(65535, Math.round(settings.value.global_max_in_flight))); settings.value.default_group_max_in_flight = Math.max(1, Math.min(settings.value.global_max_in_flight, Math.round(settings.value.default_group_max_in_flight))); settings.value.default_group_query_timeout_ms = defaultGroupQueryTimeoutSeconds.value * 1000; saving.value = true; try { settings.value = await api.updateSettings(settings.value); notify.success('设置已保存') } catch (e) { notify.error(e instanceof Error ? e.message : '保存设置失败') } finally { saving.value = false } }
 async function clearQueryHistory() { clearing.value = true; try { await api.clearQueryHistory(); showClearConfirmation.value = false; notify.success('查询日志和统计已清空') } catch (e) { notify.error(e instanceof Error ? e.message : '清空查询日志失败') } finally { clearing.value = false } }
 onMounted(load)
 </script>
@@ -30,6 +34,12 @@ onMounted(load)
       <div class="setting-field"><NFormItem label="否定响应缓存上限（秒）" :show-feedback="false"><NInputNumber v-model:value="settings.negative_cache_ttl" :min="1" :max="86400" :disabled="!settings.negative_cache_enabled" /></NFormItem><p class="field-hint">存在 SOA 时取该值与权威 TTL 的较小值；响应没有 SOA 时使用该值。</p></div>
       <div class="setting-field"><NFormItem label="地址族策略" :show-feedback="false"><NSelect v-model:value="settings.address_family_mode" :options="[{ label: '双栈', value: 'dual_stack' }, { label: '优先 IPv4', value: 'prefer_ipv4' }, { label: '优先 IPv6', value: 'prefer_ipv6' }, { label: '仅 IPv4', value: 'ipv4_only' }, { label: '仅 IPv6', value: 'ipv6_only' }]" /></NFormItem><p class="field-hint">优先模式会在首选地址存在时隐藏另一种地址；仅限模式会直接返回被禁用地址族的空响应。</p></div>
       <NAlert v-if="settings.address_family_mode === 'prefer_ipv4' || settings.address_family_mode === 'prefer_ipv6'" type="warning" :show-icon="false">优先模式会为非首选地址查询补发首选地址查询；缓存未命中时，上游查询 QPS 最高可能接近原来的两倍。</NAlert>
+    </div></NCard>
+    <NCard title="DNS 并发保护" size="small" class="settings-card"><div class="settings-fields">
+      <div class="setting-field"><NFormItem label="全局并发上限" :show-feedback="false"><NInputNumber v-model:value="settings.global_max_in_flight" :min="1" :max="65535" /></NFormItem><p class="field-hint">限制所有上游组正在处理的查询总数，避免突发流量耗尽连接与内存。</p></div>
+      <div class="setting-field"><NFormItem label="默认组并发上限" :show-feedback="false"><NInputNumber v-model:value="settings.default_group_max_in_flight" :min="1" :max="settings.global_max_in_flight" /></NFormItem><p class="field-hint">未单独覆盖的上游组继承此值，且不能超过全局并发上限。</p></div>
+      <div class="setting-field"><NFormItem label="默认组总超时（秒）" :show-feedback="false"><NInputNumber v-model:value="defaultGroupQueryTimeoutSeconds" :min="1" :max="30" :precision="0" /></NFormItem><p class="field-hint">限制一次查询在组内重试和等待的总时长；接口按毫秒保存。</p></div>
+      <div class="setting-field"><NFormItem label="过载响应" :show-feedback="false"><NSelect v-model:value="settings.overload_action" :options="[{ label: 'SERVFAIL', value: 'servfail' }, { label: 'REFUSED', value: 'refused' }, { label: '直接丢弃', value: 'drop' }]" /></NFormItem><p class="field-hint">达到并发上限时立即返回所选 DNS 状态，或不发送响应。</p></div>
     </div></NCard>
     <NCard title="查询日志" size="small" class="settings-card"><div class="settings-fields">
       <div class="setting-field"><NFormItem label="保留天数" :show-feedback="false"><NInputNumber v-model:value="settings.query_retention_days" :min="1" :max="365" /></NFormItem><p class="field-hint">超过该天数的查询明细会滚动删除，相关查询统计也不再包含这些记录。</p></div>

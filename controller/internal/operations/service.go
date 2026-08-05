@@ -80,15 +80,19 @@ type SystemStatus struct {
 	AuditError               string                    `json:"audit_error,omitempty"`
 }
 type Settings struct {
-	CacheEnabled            bool   `json:"cache_enabled"`
-	CacheTTL                int    `json:"cache_ttl"`
-	NegativeCacheEnabled    bool   `json:"negative_cache_enabled"`
-	NegativeCacheTTL        int    `json:"negative_cache_ttl"`
-	QueryRetentionDays      int    `json:"query_retention_days"`
-	DatabaseMaxSizeGiB      int    `json:"database_max_size_gib"`
-	AddressFamilyMode       string `json:"address_family_mode"`
-	DefaultUpstreamGroupID  string `json:"default_upstream_group_id"`
-	UpstreamRegistryVersion uint64 `json:"upstream_registry_version"`
+	CacheEnabled               bool   `json:"cache_enabled"`
+	CacheTTL                   int    `json:"cache_ttl"`
+	NegativeCacheEnabled       bool   `json:"negative_cache_enabled"`
+	NegativeCacheTTL           int    `json:"negative_cache_ttl"`
+	QueryRetentionDays         int    `json:"query_retention_days"`
+	DatabaseMaxSizeGiB         int    `json:"database_max_size_gib"`
+	AddressFamilyMode          string `json:"address_family_mode"`
+	DefaultUpstreamGroupID     string `json:"default_upstream_group_id"`
+	GlobalMaxInFlight          int    `json:"global_max_in_flight"`
+	DefaultGroupMaxInFlight    int    `json:"default_group_max_in_flight"`
+	DefaultGroupQueryTimeoutMS int    `json:"default_group_query_timeout_ms"`
+	OverloadAction             string `json:"overload_action"`
+	UpstreamRegistryVersion    uint64 `json:"upstream_registry_version"`
 }
 type UpstreamGroupWrite struct {
 	ExpectedCurrentVersion uint64                     `json:"expected_current_version"`
@@ -267,6 +271,10 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	settings.NegativeCacheEnabled = registry.Cache.Negative.Enabled
 	settings.NegativeCacheTTL = int(registry.Cache.Negative.TTL)
 	settings.DefaultUpstreamGroupID = registry.DefaultGroupID
+	settings.GlobalMaxInFlight = registry.Protection.GlobalMaxInFlight
+	settings.DefaultGroupMaxInFlight = registry.Protection.DefaultGroupMaxInFlight
+	settings.DefaultGroupQueryTimeoutMS = registry.Protection.DefaultGroupQueryTimeoutMS
+	settings.OverloadAction = registry.Protection.OverloadAction
 	settings.UpstreamRegistryVersion = registry.Version
 	return settings, nil
 }
@@ -430,6 +438,7 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	desired := cloneRegistry(currentRegistry)
 	desired.DefaultGroupID = settings.DefaultUpstreamGroupID
 	desired.Cache = registryCache(settings)
+	desired.Protection = registryProtection(settings)
 	applied, err := s.applyRegistry(ctx, currentRegistry, desired)
 	if err != nil {
 		return err
@@ -437,6 +446,10 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	settings.DefaultUpstreamGroupID = applied.DefaultGroupID
 	settings.CacheEnabled, settings.CacheTTL = applied.Cache.Enabled, applied.Cache.LazyTTL
 	settings.NegativeCacheEnabled, settings.NegativeCacheTTL = applied.Cache.Negative.Enabled, int(applied.Cache.Negative.TTL)
+	settings.GlobalMaxInFlight = applied.Protection.GlobalMaxInFlight
+	settings.DefaultGroupMaxInFlight = applied.Protection.DefaultGroupMaxInFlight
+	settings.DefaultGroupQueryTimeoutMS = applied.Protection.DefaultGroupQueryTimeoutMS
+	settings.OverloadAction = applied.Protection.OverloadAction
 	settings.UpstreamRegistryVersion = applied.Version
 	var partialErr error
 	if s.ingest != nil {
@@ -531,6 +544,15 @@ func registryCache(settings Settings) mosdnsclient.RegistryCacheConfig {
 	return mosdnsclient.RegistryCacheConfig{Enabled: settings.CacheEnabled, LazyTTL: settings.CacheTTL, Negative: mosdnsclient.NegativeCacheConfig{Enabled: settings.NegativeCacheEnabled, TTL: uint32(settings.NegativeCacheTTL)}}
 }
 
+func registryProtection(settings Settings) mosdnsclient.ProtectionConfig {
+	return mosdnsclient.ProtectionConfig{
+		GlobalMaxInFlight:          settings.GlobalMaxInFlight,
+		DefaultGroupMaxInFlight:    settings.DefaultGroupMaxInFlight,
+		DefaultGroupQueryTimeoutMS: settings.DefaultGroupQueryTimeoutMS,
+		OverloadAction:             settings.OverloadAction,
+	}
+}
+
 func cloneRegistry(snapshot mosdnsclient.RegistrySnapshot) mosdnsclient.RegistrySnapshot {
 	clone := snapshot
 	clone.Groups = append([]mosdnsclient.UpstreamGroup(nil), snapshot.Groups...)
@@ -563,7 +585,7 @@ func (s *Service) applyRegistry(ctx context.Context, current, desired mosdnsclie
 }
 
 func validAppliedRegistry(snapshot mosdnsclient.RegistrySnapshot, version uint64) bool {
-	if snapshot.SchemaVersion != 1 || snapshot.Version != version || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
+	if (snapshot.SchemaVersion != 1 && snapshot.SchemaVersion != 2) || snapshot.Version != version || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(snapshot.Groups))

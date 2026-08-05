@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NDatePicker, NInput, NModal, NPopover, NSelect, NSwitch, NTooltip } from 'naive-ui'
 import { CircleHelp } from '@lucide/vue'
 import { api, eventStream, type AnswerDiagnostics, type ApiError, type QueryEvent, type QueryParams, type QueryResultClass, type Rule, type UpstreamGroup } from '@/lib/api'
@@ -39,7 +39,7 @@ const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qt
 let stream: EventSource | undefined
 let tableResizeObserver: ResizeObserver | undefined
 
-const routeOptions = [{ label: '全部路由', value: '' }, { label: '上游组', value: 'forward' }, { label: '拦截', value: 'block' }]
+const routeOptions = [{ label: '全部路由类型', value: '' }, { label: '转发', value: 'forward' }, { label: '拦截', value: 'block' }]
 const booleanOptions = [{ label: '不限', value: '' }, { label: '是', value: 'true' }, { label: '否', value: 'false' }]
 const typeOptions = [{ label: '全部类型', value: '' }, { label: 'A', value: '1' }, { label: 'AAAA', value: '28' }, { label: 'CNAME', value: '5' }, { label: 'MX', value: '15' }, { label: 'TXT', value: '16' }, { label: 'PTR', value: '12' }, { label: 'HTTPS', value: '65' }]
 const rcodeOptions = [{ label: '全部结果', value: '' }, { label: 'NOERROR', value: '0' }, { label: 'FORMERR', value: '1' }, { label: 'SERVFAIL', value: '2' }, { label: 'NXDOMAIN', value: '3' }, { label: 'REFUSED', value: '5' }]
@@ -176,13 +176,14 @@ async function openDiagnostics(row: QueryEvent) {
   }
 }
 onMounted(async () => {
-  await Promise.all([load(), loadRuleLabels().catch(() => {}), loadUpstreamGroups().catch(() => {})])
+  await Promise.all([load(), loadRuleLabels().catch(() => {})])
   await nextTick()
   updateTopScrollbar()
   tableResizeObserver = new ResizeObserver(updateTopScrollbar)
   if (tableScroller.value) tableResizeObserver.observe(tableScroller.value)
   if (queriesTable.value) tableResizeObserver.observe(queriesTable.value)
 })
+onActivated(() => { void loadUpstreamGroups().catch((e) => notify.error(e instanceof Error ? e.message : '无法加载上游组筛选项')) })
 onBeforeUnmount(() => { closeStream(); tableResizeObserver?.disconnect() })
 </script>
 

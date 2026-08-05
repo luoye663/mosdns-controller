@@ -64,13 +64,18 @@ plugins:
       backup_file: "${MOSDNS_STATE_DIR}/upstream-registry.json.bak"
       auth_token_file: "${MOSDNS_TOKEN_FILE}"
       initial_snapshot:
-        schema_version: 1
+        schema_version: 2
         version: 1
         default_group_id: default_dns
         cache:
           enabled: true
           lazy_ttl: 0
           negative: { enabled: true, ttl: 30 }
+        protection:
+          global_max_in_flight: 1024
+          default_group_max_in_flight: 256
+          default_group_query_timeout_ms: 5000
+          overload_action: servfail
         groups:
           - id: default_dns
             name: 默认上游
@@ -81,7 +86,7 @@ plugins:
             ecs: { mode: off, mask4: 24, mask6: 48 }
             cache: { enabled: true, size: ${CACHE_SIZE} }
             upstreams:
-              - { tag: ${DEFAULT_UPSTREAM_TAG}, addr: "${DEFAULT_UPSTREAM_ADDR}", priority: 100, weight: 1 }
+              - { tag: ${DEFAULT_UPSTREAM_TAG}, addr: "${DEFAULT_UPSTREAM_ADDR}", priority: 100, weight: 1, timeout_ms: 1000 }
 
   - tag: forward_routes
     type: sequence

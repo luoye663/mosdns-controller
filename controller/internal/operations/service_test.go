@@ -88,7 +88,7 @@ func testRegistry() mosdnsclient.RegistrySnapshot {
 	group := func(id, name string) mosdnsclient.UpstreamGroup {
 		return mosdnsclient.UpstreamGroup{ID: id, Name: name, Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: id, Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}
 	}
-	return mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{group("default_dns", "Default"), group("backup_dns", "Backup")}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
+	return mosdnsclient.RegistrySnapshot{SchemaVersion: 2, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{group("default_dns", "Default"), group("backup_dns", "Backup")}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}, Protection: mosdnsclient.ProtectionConfig{GlobalMaxInFlight: 1000, DefaultGroupMaxInFlight: 100, DefaultGroupQueryTimeoutMS: 2000, OverloadAction: "servfail"}}
 }
 func (f *fakeMosdns) AddressFamilyStatus(context.Context) (mosdnsclient.AddressFamilySnapshot, error) {
 	if f.addressFamily.Version == 0 {
@@ -243,15 +243,22 @@ func TestSystemStatusReportsMosdnsRSS(t *testing.T) {
 func TestUpdateSettingsPersistsAndAppliesCache(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheEnabled: false, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only", DefaultUpstreamGroupID: "default_dns", UpstreamRegistryVersion: 1}, 1, "req-settings", "192.0.2.10"); err != nil {
+	if err := s.UpdateSettings(context.Background(), Settings{CacheEnabled: false, CacheTTL: 60, NegativeCacheEnabled: false, NegativeCacheTTL: 45, QueryRetentionDays: 3, DatabaseMaxSizeGiB: 4, AddressFamilyMode: "ipv4_only", DefaultUpstreamGroupID: "default_dns", GlobalMaxInFlight: 2000, DefaultGroupMaxInFlight: 200, DefaultGroupQueryTimeoutMS: 1500, OverloadAction: "drop", UpstreamRegistryVersion: 1}, 1, "req-settings", "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := s.Settings(context.Background())
-	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.NegativeCacheEnabled || settings.NegativeCacheTTL != 45 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || settings.DefaultUpstreamGroupID != "default_dns" || fake.addressFamily.Mode != "ipv4_only" {
+	if err != nil || settings.CacheEnabled || settings.CacheTTL != 60 || settings.NegativeCacheEnabled || settings.NegativeCacheTTL != 45 || settings.QueryRetentionDays != 3 || settings.DatabaseMaxSizeGiB != 4 || settings.AddressFamilyMode != "ipv4_only" || settings.DefaultUpstreamGroupID != "default_dns" || settings.GlobalMaxInFlight != 2000 || settings.DefaultGroupMaxInFlight != 200 || settings.DefaultGroupQueryTimeoutMS != 1500 || settings.OverloadAction != "drop" || fake.addressFamily.Mode != "ipv4_only" {
 		t.Fatalf("settings=%+v cache=%t err=%v", settings, fake.cacheEnabled, err)
 	}
 	if fake.registry.Cache.Negative.Enabled || fake.registry.Cache.Negative.TTL != 45 {
 		t.Fatalf("negative cache=%+v", fake.registry.Cache.Negative)
+	}
+	if fake.registry.Protection != (mosdnsclient.ProtectionConfig{GlobalMaxInFlight: 2000, DefaultGroupMaxInFlight: 200, DefaultGroupQueryTimeoutMS: 1500, OverloadAction: "drop"}) {
+		t.Fatalf("protection=%+v", fake.registry.Protection)
+	}
+	var persistedProtectionKeys int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM system_state WHERE key IN ('global_max_in_flight','default_group_max_in_flight','default_group_query_timeout_ms','overload_action')`).Scan(&persistedProtectionKeys); err != nil || persistedProtectionKeys != 0 {
+		t.Fatalf("persisted protection keys=%d err=%v", persistedProtectionKeys, err)
 	}
 	if len(fake.flushes) != 1 || fake.flushes[0] != "" {
 		t.Fatalf("flushes=%v", fake.flushes)
