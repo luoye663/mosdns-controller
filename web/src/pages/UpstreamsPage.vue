@@ -15,10 +15,10 @@ const baselines = ref<Record<string, string>>({})
 
 const modeOptions = [{ label: '竞速', value: 'race' }, { label: '加权选择', value: 'weighted' }, { label: '主备优先级', value: 'failover' }]
 const ecsOptions = [{ label: '关闭', value: 'off' }, { label: '客户端网段', value: 'client_subnet' }, { label: '固定网段', value: 'fixed_subnet' }]
-const bootstrapVersionOptions = [{ label: 'IPv4（A）', value: 4 }, { label: 'IPv6（AAAA）', value: 6 }]
+const bootstrapVersionOptions = [{ label: '双栈（推荐）', value: 46 }, { label: '仅 IPv4（A）', value: 4 }, { label: '仅 IPv6（AAAA）', value: 6 }]
 
 function newGroup(): UpstreamGroup {
-  return { id: '', name: '', enabled: true, mode: 'race', concurrent: 1, max_in_flight: null, query_timeout_ms: null, socks5: '', bootstrap: '', bootstrap_version: 4, ecs: { mode: 'off', mask4: 24, mask6: 48 }, cache: { enabled: true, size: 1024 }, upstreams: [{ tag: 'primary', addr: '', priority: 100, weight: 1, timeout_ms: 1000 }] }
+  return { id: '', name: '', enabled: true, mode: 'race', concurrent: 1, max_in_flight: null, query_timeout_ms: null, socks5: '', bootstrap: '', bootstrap_version: 46, ecs: { mode: 'off', mask4: 24, mask6: 48 }, cache: { enabled: true, size: 1024 }, upstreams: [{ tag: 'primary', addr: '', priority: 100, weight: 1, timeout_ms: 1000 }] }
 }
 function cloneGroup(group: UpstreamGroup): UpstreamGroup { return { ...group, ecs: { ...group.ecs }, cache: { ...group.cache }, upstreams: group.upstreams.map((item) => ({ ...item })) } }
 function serialized(group: UpstreamGroup) { return JSON.stringify(group) }
@@ -90,7 +90,7 @@ onMounted(load)
           <NFormItem label="组总超时"><div class="protection-override"><NSwitch :value="group.query_timeout_ms != null" @update:value="(enabled) => setQueryTimeoutOverride(group, enabled)" /><span>{{ group.query_timeout_ms == null ? `继承（${Math.round((registry?.protection.default_group_query_timeout_ms ?? 1000) / 1000)} 秒）` : '自定义' }}</span><NInputNumber v-if="group.query_timeout_ms != null" :value="Math.round(group.query_timeout_ms / 1000)" :min="1" :max="30" :precision="0" @update:value="(value) => setQueryTimeoutSeconds(group, value)" /></div></NFormItem>
           <NFormItem label="SOCKS5 代理"><NInput v-model:value="group.socks5" placeholder="host:port" /></NFormItem>
           <div class="setting-field"><NFormItem label="引导 DNS" :show-feedback="false"><NInput v-model:value="group.bootstrap" placeholder="223.5.5.5 或 [2400:3200::1]:53" /></NFormItem><p class="field-hint">专门解析本组域名型上游节点。必须填写 IP，可带端口；留空使用系统 DNS，配置后失败不会回退。</p></div>
-          <div class="setting-field"><NFormItem label="解析地址族" :show-feedback="false"><NSelect v-model:value="group.bootstrap_version" :options="bootstrapVersionOptions" :disabled="!group.bootstrap?.trim()" /></NFormItem><p class="field-hint">决定解析上游节点域名时查询 A 记录还是 AAAA 记录。</p></div>
+          <div class="setting-field"><NFormItem label="解析地址族" :show-feedback="false"><NSelect v-model:value="group.bootstrap_version" :options="bootstrapVersionOptions" :disabled="!group.bootstrap?.trim()" /></NFormItem><p class="field-hint">双栈会并发查询 A 和 AAAA，任一地址族成功即可建立连接；单栈模式只查询指定记录。</p></div>
           <div class="setting-field"><NFormItem label="组缓存" :show-feedback="false"><NSwitch v-model:value="group.cache.enabled" /></NFormItem><p class="field-hint">独立缓存本组 DNS 响应；还需在设置中开启全局缓存，命中后不会访问上游。</p></div>
           <div class="setting-field"><NFormItem label="缓存容量" :show-feedback="false"><NInputNumber v-model:value="group.cache.size" :min="1" :max="65536" /></NFormItem><p class="field-hint">容量按缓存条目计数，所有组的容量总和不能超过 65536。</p></div>
           <div class="setting-field"><NFormItem label="ECS" :show-feedback="false"><NSelect v-model:value="group.ecs.mode" :options="ecsOptions" /></NFormItem><p class="field-hint">{{ ecsHint(group.ecs.mode) }}</p></div>
@@ -115,7 +115,7 @@ onMounted(load)
         <NFormItem label="组总超时"><div class="protection-override"><NSwitch :value="draft.query_timeout_ms != null" @update:value="(enabled) => setQueryTimeoutOverride(draft, enabled)" /><span>{{ draft.query_timeout_ms == null ? `继承（${Math.round((registry?.protection.default_group_query_timeout_ms ?? 1000) / 1000)} 秒）` : '自定义' }}</span><NInputNumber v-if="draft.query_timeout_ms != null" :value="Math.round(draft.query_timeout_ms / 1000)" :min="1" :max="30" :precision="0" @update:value="(value) => setQueryTimeoutSeconds(draft, value)" /></div></NFormItem>
         <NFormItem label="SOCKS5 代理"><NInput v-model:value="draft.socks5" placeholder="host:port" /></NFormItem>
         <div class="setting-field"><NFormItem label="引导 DNS" :show-feedback="false"><NInput v-model:value="draft.bootstrap" placeholder="223.5.5.5 或 [2400:3200::1]:53" /></NFormItem><p class="field-hint">专门解析本组域名型上游节点。必须填写 IP，可带端口；留空使用系统 DNS，配置后失败不会回退。</p></div>
-        <div class="setting-field"><NFormItem label="解析地址族" :show-feedback="false"><NSelect v-model:value="draft.bootstrap_version" :options="bootstrapVersionOptions" :disabled="!draft.bootstrap?.trim()" /></NFormItem><p class="field-hint">决定解析上游节点域名时查询 A 记录还是 AAAA 记录。</p></div>
+        <div class="setting-field"><NFormItem label="解析地址族" :show-feedback="false"><NSelect v-model:value="draft.bootstrap_version" :options="bootstrapVersionOptions" :disabled="!draft.bootstrap?.trim()" /></NFormItem><p class="field-hint">双栈会并发查询 A 和 AAAA，任一地址族成功即可建立连接；单栈模式只查询指定记录。</p></div>
         <div class="setting-field"><NFormItem label="组缓存" :show-feedback="false"><NSwitch v-model:value="draft.cache.enabled" /></NFormItem><p class="field-hint">独立缓存本组 DNS 响应；还需在设置中开启全局缓存，命中后不会访问上游。</p></div>
         <div class="setting-field"><NFormItem label="缓存容量" :show-feedback="false"><NInputNumber v-model:value="draft.cache.size" :min="1" :max="65536" /></NFormItem><p class="field-hint">容量按缓存条目计数，所有组的容量总和不能超过 65536。</p></div>
         <div class="setting-field"><NFormItem label="ECS" :show-feedback="false"><NSelect v-model:value="draft.ecs.mode" :options="ecsOptions" /></NFormItem><p class="field-hint">{{ ecsHint(draft.ecs.mode) }}</p></div>

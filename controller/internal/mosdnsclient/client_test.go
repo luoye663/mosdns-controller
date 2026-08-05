@@ -12,7 +12,7 @@ import (
 
 func registrySnapshot(version uint64) RegistrySnapshot {
 	maxInFlight, queryTimeoutMS := 40, 1200
-	return RegistrySnapshot{SchemaVersion: 2, Version: version, DefaultGroupID: "default_dns", Groups: []UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Bootstrap: "223.5.5.5:53", BootstrapVer: 4, MaxInFlight: &maxInFlight, QueryTimeoutMS: &queryTimeoutMS, Upstreams: []Upstream{{Tag: "default", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: RegistryCacheConfig{Enabled: true, Negative: NegativeCacheConfig{Enabled: true, TTL: 30}}, Protection: ProtectionConfig{GlobalMaxInFlight: 1000, DefaultGroupMaxInFlight: 100, DefaultGroupQueryTimeoutMS: 2000, OverloadAction: "servfail"}}
+	return RegistrySnapshot{SchemaVersion: 2, Version: version, DefaultGroupID: "default_dns", Groups: []UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Bootstrap: "223.5.5.5:53", BootstrapVer: 46, MaxInFlight: &maxInFlight, QueryTimeoutMS: &queryTimeoutMS, Upstreams: []Upstream{{Tag: "default", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: RegistryCacheConfig{Enabled: true, Negative: NegativeCacheConfig{Enabled: true, TTL: 30}}, Protection: ProtectionConfig{GlobalMaxInFlight: 1000, DefaultGroupMaxInFlight: 100, DefaultGroupQueryTimeoutMS: 2000, OverloadAction: "servfail"}}
 }
 
 func TestRegistryEndpointsAndStrictConsistency(t *testing.T) {
@@ -47,7 +47,7 @@ func TestRegistryEndpointsAndStrictConsistency(t *testing.T) {
 	defer server.Close()
 	client := New(server.URL, "test-token", time.Second)
 	status, err := client.RegistryStatus(context.Background())
-	if err != nil || status.Version != 1 || status.Protection.GlobalMaxInFlight != 1000 || status.Groups[0].Bootstrap != "223.5.5.5:53" || status.Groups[0].BootstrapVer != 4 || status.Groups[0].MaxInFlight == nil || *status.Groups[0].MaxInFlight != 40 || status.Groups[0].QueryTimeoutMS == nil || *status.Groups[0].QueryTimeoutMS != 1200 {
+	if err != nil || status.Version != 1 || status.Protection.GlobalMaxInFlight != 1000 || status.Groups[0].Bootstrap != "223.5.5.5:53" || status.Groups[0].BootstrapVer != 46 || status.Groups[0].MaxInFlight == nil || *status.Groups[0].MaxInFlight != 40 || status.Groups[0].QueryTimeoutMS == nil || *status.Groups[0].QueryTimeoutMS != 1200 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	next := registrySnapshot(2)

@@ -14,7 +14,7 @@ type _UpstreamTimeout = Assert<Equal<UpstreamGroup['upstreams'][number]['timeout
 type _GroupMaxInFlight = Assert<Equal<UpstreamGroup['max_in_flight'], number | null | undefined>>
 type _GroupQueryTimeout = Assert<Equal<UpstreamGroup['query_timeout_ms'], number | null | undefined>>
 type _GroupBootstrap = Assert<Equal<UpstreamGroup['bootstrap'], string | undefined>>
-type _GroupBootstrapVersion = Assert<Equal<UpstreamGroup['bootstrap_version'], 4 | 6>>
+type _GroupBootstrapVersion = Assert<Equal<UpstreamGroup['bootstrap_version'], 46 | 4 | 6>>
 type _RegistryProtection = Assert<Equal<Awaited<ReturnType<typeof api.upstreamGroups>>['protection'], UpstreamProtection>>
 type _OverloadAction = Assert<Equal<Settings['overload_action'], 'servfail' | 'refused' | 'drop'>>
 
