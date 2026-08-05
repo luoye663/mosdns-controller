@@ -51,6 +51,8 @@ type UpstreamGroup struct {
 	Mode           string           `json:"mode"`
 	Concurrent     int              `json:"concurrent"`
 	Socks5         string           `json:"socks5,omitempty"`
+	Bootstrap      string           `json:"bootstrap,omitempty"`
+	BootstrapVer   int              `json:"bootstrap_version"`
 	MaxInFlight    *int             `json:"max_in_flight,omitempty"`
 	QueryTimeoutMS *int             `json:"query_timeout_ms,omitempty"`
 	Upstreams      []Upstream       `json:"upstreams"`

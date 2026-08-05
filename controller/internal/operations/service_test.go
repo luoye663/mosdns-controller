@@ -304,12 +304,12 @@ func TestSettingsNegativeCacheDefaultsAndValidation(t *testing.T) {
 func TestUpstreamGroupCRUDProtectsDefaultID(t *testing.T) {
 	fake := &fakeMosdns{}
 	s := testService(t, fake)
-	group := mosdnsclient.UpstreamGroup{ID: "office_dns", Name: "Office", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "office", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}
+	group := mosdnsclient.UpstreamGroup{ID: "office_dns", Name: "Office", Enabled: true, Mode: "race", Concurrent: 1, Bootstrap: "223.5.5.5", BootstrapVer: 4, Upstreams: []mosdnsclient.Upstream{{Tag: "office", Addr: "https://dns.example/dns-query", Priority: 100, Weight: 1}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}
 	created, err := s.CreateUpstreamGroup(context.Background(), UpstreamGroupWrite{ExpectedCurrentVersion: 1, Group: group}, 1, "req-create", "192.0.2.10")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(created.Groups) != 3 || created.Groups[2].ID != group.ID {
+	if len(created.Groups) != 3 || created.Groups[2].ID != group.ID || created.Groups[2].Bootstrap != group.Bootstrap || created.Groups[2].BootstrapVer != group.BootstrapVer {
 		t.Fatalf("created=%+v", created.Groups)
 	}
 	group.ID = "renamed"
