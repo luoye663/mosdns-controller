@@ -13,6 +13,9 @@ export interface Device { id: number; ip: string; mac: string; hostname: string;
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
 export interface Upstream { tag: string; addr: string; priority: number; weight: number; timeout_ms: number }
 export interface UpstreamProtection { global_max_in_flight: number; default_group_max_in_flight: number; default_group_query_timeout_ms: number; overload_action: 'servfail' | 'refused' | 'drop' }
+export interface RuntimeConcurrency { in_flight: number; limit: number }
+export interface UpstreamGroupRuntime extends RuntimeConcurrency { id: string; name: string; enabled: boolean }
+export interface UpstreamRuntimeStatus { registry_version: number; global: RuntimeConcurrency; groups: UpstreamGroupRuntime[] }
 export interface UpstreamGroup { id: string; name: string; enabled: boolean; mode: 'race' | 'weighted' | 'failover'; concurrent: number; max_in_flight?: number | null; query_timeout_ms?: number | null; socks5?: string; bootstrap?: string; bootstrap_version: 46 | 4 | 6; upstreams: Upstream[]; ecs: { mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }; cache: { enabled: boolean; size: number } }
 export interface UpstreamRegistry { schema_version: 2; version: number; expected_current_version: number; default_group_id: string; groups: UpstreamGroup[]; cache: { enabled: boolean; lazy_ttl: number; negative: { enabled: boolean; ttl: number } }; protection: UpstreamProtection }
 export interface Settings extends UpstreamProtection { cache_enabled: boolean; cache_ttl: number; negative_cache_enabled: boolean; negative_cache_ttl: number; query_retention_days: number; database_max_size_gib: number; address_family_mode: 'dual_stack' | 'prefer_ipv4' | 'prefer_ipv6' | 'ipv4_only' | 'ipv6_only'; default_upstream_group_id: string; upstream_registry_version: number }
@@ -70,6 +73,7 @@ export const api = {
   summary: () => request<DashboardSummary>('/stats/summary'),
   statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode' | 'upstream_groups') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : kind === 'upstream_groups' ? '/stats/upstream-groups' : `/stats/${kind}`),
   latency: () => request<{ items: LatencyPoint[] }>('/stats/latency'),
+  upstreamRuntimeStatus: () => request<UpstreamRuntimeStatus>('/stats/upstream-runtime'),
   queries: (params: QueryParams) => request<{ items: QueryEvent[]; next_cursor?: string }>(`/queries?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
   answerDiagnostics: (eventID: string) => request<AnswerDiagnostics>(`/queries/${encodeURIComponent(eventID)}/answer-ips`),
   rules: () => request<{ items: Rule[] }>('/rules'),

@@ -24,6 +24,8 @@ func TestRegistryEndpointsAndStrictConsistency(t *testing.T) {
 		switch r.URL.Path {
 		case "/plugins/dynamic_upstreams/status":
 			_ = json.NewEncoder(w).Encode(current)
+		case "/plugins/dynamic_upstreams/runtime-status":
+			_ = json.NewEncoder(w).Encode(RegistryRuntimeStatus{RegistryVersion: current.Version, Global: RuntimeConcurrency{InFlight: 5, Limit: 32}, Groups: []GroupRuntimeStatus{{ID: "default_dns", Name: "Default", Enabled: true, InFlight: 3, Limit: 16}}})
 		case "/plugins/dynamic_upstreams/snapshot":
 			if err := json.NewDecoder(r.Body).Decode(&current); err != nil {
 				t.Fatal(err)
@@ -57,6 +59,10 @@ func TestRegistryEndpointsAndStrictConsistency(t *testing.T) {
 	}
 	if err := client.FlushRegistry(context.Background(), "office_dns", 2); err != nil {
 		t.Fatal(err)
+	}
+	runtimeStatus, err := client.RegistryRuntimeStatus(context.Background())
+	if err != nil || runtimeStatus.RegistryVersion != 2 || runtimeStatus.Global.InFlight != 5 || len(runtimeStatus.Groups) != 1 || runtimeStatus.Groups[0].Limit != 16 {
+		t.Fatalf("runtime status=%+v err=%v", runtimeStatus, err)
 	}
 }
 

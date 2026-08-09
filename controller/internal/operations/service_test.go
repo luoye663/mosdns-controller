@@ -23,6 +23,7 @@ type fakeMosdns struct {
 	negativeErr      map[string]error
 	addressFamily    mosdnsclient.AddressFamilySnapshot
 	registry         mosdnsclient.RegistrySnapshot
+	runtimeStatus    mosdnsclient.RegistryRuntimeStatus
 	registryApplyErr error
 }
 
@@ -67,6 +68,9 @@ func (f *fakeMosdns) RegistryStatus(context.Context) (mosdnsclient.RegistrySnaps
 		f.registry = testRegistry()
 	}
 	return cloneRegistry(f.registry), nil
+}
+func (f *fakeMosdns) RegistryRuntimeStatus(context.Context) (mosdnsclient.RegistryRuntimeStatus, error) {
+	return f.runtimeStatus, nil
 }
 func (f *fakeMosdns) ApplyRegistry(_ context.Context, snapshot mosdnsclient.RegistrySnapshot) (mosdnsclient.RegistrySnapshot, error) {
 	if f.registry.Version == 0 {

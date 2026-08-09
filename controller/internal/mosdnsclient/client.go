@@ -29,6 +29,7 @@ type Client interface {
 	NegativeCache(context.Context, string) (NegativeCacheSettings, error)
 	SetNegativeCache(context.Context, string, NegativeCacheSettings) (NegativeCacheSettings, error)
 	RegistryStatus(context.Context) (RegistrySnapshot, error)
+	RegistryRuntimeStatus(context.Context) (RegistryRuntimeStatus, error)
 	ApplyRegistry(context.Context, RegistrySnapshot) (RegistrySnapshot, error)
 	FlushRegistry(context.Context, string, uint64) error
 	AddressFamilyStatus(context.Context) (AddressFamilySnapshot, error)
@@ -80,6 +81,22 @@ type ProtectionConfig struct {
 	DefaultGroupMaxInFlight    int    `json:"default_group_max_in_flight"`
 	DefaultGroupQueryTimeoutMS int    `json:"default_group_query_timeout_ms"`
 	OverloadAction             string `json:"overload_action"`
+}
+type RuntimeConcurrency struct {
+	InFlight int64 `json:"in_flight"`
+	Limit    int   `json:"limit"`
+}
+type GroupRuntimeStatus struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Enabled  bool   `json:"enabled"`
+	InFlight int64  `json:"in_flight"`
+	Limit    int    `json:"limit"`
+}
+type RegistryRuntimeStatus struct {
+	RegistryVersion uint64               `json:"registry_version"`
+	Global          RuntimeConcurrency   `json:"global"`
+	Groups          []GroupRuntimeStatus `json:"groups"`
 }
 type NegativeCacheConfig struct {
 	Enabled bool   `json:"enabled"`
@@ -264,6 +281,31 @@ func (c *HTTPClient) RegistryStatus(ctx context.Context) (RegistrySnapshot, erro
 		err = errors.New("dynamic upstream registry returned an invalid snapshot")
 	}
 	return value, err
+}
+func (c *HTTPClient) RegistryRuntimeStatus(ctx context.Context) (RegistryRuntimeStatus, error) {
+	var value RegistryRuntimeStatus
+	err := c.request(ctx, http.MethodGet, "/plugins/dynamic_upstreams/runtime-status", nil, &value)
+	if err == nil && !validRegistryRuntimeStatus(value) {
+		err = errors.New("dynamic upstream registry returned invalid runtime status")
+	}
+	return value, err
+}
+
+func validRegistryRuntimeStatus(status RegistryRuntimeStatus) bool {
+	if status.RegistryVersion == 0 || status.Global.InFlight < 0 || status.Global.Limit < 1 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(status.Groups))
+	for _, group := range status.Groups {
+		if group.ID == "" || group.Name == "" || group.InFlight < 0 || group.Limit < 1 {
+			return false
+		}
+		if _, exists := seen[group.ID]; exists {
+			return false
+		}
+		seen[group.ID] = struct{}{}
+	}
+	return true
 }
 func (c *HTTPClient) ApplyRegistry(ctx context.Context, snapshot RegistrySnapshot) (RegistrySnapshot, error) {
 	var value RegistrySnapshot

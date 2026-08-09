@@ -83,6 +83,40 @@ func TestSettingsAPIUsesRegistrySnapshot(t *testing.T) {
 	}
 }
 
+func TestUpstreamRuntimeStatusIsReadOnlyAndDegrades(t *testing.T) {
+	available := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/plugins/dynamic_upstreams/runtime-status" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if !available {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(mosdnsclient.RegistryRuntimeStatus{
+			RegistryVersion: 4,
+			Global:          mosdnsclient.RuntimeConcurrency{InFlight: 9, Limit: 64},
+			Groups:          []mosdnsclient.GroupRuntimeStatus{{ID: "oversea", Name: "国外上游", Enabled: true, InFlight: 7, Limit: 32}},
+		})
+	}))
+	defer server.Close()
+	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
+
+	recorder := httptest.NewRecorder()
+	application.upstreamRuntimeStatus(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/stats/upstream-runtime", nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" || !bytes.Contains(recorder.Body.Bytes(), []byte(`"registry_version":4`)) || !bytes.Contains(recorder.Body.Bytes(), []byte(`"in_flight":7`)) {
+		t.Fatalf("runtime status=%d headers=%v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+
+	available = false
+	recorder = httptest.NewRecorder()
+	application.upstreamRuntimeStatus(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/stats/upstream-runtime", nil))
+	if recorder.Code != http.StatusBadGateway || !bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"MOSDNS_UNAVAILABLE"`)) {
+		t.Fatalf("unavailable runtime status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestUpstreamGroupAPIMapsVersionConflictAndUnknownOutcome(t *testing.T) {
 	registry := mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "default", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
 	puts := 0

@@ -1,4 +1,4 @@
-import { api, type QueryEvent, type Settings, type SubscriptionBindingInput, type UpstreamGroup, type UpstreamGroupWrite, type UpstreamProtection, type VersionPrecondition } from './api'
+import { api, type QueryEvent, type Settings, type SubscriptionBindingInput, type UpstreamGroup, type UpstreamGroupWrite, type UpstreamProtection, type UpstreamRuntimeStatus, type VersionPrecondition } from './api'
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false
 type Assert<T extends true> = T
@@ -17,5 +17,6 @@ type _GroupBootstrap = Assert<Equal<UpstreamGroup['bootstrap'], string | undefin
 type _GroupBootstrapVersion = Assert<Equal<UpstreamGroup['bootstrap_version'], 46 | 4 | 6>>
 type _RegistryProtection = Assert<Equal<Awaited<ReturnType<typeof api.upstreamGroups>>['protection'], UpstreamProtection>>
 type _OverloadAction = Assert<Equal<Settings['overload_action'], 'servfail' | 'refused' | 'drop'>>
+type _RuntimeStatus = Assert<Equal<Awaited<ReturnType<typeof api.upstreamRuntimeStatus>>, UpstreamRuntimeStatus>>
 
 export {}

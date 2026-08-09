@@ -84,6 +84,9 @@ func (f *fakeMosdns) RegistryStatus(context.Context) (mosdnsclient.RegistrySnaps
 	result.Groups = append([]mosdnsclient.UpstreamGroup(nil), f.registry.Groups...)
 	return result, nil
 }
+func (f *fakeMosdns) RegistryRuntimeStatus(context.Context) (mosdnsclient.RegistryRuntimeStatus, error) {
+	return mosdnsclient.RegistryRuntimeStatus{}, nil
+}
 func (f *fakeMosdns) ApplyRegistry(_ context.Context, snapshot mosdnsclient.RegistrySnapshot) (mosdnsclient.RegistrySnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

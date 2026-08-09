@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import * as echarts from 'echarts'
 import { NButton, NSpin } from 'naive-ui'
-import { api, type DashboardSummary, type LatencyPoint, type SystemStatus } from '@/lib/api'
+import { api, type DashboardSummary, type LatencyPoint, type SystemStatus, type UpstreamRuntimeStatus } from '@/lib/api'
 import { formatLatencyMs } from '@/lib/format'
 import { notify } from '@/lib/notify'
 
@@ -14,14 +14,47 @@ const clients = ref<StatItem[]>([])
 const upstreamGroups = ref<StatItem[]>([])
 const latency = ref<LatencyPoint[]>([])
 const status = ref<SystemStatus | null>(null)
+const runtimeStatus = ref<UpstreamRuntimeStatus | null>(null)
+const runtimeError = ref('')
+const runtimeUpdatedAt = ref(0)
+const saturationSince = ref<Record<string, number>>({})
 const trendElement = ref<HTMLElement | null>(null)
 const distributionElement = ref<HTMLElement | null>(null)
 let trendChart: echarts.ECharts | undefined
 let distributionChart: echarts.ECharts | undefined
+let runtimeTimer: ReturnType<typeof setTimeout> | undefined
+let runtimeRequest: Promise<void> | undefined
+
+const runtimeRows = computed(() => {
+  if (!runtimeStatus.value) return []
+  return [
+    { key: 'global', id: '', name: '全局', enabled: true, ...runtimeStatus.value.global },
+    ...runtimeStatus.value.groups.map((group) => ({ key: `group:${group.id}`, ...group })),
+  ]
+})
 
 function percent(value: number, total = summary.value.query_count) { return total ? `${((value / total) * 100).toFixed(1)}%` : '0.0%' }
 function chartLabel(timestamp: number) { return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
 function memory(bytes?: number) { return bytes && bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(1)} MiB` : '-' }
+function concurrencyPercent(inFlight: number, limit: number) { return limit > 0 ? (inFlight / limit) * 100 : 0 }
+function concurrencyClass(inFlight: number, limit: number) { const value = concurrencyPercent(inFlight, limit); return value >= 100 ? 'full' : value >= 80 ? 'high' : 'normal' }
+function saturationDuration(key: string) {
+  const since = saturationSince.value[key]
+  if (!since) return ''
+  const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000))
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+function concurrencyState(row: (typeof runtimeRows.value)[number]) {
+  if (!row.enabled) return row.in_flight > 0 ? '收尾中' : '已禁用'
+  const state = concurrencyClass(row.in_flight, row.limit)
+  if (state === 'full') return `已满载 ${saturationDuration(row.key)}`
+  return state === 'high' ? '高负载' : '正常'
+}
+function runtimeStatusText() {
+  const updated = runtimeUpdatedAt.value ? new Date(runtimeUpdatedAt.value).toLocaleTimeString([], { hour12: false }) : ''
+  if (runtimeError.value) return updated ? `更新失败 · ${updated}` : '运行时数据暂不可用'
+  return updated ? `更新于 ${updated}` : '正在连接'
+}
 function renderCharts() {
   if (!trendElement.value || !distributionElement.value) return
   trendChart ??= echarts.init(trendElement.value)
@@ -66,16 +99,50 @@ async function load() {
     loading.value = false
   }
 }
+function updateSaturation(next: UpstreamRuntimeStatus) {
+  const now = Date.now()
+  const previous = saturationSince.value
+  const result: Record<string, number> = {}
+  const rows = [{ key: 'global', ...next.global }, ...next.groups.map((group) => ({ key: `group:${group.id}`, ...group }))]
+  for (const row of rows) {
+    if (row.limit > 0 && row.in_flight >= row.limit) result[row.key] = previous[row.key] ?? now
+  }
+  saturationSince.value = result
+}
+function loadRuntime() {
+  if (runtimeRequest) return runtimeRequest
+  runtimeRequest = (async () => {
+    try {
+      const next = await api.upstreamRuntimeStatus()
+      updateSaturation(next)
+      runtimeStatus.value = next
+      runtimeUpdatedAt.value = Date.now()
+      runtimeError.value = ''
+    } catch (cause) {
+      runtimeError.value = cause instanceof Error ? cause.message : '运行时并发数据不可用'
+    }
+  })().finally(() => { runtimeRequest = undefined })
+  return runtimeRequest
+}
+function scheduleRuntimePoll() {
+  if (runtimeTimer) clearTimeout(runtimeTimer)
+  runtimeTimer = undefined
+  if (document.hidden) return
+  runtimeTimer = setTimeout(async () => { await loadRuntime(); scheduleRuntimePoll() }, 2000)
+}
+async function refreshRuntime() { await loadRuntime(); scheduleRuntimePoll() }
+function handleVisibilityChange() { if (document.hidden) { if (runtimeTimer) clearTimeout(runtimeTimer); runtimeTimer = undefined } else void refreshRuntime() }
+async function refreshAll() { await Promise.all([load(), refreshRuntime()]) }
 function resizeCharts() { trendChart?.resize(); distributionChart?.resize() }
-onMounted(() => { window.addEventListener('resize', resizeCharts); load() })
-onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); trendChart?.dispose(); distributionChart?.dispose() })
+onMounted(() => { window.addEventListener('resize', resizeCharts); document.addEventListener('visibilitychange', handleVisibilityChange); void load(); void refreshRuntime() })
+onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); document.removeEventListener('visibilitychange', handleVisibilityChange); if (runtimeTimer) clearTimeout(runtimeTimer); trendChart?.dispose(); distributionChart?.dispose() })
 </script>
 
 <template>
   <section class="page overview-page">
     <header class="page-heading">
       <div><p class="eyebrow">运行概览</p><h1>DNS 查询状态</h1></div>
-      <NButton @click="load" :loading="loading">刷新数据</NButton>
+      <NButton @click="refreshAll" :loading="loading">刷新数据</NButton>
     </header>
     <NSpin :show="loading">
       <div class="health-strip">
@@ -91,6 +158,24 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resizeCharts); tren
         <article><span>处理错误率</span><strong>{{ percent(summary.processing_error_count) }}</strong><small>{{ summary.processing_error_count.toLocaleString() }} 次，负向应答不计错误</small></article>
         <article><span>P95 延迟</span><strong>{{ formatLatencyMs(summary.p95_latency_us) }}</strong><small>{{ summary.p95_sample_count < summary.query_count ? '采集期样本' : '完整窗口' }}，平均 {{ formatLatencyMs(summary.average_latency_us) }}</small></article>
       </div>
+
+      <section class="data-panel concurrency-panel">
+        <header><h2>实时并发</h2><span :class="{ 'runtime-update-error': runtimeError }">{{ runtimeStatusText() }}</span></header>
+        <div v-if="!runtimeStatus" class="runtime-empty">{{ runtimeError ? '无法读取 mosdns 运行时状态' : '正在读取运行时状态' }}</div>
+        <div v-else class="runtime-table-wrap">
+          <table class="runtime-table">
+            <thead><tr><th>范围</th><th>当前 / 上限</th><th>使用率</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr v-for="row in runtimeRows" :key="row.key" :class="{ disabled: !row.enabled }">
+                <td><strong>{{ row.name }}</strong><small v-if="row.id" class="mono">{{ row.id }}</small></td>
+                <td class="runtime-count mono">{{ row.in_flight }} / {{ row.limit }}</td>
+                <td><div class="runtime-usage"><div class="runtime-meter"><span :class="concurrencyClass(row.in_flight, row.limit)" :style="{ width: `${Math.min(100, concurrencyPercent(row.in_flight, row.limit))}%` }"></span></div><span class="mono">{{ concurrencyPercent(row.in_flight, row.limit).toFixed(1) }}%</span></div></td>
+                <td><span class="runtime-state" :class="concurrencyClass(row.in_flight, row.limit)">{{ concurrencyState(row) }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <div class="dashboard-grid dashboard-primary">
         <section class="chart-panel wide"><header><div><h2>查询与延迟趋势</h2><p>最近 24 小时，按小时聚合</p></div></header><div ref="trendElement" class="chart-canvas"></div></section>

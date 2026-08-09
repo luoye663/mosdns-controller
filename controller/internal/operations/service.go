@@ -632,6 +632,10 @@ func (s *Service) UpstreamGroups(ctx context.Context) (mosdnsclient.RegistrySnap
 	return s.mosdns.RegistryStatus(ctx)
 }
 
+func (s *Service) UpstreamRuntimeStatus(ctx context.Context) (mosdnsclient.RegistryRuntimeStatus, error) {
+	return s.mosdns.RegistryRuntimeStatus(ctx)
+}
+
 func (s *Service) CreateUpstreamGroup(ctx context.Context, input UpstreamGroupWrite, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
 	current, err := s.mosdns.RegistryStatus(ctx)
 	if err != nil {

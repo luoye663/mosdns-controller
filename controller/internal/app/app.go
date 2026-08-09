@@ -100,6 +100,7 @@ func (a *App) PublicHandler() http.Handler {
 			protected.Get("/stats/rcode", a.statistics("rcode"))
 			protected.Get("/stats/upstream-groups", a.statistics("upstream_groups"))
 			protected.Get("/stats/latency", a.latency)
+			protected.Get("/stats/upstream-runtime", a.upstreamRuntimeStatus)
 			protected.Get("/devices", a.devices)
 			protected.Patch("/devices/{id}", a.requireCSRF(a.updateDevice))
 			protected.Get("/system/status", a.systemStatus)
@@ -580,6 +581,15 @@ func (a *App) devices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, 200, map[string]any{"items": items})
+}
+func (a *App) upstreamRuntimeStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := a.ops.UpstreamRuntimeStatus(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "MOSDNS_UNAVAILABLE", "upstream runtime status is unavailable")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, r, http.StatusOK, status)
 }
 func (a *App) updateDevice(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
