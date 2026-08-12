@@ -21,6 +21,8 @@ const pending = ref<QueryEvent[]>([])
 const ruleLabels = ref<Record<number, string>>({})
 const savedFilters = ref<SavedFilter[]>(readSavedFilters())
 const selectedSaved = ref<string | null>(null)
+const showSaveFilter = ref(false)
+const saveFilterLabel = ref('')
 const ruleTarget = ref<QueryEvent | null>(null)
 const diagnosticTarget = ref<QueryEvent | null>(null)
 const answerDiagnostics = ref<AnswerDiagnostics | null>(null)
@@ -39,7 +41,7 @@ const filters = reactive({ client_ip: '', qname: '', qname_match: 'contains', qt
 let stream: EventSource | undefined
 let tableResizeObserver: ResizeObserver | undefined
 
-const routeOptions = [{ label: '全部路由类型', value: '' }, { label: '转发', value: 'forward' }, { label: '拦截', value: 'block' }]
+const routeOptions = [{ label: '全部路由类型', value: '' }, { label: '转发', value: 'forward' }, { label: '本地解析', value: 'local' }, { label: '拦截', value: 'block' }]
 const booleanOptions = [{ label: '不限', value: '' }, { label: '是', value: 'true' }, { label: '否', value: 'false' }]
 const typeOptions = [{ label: '全部类型', value: '' }, { label: 'A', value: '1' }, { label: 'AAAA', value: '28' }, { label: 'CNAME', value: '5' }, { label: 'MX', value: '15' }, { label: 'TXT', value: '16' }, { label: 'PTR', value: '12' }, { label: 'HTTPS', value: '65' }]
 const rcodeOptions = [{ label: '全部结果', value: '' }, { label: 'NOERROR', value: '0' }, { label: 'FORMERR', value: '1' }, { label: 'SERVFAIL', value: '2' }, { label: 'NXDOMAIN', value: '3' }, { label: 'REFUSED', value: '5' }]
@@ -67,7 +69,7 @@ function qclassLabel(value: number) { return value === 1 ? 'IN' : `类别 ${valu
 function rcodeLabel(value: number) { return ({ 0: '成功', 1: '格式错误', 2: '服务器失败', 3: '域名不存在', 4: '未实现', 5: '已拒绝' } as Record<number, string>)[value] ?? `返回码 ${value}` }
 function rcodeCode(value: number) { return ({ 0: 'NOERROR', 1: 'FORMERR', 2: 'SERVFAIL', 3: 'NXDOMAIN', 4: 'NOTIMP', 5: 'REFUSED' } as Record<number, string>)[value] ?? `RCODE ${value}` }
 function routeLabel(row: QueryEvent) {
-  if (row.route !== 'forward') return row.route === 'block' ? '拦截' : row.route
+	if (row.route !== 'forward') return row.route === 'block' ? '拦截' : row.route === 'local' ? '本地解析' : row.route
   return upstreamGroups.value.find((group) => group.id === row.upstream_group)?.name || row.upstream_group || '未记录上游'
 }
 function resultClassLabel(value: QueryResultClass) { return ({ success: '成功', negative_answer: '负向应答', policy_block: '策略拦截', processing_error: '处理错误' } as Record<QueryResultClass, string>)[value] }
@@ -77,18 +79,20 @@ function ruleLabel(rule: Rule) {
     'access:allow': '白名单',
     'access:block': '黑名单',
     'route:upstream': `上游组路由${rule.upstream_group_id ? ` (${rule.upstream_group_id})` : ''}`,
-    'logging:no_log': '不记录日志',
+	'logging:no_log': '不记录日志',
+	'answer:static': '自定义解析',
   } as Record<string, string>)[`${rule.category}:${rule.action}`] ?? '动态规则'
 }
 function routeSourceLabel(row: QueryEvent) {
 	if (row.subscription_categories?.length) return row.subscription_categories.map((category) => ({ allow: '白名单订阅集合', block: '黑名单订阅集合', upstream: '上游组订阅集合', access: '访问订阅', route: '路由订阅' } as Record<string, string>)[category] ?? category).join(' · ')
-  if (row.route_source === 'default') return '默认路由'
+	if (row.route_source === 'default') return '默认路由'
+	if (row.route === 'local') return ruleLabels.value[row.answer_rule_id] ?? '自定义解析规则'
 	if (row.route_source === 'subscription') return '订阅集合'
 	if (row.subscription_source_id) return `${row.subscription_source_name || '订阅源'} #${row.subscription_source_id}`
   return ruleLabels.value[row.route_rule_id] ?? ruleLabels.value[row.access_rule_id] ?? '已删除规则'
 }
 function ruleSummary(row: QueryEvent) {
-  return [row.access_rule_id ? `访问 #${row.access_rule_id}` : '', row.route_rule_id ? `路由 #${row.route_rule_id}` : '', row.subscription_binding_id ? `绑定 #${row.subscription_binding_id}` : ''].filter(Boolean).join(' · ')
+	return [row.access_rule_id ? `访问 #${row.access_rule_id}` : '', row.route_rule_id ? `路由 #${row.route_rule_id}` : '', row.answer_rule_id ? `解析 #${row.answer_rule_id}` : '', row.subscription_binding_id ? `绑定 #${row.subscription_binding_id}` : ''].filter(Boolean).join(' · ')
 }
 function errorText(row: QueryEvent) {
   if (row.error_code === 'DNS_CONCURRENCY_LIMIT_GLOBAL') return `达到全局并发上限${row.error_text.match(/limit=(\d+)/)?.[1] ? `（${row.error_text.match(/limit=(\d+)/)?.[1]}）` : ''}`
@@ -147,12 +151,17 @@ async function applyFilters() { pending.value = []; await load(); if (live.value
 function toggleLive(enabled: boolean) { if (enabled) startStream(); else closeStream() }
 function togglePaused(value: boolean) { if (!value && pending.value.length) { for (const event of pending.value) insertLive(event); pending.value = [] } }
 function saveFilter() {
-  const label = window.prompt('筛选名称')?.trim()
+  saveFilterLabel.value = selectedSaved.value ?? ''
+  showSaveFilter.value = true
+}
+function confirmSaveFilter() {
+  const label = saveFilterLabel.value.trim()
   if (!label) return
   const saved: SavedFilter = { label, filters: { ...filters }, range: range.value }
   savedFilters.value = [...savedFilters.value.filter((item) => item.label !== label), saved]
   localStorage.setItem(storageKey, JSON.stringify(savedFilters.value))
   selectedSaved.value = label
+  showSaveFilter.value = false
 }
 async function applySaved(label: string | null) {
   selectedSaved.value = label
@@ -239,6 +248,7 @@ onBeforeUnmount(() => { closeStream(); tableResizeObserver?.disconnect() })
       <tr v-if="!loading && !rows.length"><td colspan="11" class="empty-cell">暂无查询日志</td></tr>
     </tbody></table></div>
     <footer class="table-footer"><span>已显示 {{ rows.length }} 条；查询使用 cursor 分页</span><NButton v-if="cursor" :loading="loading" @click="load(cursor)">加载下一页</NButton></footer>
+    <NModal v-model:show="showSaveFilter" preset="card" title="保存筛选条件" class="rule-modal"><label class="filter-name-field">筛选名称<NInput v-model:value="saveFilterLabel" maxlength="80" autofocus placeholder="例如：最近一小时的失败查询" @keyup.enter="confirmSaveFilter" /></label><div class="modal-actions"><NButton @click="showSaveFilter = false">取消</NButton><NButton type="primary" :disabled="!saveFilterLabel.trim()" @click="confirmSaveFilter">保存</NButton></div></NModal>
     <NModal :show="Boolean(ruleTarget)" preset="card" title="从查询创建规则" class="rule-modal" @update:show="(show) => { if (!show) ruleTarget = null }"><p class="mono">{{ ruleTarget?.qname }}</p><div class="form-grid"><label>规则类型<NSelect v-model:value="ruleAction" :options="actionOptions" /></label><label v-if="ruleAction === 'upstream'">上游组<NSelect v-model:value="ruleUpstreamGroupID" :options="enabledUpstreamGroupOptions" /></label></div><div class="modal-actions"><NButton @click="ruleTarget = null">取消</NButton><NButton type="primary" :loading="loading" @click="createRule">保存并发布</NButton></div></NModal>
     <NModal :show="Boolean(diagnosticTarget)" preset="card" class="rule-modal" @update:show="(show) => { if (!show) diagnosticTarget = null }"><template #header><div class="modal-title-with-help"><span>DNS 应答详情</span><NPopover trigger="click"><template #trigger><NButton text circle size="small" aria-label="DNS 应答采集说明"><template #icon><CircleHelp :size="17" /></template></NButton></template><div class="answer-diagnostics-help">需在 <code>query_audit</code> 配置中启用 <code>include_answers: true</code> 才会采集 DNS 应答数据。应答明细仅保留在内存中，未持久化；缓存淘汰或服务重启后将不可查看。</div></NPopover></div></template><p class="mono">{{ diagnosticTarget?.qname }}</p><NAlert v-if="answerDiagnosticsError" type="warning">{{ answerDiagnosticsError }}</NAlert><p v-else-if="answerDiagnostics === null" class="muted">正在读取内存缓存...</p><template v-else><p class="muted">共 {{ diagnosticTarget?.answer_count ?? 0 }} 条 DNS 应答，提取到 {{ answerDiagnostics.answer_ips.length }} 个唯一 A/AAAA 地址。</p><div v-if="answerDiagnostics.answer_ips.length" class="mono">{{ answerDiagnostics.answer_ips.join('\n') }}</div><p v-else class="muted">该应答不包含 A 或 AAAA 地址。</p><p class="muted">Answer 区记录（已展示 {{ answerDiagnostics.answer_records.length }} / {{ diagnosticTarget?.answer_count ?? 0 }} 条）</p><pre v-if="answerDiagnostics.answer_records.length" class="answer-records mono">{{ answerDiagnostics.answer_records.join('\n') }}</pre><p v-else class="muted">该查询未采集 Answer 区记录。</p></template></NModal>
   </section>

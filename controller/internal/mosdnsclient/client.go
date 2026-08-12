@@ -175,15 +175,18 @@ type SubscriptionSet struct {
 	Domains         []string `json:"domains"`
 }
 type Rule struct {
-	ID              int64  `json:"id"`
-	Category        string `json:"category"`
-	Action          string `json:"action"`
-	UpstreamGroupID string `json:"upstream_group_id,omitempty"`
-	MatchType       string `json:"match_type"`
-	Pattern         string `json:"pattern"`
-	Priority        int    `json:"priority"`
-	Source          string `json:"source"`
-	Comment         string `json:"comment"`
+	ID              int64    `json:"id"`
+	Category        string   `json:"category"`
+	Action          string   `json:"action"`
+	UpstreamGroupID string   `json:"upstream_group_id,omitempty"`
+	MatchType       string   `json:"match_type"`
+	Pattern         string   `json:"pattern"`
+	Priority        int      `json:"priority"`
+	Source          string   `json:"source"`
+	Comment         string   `json:"comment"`
+	IPv4Addresses   []string `json:"ipv4_addresses,omitempty"`
+	IPv6Addresses   []string `json:"ipv6_addresses,omitempty"`
+	TTL             uint32   `json:"ttl,omitempty"`
 }
 type HTTPClient struct {
 	baseURL, token string

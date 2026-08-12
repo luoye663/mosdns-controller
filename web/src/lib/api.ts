@@ -1,12 +1,12 @@
 export interface ApiError extends Error { code?: string; status?: number }
 interface Envelope<T> { data: T }
 
-export interface Rule { id: number; category: string; action: string; upstream_group_id?: string; match_type: string; pattern: string; priority: number; source: string; comment: string; enabled: boolean; updated_at_ms: number }
+export interface Rule { id: number; category: string; action: string; upstream_group_id?: string; match_type: string; pattern: string; priority: number; source: string; comment: string; enabled: boolean; updated_at_ms: number; ipv4_addresses?: string[]; ipv6_addresses?: string[]; ttl?: number }
 export type RuleInput = Omit<Rule, 'id' | 'updated_at_ms'> & { expected_upstream_registry_version?: number }
 export type RuleUpdateInput = RuleInput & { updated_at_ms: number }
 export interface Version { version: number; checksum: string; status: string; rule_count: number; created_at_ms: number; error_code?: string }
 export type QueryResultClass = 'success' | 'negative_answer' | 'policy_block' | 'processing_error'
-export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; device_name: string; protocol: string; qname: string; qtype: number; qclass: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; snapshot_version: number; access_rule_id: number; route_rule_id: number; subscription_source_id: number; subscription_binding_id: number; subscription_source_name: string; subscription_categories: string[]; answer_count: number; answer_min_ttl_seconds: number | null; latency_us: number; error_code: string; error_text: string; result_class: QueryResultClass }
+export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; device_name: string; protocol: string; qname: string; qtype: number; qclass: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; snapshot_version: number; access_rule_id: number; route_rule_id: number; answer_rule_id: number; subscription_source_id: number; subscription_binding_id: number; subscription_source_name: string; subscription_categories: string[]; answer_count: number; answer_min_ttl_seconds: number | null; latency_us: number; error_code: string; error_text: string; result_class: QueryResultClass }
 export interface AnswerDiagnostics { answer_ips: string[]; answer_records: string[] }
 export type QueryParams = Record<string, string | number | boolean | undefined>
 export interface Device { id: number; ip: string; mac: string; hostname: string; display_name: string; note: string; source: string; first_seen_at_ms: number; last_seen_at_ms: number; query_count_24h: number }

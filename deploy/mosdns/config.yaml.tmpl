@@ -25,6 +25,7 @@ plugins:
         access_block: 1001
         access_allow: 1002
         no_log: 1201
+        local_answer: 1301
 
   # 全局 A/AAAA 策略由管理页面热更新；默认保留双栈响应。
   - tag: address_family
@@ -105,6 +106,10 @@ plugins:
       - matches:
           - mark 1001
         exec: reject 3
+      # 自定义 A/AAAA 在黑名单之后直接完成，不进入地址族策略、缓存或上游。
+      - matches:
+          - mark 1301
+        exec: accept
       # 地址族策略必须在缓存和上游之前执行，且不绕过访问封锁。
       - exec: $address_family
       - exec: goto forward_routes

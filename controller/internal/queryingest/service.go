@@ -57,6 +57,7 @@ type Event struct {
 	Snapshot               uint64   `json:"snapshot_version"`
 	AccessRuleID           int64    `json:"access_rule_id"`
 	RouteRuleID            int64    `json:"route_rule_id"`
+	AnswerRuleID           int64    `json:"answer_rule_id"`
 	SubscriptionSourceID   int64    `json:"subscription_source_id"`
 	SubscriptionBindingID  int64    `json:"subscription_binding_id"`
 	SubscriptionSourceName string   `json:"subscription_source_name"`
@@ -109,6 +110,7 @@ type StoredEvent struct {
 	Snapshot               uint64   `json:"snapshot_version"`
 	AccessRuleID           int64    `json:"access_rule_id"`
 	RouteRuleID            int64    `json:"route_rule_id"`
+	AnswerRuleID           int64    `json:"answer_rule_id"`
 	SubscriptionSourceID   int64    `json:"subscription_source_id"`
 	SubscriptionBindingID  int64    `json:"subscription_binding_id"`
 	SubscriptionSourceName string   `json:"subscription_source_name"`
@@ -240,7 +242,7 @@ func (s *Service) Enqueue(batch Batch) error {
 var ErrOverloaded = errors.New("ingestion queue is full")
 
 func validateBatch(batch Batch) error {
-	if batch.SchemaVersion != 2 || len(batch.SenderID) == 0 || len(batch.SenderID) > 128 || batch.SentAtMS <= 0 || len(batch.Events) == 0 || len(batch.Events) > maxBatchEvents {
+	if (batch.SchemaVersion != 2 && batch.SchemaVersion != 3) || len(batch.SenderID) == 0 || len(batch.SenderID) > 128 || batch.SentAtMS <= 0 || len(batch.Events) == 0 || len(batch.Events) > maxBatchEvents {
 		return errors.New("invalid event batch")
 	}
 	for _, e := range batch.Events {
@@ -251,7 +253,7 @@ func validateBatch(batch Batch) error {
 	return nil
 }
 func validateEvent(e Event) error {
-	if e.SchemaVersion != 2 || len(e.EventID) == 0 || len(e.EventID) > 128 || e.TimestampMS <= 0 {
+	if (e.SchemaVersion != 2 && e.SchemaVersion != 3) || len(e.EventID) == 0 || len(e.EventID) > 128 || e.TimestampMS <= 0 {
 		return errors.New("invalid event")
 	}
 	if _, err := netip.ParseAddr(e.ClientIP); err != nil || len(e.QName) == 0 || len(e.QName) > 253 || strings.ToLower(strings.TrimSuffix(e.QName, ".")) != e.QName {
@@ -260,7 +262,7 @@ func validateEvent(e Event) error {
 	if e.QType == 0 || e.QClass == 0 || e.RCode < 0 || e.RCode > 23 || e.LatencyUS < 0 || e.AnswerCount < 0 || e.SubscriptionBindingID < 0 || (e.AnswerMinTTLSeconds != nil && (*e.AnswerMinTTLSeconds < 0 || *e.AnswerMinTTLSeconds > 1<<32-1)) || e.Snapshot > uint64(^uint64(0)>>1) {
 		return errors.New("invalid event values")
 	}
-	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "forward" && e.Route != "block") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule" && e.RouteSource != "subscription") {
+	if e.Protocol != "udp" && e.Protocol != "tcp" || (e.Route != "forward" && e.Route != "block" && e.Route != "local") || (e.RouteSource != "default" && e.RouteSource != "dynamic_rule" && e.RouteSource != "subscription") {
 		return errors.New("invalid event route")
 	}
 	for _, field := range []struct {
@@ -350,7 +352,7 @@ func (s *Service) persist(ctx context.Context, events []Event) ([]StoredEvent, e
 			return nil, err
 		}
 		class := resultClass(e)
-		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,subscription_source_id,subscription_binding_id,subscription_source_name,subscription_categories_json,answer_count,answer_min_ttl_seconds,latency_us,error_code,error_text,result_class,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, e.UpstreamTag, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.SubscriptionSourceID, e.SubscriptionBindingID, e.SubscriptionSourceName, string(categories), e.AnswerCount, e.AnswerMinTTLSeconds, e.LatencyUS, e.ErrorCode, e.ErrorText, class, now)
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO dns_queries(event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,answer_rule_id,subscription_source_id,subscription_binding_id,subscription_source_name,subscription_categories_json,answer_count,answer_min_ttl_seconds,latency_us,error_code,error_text,result_class,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.EventID, e.TimestampMS, e.ClientIP, e.Protocol, e.QName, e.QType, e.QClass, e.RCode, e.Route, e.RouteSource, e.UpstreamGroup, e.UpstreamTag, boolInt(e.CacheHit), e.Snapshot, e.AccessRuleID, e.RouteRuleID, e.AnswerRuleID, e.SubscriptionSourceID, e.SubscriptionBindingID, e.SubscriptionSourceName, string(categories), e.AnswerCount, e.AnswerMinTTLSeconds, e.LatencyUS, e.ErrorCode, e.ErrorText, class, now)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +443,7 @@ func resultClass(e Event) string {
 	return "success"
 }
 func fromEvent(e Event) StoredEvent {
-	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, SubscriptionSourceID: e.SubscriptionSourceID, SubscriptionBindingID: e.SubscriptionBindingID, SubscriptionSourceName: e.SubscriptionSourceName, SubscriptionCategories: append([]string(nil), e.SubscriptionCategories...), AnswerCount: e.AnswerCount, AnswerMinTTLSeconds: e.AnswerMinTTLSeconds, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText, ResultClass: resultClass(e)}
+	return StoredEvent{EventID: e.EventID, TimestampMS: e.TimestampMS, ClientIP: e.ClientIP, Protocol: e.Protocol, QName: e.QName, QType: int(e.QType), QClass: int(e.QClass), RCode: e.RCode, Route: e.Route, RouteSource: e.RouteSource, UpstreamGroup: e.UpstreamGroup, UpstreamTag: e.UpstreamTag, CacheHit: e.CacheHit, Snapshot: e.Snapshot, AccessRuleID: e.AccessRuleID, RouteRuleID: e.RouteRuleID, AnswerRuleID: e.AnswerRuleID, SubscriptionSourceID: e.SubscriptionSourceID, SubscriptionBindingID: e.SubscriptionBindingID, SubscriptionSourceName: e.SubscriptionSourceName, SubscriptionCategories: append([]string(nil), e.SubscriptionCategories...), AnswerCount: e.AnswerCount, AnswerMinTTLSeconds: e.AnswerMinTTLSeconds, LatencyUS: e.LatencyUS, ErrorCode: e.ErrorCode, ErrorText: e.ErrorText, ResultClass: resultClass(e)}
 }
 
 func (s *Service) Subscribe(q Query, _ string) (Subscriber, error) {
@@ -528,7 +530,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 		args = append(args, ts, ts, id)
 	}
 	args = append(args, q.Limit+1)
-	rows, err := s.db.QueryContext(ctx, `SELECT q.id,q.event_id,q.timestamp_unix_ms,q.client_ip,q.protocol,q.qname,q.qtype,q.qclass,COALESCE(q.rcode,0),q.route,q.route_source,COALESCE(q.upstream_group,''),COALESCE(q.upstream_tag,''),q.cache_hit,q.snapshot_version,COALESCE(q.access_rule_id,0),COALESCE(q.route_rule_id,0),COALESCE(q.subscription_source_id,0),q.subscription_binding_id,COALESCE(q.subscription_source_name,''),q.subscription_categories_json,q.answer_count,q.answer_min_ttl_seconds,q.latency_us,COALESCE(q.error_code,''),COALESCE(q.error_text,''),q.result_class,COALESCE(NULLIF(d.display_name,''),d.hostname,'') FROM dns_queries q LEFT JOIN devices d ON d.ip=q.client_ip WHERE `+strings.Join(where, " AND ")+` ORDER BY q.timestamp_unix_ms DESC,q.id DESC LIMIT ?`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT q.id,q.event_id,q.timestamp_unix_ms,q.client_ip,q.protocol,q.qname,q.qtype,q.qclass,COALESCE(q.rcode,0),q.route,q.route_source,COALESCE(q.upstream_group,''),COALESCE(q.upstream_tag,''),q.cache_hit,q.snapshot_version,COALESCE(q.access_rule_id,0),COALESCE(q.route_rule_id,0),COALESCE(q.answer_rule_id,0),COALESCE(q.subscription_source_id,0),q.subscription_binding_id,COALESCE(q.subscription_source_name,''),q.subscription_categories_json,q.answer_count,q.answer_min_ttl_seconds,q.latency_us,COALESCE(q.error_code,''),COALESCE(q.error_text,''),q.result_class,COALESCE(NULLIF(d.display_name,''),d.hostname,'') FROM dns_queries q LEFT JOIN devices d ON d.ip=q.client_ip WHERE `+strings.Join(where, " AND ")+` ORDER BY q.timestamp_unix_ms DESC,q.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return Page{}, err
 	}
@@ -539,7 +541,7 @@ func (s *Service) Queries(ctx context.Context, q Query) (Page, error) {
 		var e StoredEvent
 		var hit int
 		var categories string
-		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.SubscriptionSourceID, &e.SubscriptionBindingID, &e.SubscriptionSourceName, &categories, &e.AnswerCount, &e.AnswerMinTTLSeconds, &e.LatencyUS, &e.ErrorCode, &e.ErrorText, &e.ResultClass, &e.DeviceName); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventID, &e.TimestampMS, &e.ClientIP, &e.Protocol, &e.QName, &e.QType, &e.QClass, &e.RCode, &e.Route, &e.RouteSource, &e.UpstreamGroup, &e.UpstreamTag, &hit, &e.Snapshot, &e.AccessRuleID, &e.RouteRuleID, &e.AnswerRuleID, &e.SubscriptionSourceID, &e.SubscriptionBindingID, &e.SubscriptionSourceName, &categories, &e.AnswerCount, &e.AnswerMinTTLSeconds, &e.LatencyUS, &e.ErrorCode, &e.ErrorText, &e.ResultClass, &e.DeviceName); err != nil {
 			return Page{}, err
 		}
 		_ = json.Unmarshal([]byte(categories), &e.SubscriptionCategories)
@@ -563,7 +565,7 @@ func queryConditions(q Query) ([]string, []any, error) {
 			return nil, nil, errors.New("invalid client_ip")
 		}
 	}
-	if q.Route != "" && q.Route != "forward" && q.Route != "block" {
+	if q.Route != "" && q.Route != "forward" && q.Route != "block" && q.Route != "local" {
 		return nil, nil, errors.New("invalid route")
 	}
 	if q.QNameMatch != "" && q.QNameMatch != "exact" && q.QNameMatch != "contains" {

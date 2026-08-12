@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NCard, NForm, NFormItem, NInput } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
+import type { ApiError } from '@/lib/api'
 import { notify } from '@/lib/notify'
 
 const auth = useAuthStore(); const router = useRouter()
@@ -10,7 +11,11 @@ const username = ref(''); const password = ref(''); const loading = ref(false)
 async function submit() {
   loading.value = true
   try { await auth.login(username.value, password.value); await router.replace('/') }
-  catch { notify.error('用户名或密码错误，或当前登录暂不可用。', '登录失败') }
+  catch (error) {
+    const apiError = error as ApiError
+    if (apiError.status === 429) notify.error('登录尝试过于频繁，请稍后再试。', '请求已限流')
+    else notify.error('用户名或密码错误，或当前登录暂不可用。', '登录失败')
+  }
   finally { loading.value = false }
 }
 </script>

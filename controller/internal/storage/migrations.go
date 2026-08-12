@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
-const baselineVersion = 1
+const baselineVersion = 2
 
 var ErrLegacySchema = errors.New("existing controller database uses an unsupported schema; a new empty database is required")
 
@@ -16,6 +17,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if tableCount != 0 {
+		var version int
+		if err := s.db.QueryRowContext(ctx, `SELECT version FROM schema_migrations`).Scan(&version); err != nil {
+			return fmt.Errorf("%w (migration marker)", ErrLegacySchema)
+		}
+		if version == 1 {
+			if err := s.migrateV1ToV2(ctx); err != nil {
+				return err
+			}
+		}
 		return s.verifyBaseline(ctx)
 	}
 
@@ -46,7 +56,7 @@ func (s *Store) verifyBaseline(ctx context.Context) error {
 		return fmt.Errorf("%w (migration history)", ErrLegacySchema)
 	}
 	for table, column := range map[string]string{
-		"domain_rules":                    "upstream_group_id",
+		"domain_rules":                    "ttl",
 		"rule_versions":                   "rules_json",
 		"subscription_bindings":           "upstream_group_id",
 		"dns_queries":                     "subscription_binding_id",
@@ -58,7 +68,49 @@ func (s *Store) verifyBaseline(ctx context.Context) error {
 			return fmt.Errorf("%w (missing %s.%s)", ErrLegacySchema, table, column)
 		}
 	}
+	var answerRuleColumn int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('dns_queries') WHERE name='answer_rule_id'`).Scan(&answerRuleColumn); err != nil || answerRuleColumn != 1 {
+		return fmt.Errorf("%w (missing dns_queries.answer_rule_id)", ErrLegacySchema)
+	}
 	return nil
+}
+
+func (s *Store) migrateV1ToV2(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`PRAGMA defer_foreign_keys = ON`,
+		`CREATE TABLE rule_versions_v2 (version INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version IN (4,5)), checksum TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('pending','unknown','active','superseded','failed')), previous_version INTEGER, rollback_from_version INTEGER, rule_count INTEGER NOT NULL, regexp_rule_count INTEGER NOT NULL, snapshot_json BLOB NOT NULL, rules_json BLOB NOT NULL, created_by INTEGER REFERENCES admins(id) ON DELETE SET NULL, error_code TEXT, error_message TEXT, created_at_ms INTEGER NOT NULL, activated_at_ms INTEGER)`,
+		`INSERT INTO rule_versions_v2 SELECT * FROM rule_versions`,
+		`CREATE TABLE domain_rules_v2 (id INTEGER PRIMARY KEY, version INTEGER NOT NULL REFERENCES rule_versions_v2(version), category TEXT NOT NULL CHECK(category IN ('access','route','logging','answer')), action TEXT NOT NULL, upstream_group_id TEXT, match_type TEXT NOT NULL CHECK(match_type IN ('full','domain','regexp')), pattern TEXT NOT NULL, normalized_pattern TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 100 CHECK(priority BETWEEN 0 AND 1000), source TEXT NOT NULL DEFAULT 'manual', comment TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, ipv4_addresses_json BLOB NOT NULL DEFAULT '[]', ipv6_addresses_json BLOB NOT NULL DEFAULT '[]', ttl INTEGER NOT NULL DEFAULT 0 CHECK(ttl BETWEEN 0 AND 86400), CHECK((category='access' AND action IN ('allow','block') AND upstream_group_id IS NULL AND ttl=0) OR (category='route' AND action='upstream' AND upstream_group_id IS NOT NULL AND length(trim(upstream_group_id))>0 AND ttl=0) OR (category='logging' AND action='no_log' AND upstream_group_id IS NULL AND ttl=0) OR (category='answer' AND action='static' AND upstream_group_id IS NULL AND ttl BETWEEN 1 AND 86400)), UNIQUE(normalized_pattern,match_type,category))`,
+		`INSERT INTO domain_rules_v2(id,version,category,action,upstream_group_id,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms) SELECT id,version,category,action,upstream_group_id,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms FROM domain_rules`,
+		`CREATE TABLE dns_queries_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, timestamp_unix_ms INTEGER NOT NULL, client_ip TEXT NOT NULL, protocol TEXT, qname TEXT NOT NULL, qtype INTEGER NOT NULL, qclass INTEGER NOT NULL, rcode INTEGER, route TEXT NOT NULL CHECK(route IN ('forward','block','local')), route_source TEXT NOT NULL, upstream_group TEXT, upstream_tag TEXT, cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0,1)), snapshot_version INTEGER NOT NULL, access_rule_id INTEGER, route_rule_id INTEGER, answer_rule_id INTEGER, subscription_source_id INTEGER, subscription_binding_id INTEGER NOT NULL DEFAULT 0, subscription_source_name TEXT, subscription_categories_json TEXT NOT NULL DEFAULT '[]', answer_count INTEGER NOT NULL DEFAULT 0, answer_min_ttl_seconds INTEGER, latency_us INTEGER NOT NULL, error_code TEXT, error_text TEXT, result_class TEXT NOT NULL CHECK(result_class IN ('success','negative_answer','policy_block','processing_error')), created_at_ms INTEGER NOT NULL)`,
+		`INSERT INTO dns_queries_v2(id,event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,subscription_source_id,subscription_binding_id,subscription_source_name,subscription_categories_json,answer_count,answer_min_ttl_seconds,latency_us,error_code,error_text,result_class,created_at_ms) SELECT id,event_id,timestamp_unix_ms,client_ip,protocol,qname,qtype,qclass,rcode,route,route_source,upstream_group,upstream_tag,cache_hit,snapshot_version,access_rule_id,route_rule_id,subscription_source_id,subscription_binding_id,subscription_source_name,subscription_categories_json,answer_count,answer_min_ttl_seconds,latency_us,error_code,error_text,result_class,created_at_ms FROM dns_queries`,
+		`DROP INDEX uq_rule_versions_active`, `DROP INDEX idx_rule_versions_created`,
+		`DROP INDEX idx_domain_rules_category`, `DROP INDEX idx_domain_rules_pattern`, `DROP INDEX idx_domain_rules_upstream_group`,
+		`DROP INDEX idx_dns_queries_time`, `DROP INDEX idx_dns_queries_client_time`, `DROP INDEX idx_dns_queries_qname_time`, `DROP INDEX idx_dns_queries_route_time`, `DROP INDEX idx_dns_queries_qtype_time`, `DROP INDEX idx_dns_queries_rcode_time`, `DROP INDEX idx_dns_queries_cache_time`, `DROP INDEX idx_dns_queries_upstream_tag_time`, `DROP INDEX idx_dns_queries_upstream_group_time`, `DROP INDEX idx_dns_queries_result_class_time`,
+		`DROP TABLE domain_rules`, `DROP TABLE dns_queries`, `DROP TABLE rule_versions`,
+		`ALTER TABLE rule_versions_v2 RENAME TO rule_versions`, `ALTER TABLE domain_rules_v2 RENAME TO domain_rules`, `ALTER TABLE dns_queries_v2 RENAME TO dns_queries`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate controller schema v1 to v2: %w", err)
+		}
+	}
+	for _, statement := range baselineSchema {
+		if strings.HasPrefix(statement, "CREATE INDEX ") || strings.HasPrefix(statement, "CREATE UNIQUE INDEX ") {
+			if _, err := tx.ExecContext(ctx, statement); err != nil && !strings.Contains(err.Error(), "already exists") {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET version=2 WHERE version=1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 var baselineSchema = []string{
@@ -67,10 +119,10 @@ var baselineSchema = []string{
 	`CREATE TABLE sessions (token_hash BLOB PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, csrf_hash BLOB NOT NULL, client_ip TEXT, user_agent TEXT, created_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL)`,
 	`CREATE INDEX idx_sessions_admin ON sessions(admin_id)`,
 	`CREATE INDEX idx_sessions_expires ON sessions(expires_at_ms)`,
-	`CREATE TABLE rule_versions (version INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version=4), checksum TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('pending','unknown','active','superseded','failed')), previous_version INTEGER, rollback_from_version INTEGER, rule_count INTEGER NOT NULL, regexp_rule_count INTEGER NOT NULL, snapshot_json BLOB NOT NULL, rules_json BLOB NOT NULL, created_by INTEGER REFERENCES admins(id) ON DELETE SET NULL, error_code TEXT, error_message TEXT, created_at_ms INTEGER NOT NULL, activated_at_ms INTEGER)`,
+	`CREATE TABLE rule_versions (version INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version IN (4,5)), checksum TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('pending','unknown','active','superseded','failed')), previous_version INTEGER, rollback_from_version INTEGER, rule_count INTEGER NOT NULL, regexp_rule_count INTEGER NOT NULL, snapshot_json BLOB NOT NULL, rules_json BLOB NOT NULL, created_by INTEGER REFERENCES admins(id) ON DELETE SET NULL, error_code TEXT, error_message TEXT, created_at_ms INTEGER NOT NULL, activated_at_ms INTEGER)`,
 	`CREATE UNIQUE INDEX uq_rule_versions_active ON rule_versions(status) WHERE status='active'`,
 	`CREATE INDEX idx_rule_versions_created ON rule_versions(created_at_ms DESC)`,
-	`CREATE TABLE domain_rules (id INTEGER PRIMARY KEY, version INTEGER NOT NULL REFERENCES rule_versions(version), category TEXT NOT NULL CHECK(category IN ('access','route','logging')), action TEXT NOT NULL, upstream_group_id TEXT, match_type TEXT NOT NULL CHECK(match_type IN ('full','domain','regexp')), pattern TEXT NOT NULL, normalized_pattern TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 100 CHECK(priority BETWEEN 0 AND 1000), source TEXT NOT NULL DEFAULT 'manual', comment TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, CHECK((category='access' AND action IN ('allow','block') AND upstream_group_id IS NULL) OR (category='route' AND action='upstream' AND upstream_group_id IS NOT NULL AND length(trim(upstream_group_id))>0) OR (category='logging' AND action='no_log' AND upstream_group_id IS NULL)), UNIQUE(normalized_pattern,match_type,category))`,
+	`CREATE TABLE domain_rules (id INTEGER PRIMARY KEY, version INTEGER NOT NULL REFERENCES rule_versions(version), category TEXT NOT NULL CHECK(category IN ('access','route','logging','answer')), action TEXT NOT NULL, upstream_group_id TEXT, match_type TEXT NOT NULL CHECK(match_type IN ('full','domain','regexp')), pattern TEXT NOT NULL, normalized_pattern TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 100 CHECK(priority BETWEEN 0 AND 1000), source TEXT NOT NULL DEFAULT 'manual', comment TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, ipv4_addresses_json BLOB NOT NULL DEFAULT '[]', ipv6_addresses_json BLOB NOT NULL DEFAULT '[]', ttl INTEGER NOT NULL DEFAULT 0 CHECK(ttl BETWEEN 0 AND 86400), CHECK((category='access' AND action IN ('allow','block') AND upstream_group_id IS NULL AND ttl=0) OR (category='route' AND action='upstream' AND upstream_group_id IS NOT NULL AND length(trim(upstream_group_id))>0 AND ttl=0) OR (category='logging' AND action='no_log' AND upstream_group_id IS NULL AND ttl=0) OR (category='answer' AND action='static' AND upstream_group_id IS NULL AND ttl BETWEEN 1 AND 86400)), UNIQUE(normalized_pattern,match_type,category))`,
 	`CREATE INDEX idx_domain_rules_category ON domain_rules(category,action,enabled)`,
 	`CREATE INDEX idx_domain_rules_pattern ON domain_rules(normalized_pattern)`,
 	`CREATE INDEX idx_domain_rules_upstream_group ON domain_rules(upstream_group_id) WHERE upstream_group_id IS NOT NULL`,
@@ -83,7 +135,7 @@ var baselineSchema = []string{
 	`CREATE INDEX idx_admin_audit_created_id ON admin_audit_logs(created_at_ms DESC,id DESC)`,
 	`CREATE TABLE devices (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL UNIQUE, mac TEXT, hostname TEXT, display_name TEXT, note TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'observed', first_seen_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
 	`CREATE INDEX idx_devices_last_seen ON devices(last_seen_at_ms DESC)`,
-	`CREATE TABLE dns_queries (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, timestamp_unix_ms INTEGER NOT NULL, client_ip TEXT NOT NULL, protocol TEXT, qname TEXT NOT NULL, qtype INTEGER NOT NULL, qclass INTEGER NOT NULL, rcode INTEGER, route TEXT NOT NULL CHECK(route IN ('forward','block')), route_source TEXT NOT NULL, upstream_group TEXT, upstream_tag TEXT, cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0,1)), snapshot_version INTEGER NOT NULL, access_rule_id INTEGER, route_rule_id INTEGER, subscription_source_id INTEGER, subscription_binding_id INTEGER NOT NULL DEFAULT 0, subscription_source_name TEXT, subscription_categories_json TEXT NOT NULL DEFAULT '[]', answer_count INTEGER NOT NULL DEFAULT 0, answer_min_ttl_seconds INTEGER, latency_us INTEGER NOT NULL, error_code TEXT, error_text TEXT, result_class TEXT NOT NULL CHECK(result_class IN ('success','negative_answer','policy_block','processing_error')), created_at_ms INTEGER NOT NULL)`,
+	`CREATE TABLE dns_queries (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, timestamp_unix_ms INTEGER NOT NULL, client_ip TEXT NOT NULL, protocol TEXT, qname TEXT NOT NULL, qtype INTEGER NOT NULL, qclass INTEGER NOT NULL, rcode INTEGER, route TEXT NOT NULL CHECK(route IN ('forward','block','local')), route_source TEXT NOT NULL, upstream_group TEXT, upstream_tag TEXT, cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0,1)), snapshot_version INTEGER NOT NULL, access_rule_id INTEGER, route_rule_id INTEGER, answer_rule_id INTEGER, subscription_source_id INTEGER, subscription_binding_id INTEGER NOT NULL DEFAULT 0, subscription_source_name TEXT, subscription_categories_json TEXT NOT NULL DEFAULT '[]', answer_count INTEGER NOT NULL DEFAULT 0, answer_min_ttl_seconds INTEGER, latency_us INTEGER NOT NULL, error_code TEXT, error_text TEXT, result_class TEXT NOT NULL CHECK(result_class IN ('success','negative_answer','policy_block','processing_error')), created_at_ms INTEGER NOT NULL)`,
 	`CREATE INDEX idx_dns_queries_time ON dns_queries(timestamp_unix_ms DESC,id DESC)`,
 	`CREATE INDEX idx_dns_queries_client_time ON dns_queries(client_ip,timestamp_unix_ms DESC,id DESC)`,
 	`CREATE INDEX idx_dns_queries_qname_time ON dns_queries(qname,timestamp_unix_ms DESC,id DESC)`,

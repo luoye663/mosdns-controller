@@ -729,7 +729,7 @@ func (s *Service) upstreamGroupReferencedBySubscriptions(ctx context.Context, id
 	if err != nil || count > 0 {
 		return count > 0, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE status IN ('active','pending','unknown') AND schema_version=4`)
+	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE status IN ('active','pending','unknown') AND schema_version IN (4,5)`)
 	if err != nil {
 		return false, err
 	}

@@ -338,7 +338,7 @@ func TestDeleteLastRulePublishesEmptySnapshot(t *testing.T) {
 func TestReconcilePublishesInitialEmptySnapshot(t *testing.T) {
 	service, fake := testService(t)
 	state, err := service.Reconcile(context.Background())
-	if err != nil || state != "republished" || fake.current.SchemaVersion != 4 || fake.current.Version != 1 {
+	if err != nil || state != "republished" || fake.current.SchemaVersion != 5 || fake.current.Version != 1 {
 		t.Fatalf("state=%q snapshot=%+v err=%v", state, fake.current, err)
 	}
 }
@@ -542,7 +542,7 @@ func TestRollbackKeepsCurrentSubscriptionSets(t *testing.T) {
 	if _, err := service.Rollback(context.Background(), first.Version, nil, 1, "rollback", ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "sub.example" || fake.current.SchemaVersion != 4 {
+	if len(fake.current.SubscriptionSets) != 1 || fake.current.SubscriptionSets[0].Domains[0] != "sub.example" || fake.current.SchemaVersion != 5 {
 		t.Fatalf("rollback snapshot=%+v", fake.current)
 	}
 }
