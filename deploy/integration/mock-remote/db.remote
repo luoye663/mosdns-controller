@@ -1,5 +1,0 @@
-$ORIGIN .
-@ 60 IN SOA ns.remote. hostmaster.remote. 1 7200 3600 1209600 60
-@ 60 IN NS ns.remote.
-ns.remote. 60 IN A 127.0.0.1
-*. 60 IN A 10.0.0.2

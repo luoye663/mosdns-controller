@@ -1,4 +1,0 @@
-.:53 {
-    file /etc/coredns/db.remote
-    log
-}

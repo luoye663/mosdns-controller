@@ -23,10 +23,10 @@ func testService(t *testing.T) *Service {
 	return s
 }
 func validEvent(id string) Event {
-	return Event{SchemaVersion: 1, EventID: id, TimestampMS: time.Now().UnixMilli(), ClientIP: "192.0.2.10", Protocol: "udp", QName: "example.com", QType: 1, QClass: 1, RCode: 0, Route: "remote", RouteSource: "default", Snapshot: 1, LatencyUS: 42}
+	return Event{SchemaVersion: 2, EventID: id, TimestampMS: time.Now().UnixMilli(), ClientIP: "192.0.2.10", Protocol: "udp", QName: "example.com", QType: 1, QClass: 1, RCode: 0, Route: "forward", RouteSource: "default", UpstreamGroup: "default_dns", Snapshot: 1, LatencyUS: 42}
 }
 func validBatch(events ...Event) Batch {
-	return Batch{SchemaVersion: 1, SenderID: "mosdns-test", SentAtMS: time.Now().UnixMilli(), Events: events}
+	return Batch{SchemaVersion: 2, SenderID: "mosdns-test", SentAtMS: time.Now().UnixMilli(), Events: events}
 }
 
 func TestIngestQueueCapacityIsBounded(t *testing.T) {
@@ -47,10 +47,54 @@ func TestEmptyQueryPageReturnsItemsArray(t *testing.T) {
 	}
 }
 
+func TestForwardRouteIsAcceptedAndQueryable(t *testing.T) {
+	s := testService(t)
+	event := validEvent("forward-route")
+	event.Route, event.UpstreamGroup = "forward", "office_dns"
+	if err := validateBatch(validBatch(event)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Queries(context.Background(), Query{Route: "forward", UpstreamGroup: "office_dns"})
+	if err != nil || len(page.Items) != 1 || page.Items[0].UpstreamGroup != "office_dns" {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	groups, err := s.Top(context.Background(), "upstream_groups", 10)
+	if err != nil || len(groups) != 1 || groups[0]["value"] != "office_dns" || groups[0]["query_count"] != int64(1) {
+		t.Fatalf("upstream group stats=%+v err=%v", groups, err)
+	}
+	legacy := event
+	legacy.EventID = "legacy-route"
+	legacy.Route = "remote"
+	if err := validateEvent(legacy); err == nil {
+		t.Fatal("legacy route was accepted")
+	}
+}
+
+func TestSubscriptionBindingIDIsPersistedAndReturned(t *testing.T) {
+	s := testService(t)
+	event := validEvent("subscription-binding")
+	event.Route = "forward"
+	event.RouteSource = "subscription"
+	event.UpstreamGroup = "office_dns"
+	event.UpstreamTag = "office-primary"
+	event.SubscriptionSourceID = 17
+	event.SubscriptionBindingID = 23
+	if _, err := s.persist(context.Background(), []Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.Queries(context.Background(), Query{})
+	if err != nil || len(page.Items) != 1 || page.Items[0].SubscriptionBindingID != 23 || page.Items[0].RouteSource != "subscription" || page.Items[0].UpstreamGroup != "office_dns" || page.Items[0].UpstreamTag != "office-primary" {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+}
+
 func TestRetentionDeletesExpiredRawAndAggregates(t *testing.T) {
 	s := testService(t)
 	old := time.Now().AddDate(-2, 0, 0).UnixMilli()
-	if _, err := s.db.Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,created_at_ms) VALUES('expired-event',?,'192.0.2.10','example.com',1,1,'remote','default',0,1,0,1,?)`, old, old); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,result_class,created_at_ms) VALUES('expired-event',?,'192.0.2.10','example.com',1,1,'forward','default',0,1,0,1,'negative_answer',?)`, old, old); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO dns_stats_hourly_latency_bucket(hour_start_ms,upper_bound_us,query_count) VALUES(?,?,1)`, old, 1_000); err != nil {
@@ -108,8 +152,8 @@ func TestSummaryUsesHourlyAggregatesAndLatencyBuckets(t *testing.T) {
 	s := testService(t)
 	now := time.Now().UnixMilli()
 	events := []Event{
-		{SchemaVersion: 1, EventID: "summary-fast", TimestampMS: now, ClientIP: "192.0.2.10", Protocol: "udp", QName: "fast.example", QType: 1, QClass: 1, RCode: 0, Route: "remote", RouteSource: "default", Snapshot: 1, CacheHit: true, LatencyUS: 4_000},
-		{SchemaVersion: 1, EventID: "summary-slow", TimestampMS: now, ClientIP: "192.0.2.11", Protocol: "udp", QName: "slow.example", QType: 1, QClass: 1, RCode: 2, Route: "local", RouteSource: "default", Snapshot: 1, LatencyUS: 80_000},
+		{SchemaVersion: 2, EventID: "summary-fast", TimestampMS: now, ClientIP: "192.0.2.10", Protocol: "udp", QName: "fast.example", QType: 1, QClass: 1, RCode: 0, Route: "forward", RouteSource: "default", UpstreamGroup: "default_dns", Snapshot: 1, CacheHit: true, LatencyUS: 4_000},
+		{SchemaVersion: 2, EventID: "summary-slow", TimestampMS: now, ClientIP: "192.0.2.11", Protocol: "udp", QName: "slow.example", QType: 1, QClass: 1, RCode: 2, Route: "forward", RouteSource: "default", UpstreamGroup: "office_dns", Snapshot: 1, LatencyUS: 80_000},
 	}
 	if _, err := s.persist(context.Background(), events); err != nil {
 		t.Fatal(err)
@@ -129,11 +173,67 @@ func TestSummaryUsesHourlyAggregatesAndLatencyBuckets(t *testing.T) {
 	}
 }
 
+func TestResultClassificationAndSummary(t *testing.T) {
+	s := testService(t)
+	now := time.Now().UnixMilli()
+	success := validEvent("classified-success")
+	success.TimestampMS, success.AnswerCount = now, 1
+	negative := validEvent("classified-negative")
+	negative.TimestampMS, negative.RCode = now, 3
+	nodata := validEvent("classified-nodata")
+	nodata.TimestampMS = now
+	blocked := validEvent("classified-blocked")
+	blocked.TimestampMS, blocked.Route, blocked.RCode, blocked.ErrorCode = now, "block", 2, "DNS_PROCESSING_ERROR"
+	failed := validEvent("classified-failed")
+	failed.TimestampMS, failed.RCode, failed.ErrorCode = now, 2, "DNS_PROCESSING_ERROR"
+	textOnlyFailure := validEvent("classified-text-only-failed")
+	textOnlyFailure.TimestampMS, textOnlyFailure.ErrorText = now, "upstream transport failed"
+
+	stored, err := s.persist(context.Background(), []Event{success, negative, nodata, blocked, failed, textOnlyFailure})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"success", "negative_answer", "negative_answer", "policy_block", "processing_error", "processing_error"}
+	for i := range stored {
+		if stored[i].ResultClass != want[i] {
+			t.Fatalf("event %s class=%q, want %q", stored[i].EventID, stored[i].ResultClass, want[i])
+		}
+	}
+	summary, err := s.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"success_count", "policy_block_count"} {
+		if summary[key] != int64(1) {
+			t.Fatalf("%s=%v, want 1; summary=%+v", key, summary[key], summary)
+		}
+	}
+	if summary["negative_answer_count"] != int64(2) {
+		t.Fatalf("negative_answer_count=%v, want 2; summary=%+v", summary["negative_answer_count"], summary)
+	}
+	for _, key := range []string{"processing_error_count", "error_count"} {
+		if summary[key] != int64(2) {
+			t.Fatalf("%s=%v, want 2; summary=%+v", key, summary[key], summary)
+		}
+	}
+	page, err := s.Queries(context.Background(), Query{ResultClass: "negative_answer", HasError: boolPtr(false)})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("negative result filter page=%+v err=%v", page.Items, err)
+	}
+	page, err = s.Queries(context.Background(), Query{HasError: boolPtr(true)})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("processing error compatibility filter page=%+v err=%v", page.Items, err)
+	}
+	if _, err := s.Queries(context.Background(), Query{ResultClass: "unknown"}); err == nil {
+		t.Fatal("unknown result class was accepted")
+	}
+}
+
 func TestPersistStoresSelectedUpstreamTag(t *testing.T) {
 	s := testService(t)
 	event := validEvent("upstream-tag")
-	event.UpstreamGroup = "remote_dns"
-	event.UpstreamTag = "remote-doh-a"
+	event.UpstreamGroup = "office_dns"
+	event.UpstreamTag = "office-doh-a"
 	stored, err := s.persist(context.Background(), []Event{event})
 	if err != nil {
 		t.Fatal(err)
@@ -243,8 +343,7 @@ func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	second.TimestampMS = time.Now().Add(-time.Second).UnixMilli()
 	second.QName = "two.example"
 	second.RCode = 3
-	second.ErrorCode = "NXDOMAIN"
-	second.Route = "local"
+	second.UpstreamGroup = "office_dns"
 	if _, err := s.persist(context.Background(), []Event{first, second}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +357,7 @@ func TestQueriesApplyDiagnosticFiltersAndDeviceName(t *testing.T) {
 	if len(page.Items) != 1 || page.Items[0].EventID != first.EventID || page.Items[0].DeviceName != "laptop" {
 		t.Fatalf("filtered page=%+v", page.Items)
 	}
-	page, err = s.Queries(context.Background(), Query{FromMS: first.TimestampMS - 100, ToMS: second.TimestampMS + 100, QName: "two", QNameMatch: "contains", HasError: boolPtr(true)})
+	page, err = s.Queries(context.Background(), Query{FromMS: first.TimestampMS - 100, ToMS: second.TimestampMS + 100, QName: "two", QNameMatch: "contains", ResultClass: "negative_answer", HasError: boolPtr(false)})
 	if err != nil || len(page.Items) != 1 || page.Items[0].EventID != second.EventID {
 		t.Fatalf("contains error filter page=%+v err=%v", page.Items, err)
 	}
@@ -271,14 +370,14 @@ func TestSubscribeOnlyReceivesEventsPublishedAfterSubscription(t *testing.T) {
 	s := testService(t)
 	first := validEvent("replay-first")
 	second := validEvent("replay-second")
-	second.Route = "local"
+	second.UpstreamGroup = "office_dns"
 	third := validEvent("replay-third")
 	stored, err := s.persist(context.Background(), []Event{first, second, third})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.publish(stored)
-	sub, err := s.Subscribe(Query{Route: "remote"}, first.EventID)
+	sub, err := s.Subscribe(Query{Route: "forward"}, first.EventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +420,7 @@ func TestPersistRollbackDoesNotLeavePartialAggregation(t *testing.T) {
 
 func TestBatchValidationAndQueueOverload(t *testing.T) {
 	s := testService(t)
-	if err := s.Enqueue(Batch{SchemaVersion: 1, SenderID: "x", SentAtMS: 1}); err == nil {
+	if err := s.Enqueue(Batch{SchemaVersion: 2, SenderID: "x", SentAtMS: 1}); err == nil {
 		t.Fatal("empty batch was accepted")
 	}
 	tooLarge := make([]Event, maxBatchEvents+1)

@@ -68,7 +68,7 @@ type RecursiveExecutable interface {
 | `goto <sequence>` | 创建没有返回目标的新 walker；调用方的后续节点被跳过。 |
 | `jump <sequence>` | 执行目标 sequence；目标结束后回到调用方。 |
 
-规格要求的 `route_local` 和 `route_remote` 必须定义为独立带 tag 的 `sequence` 插件，随后可作为有效的 `goto` 目标。
+历史实现曾为固定路由定义独立的带 tag `sequence` 插件；当前主 sequence 统一进入动态上游 registry，由规则绑定选择普通上游组。
 
 ## query_audit 后置观察
 
@@ -150,7 +150,7 @@ m.GetSubMatcher(domain.MatcherDomain).Add(pattern, decision)
 
 - [`pkg/matcher/domain/utils.go`](../mosdns/pkg/matcher/domain/utils.go) 的 `NormalizeDomain` 只会转小写并去除末尾点；不会 trim 空白、使用 `idna.ToASCII` 转换 IDN，也不校验 DNS/标签长度。
 - `RegexMatcher` 由 Go map 支撑，返回第一个迭代命中的规则，无法保证 priority 与项目并列规则语义的确定性。
-- matcher value 必须能表示同一个匹配节点上的各类别最终决策。编译器必须在发布不可变快照之前解决排序和 local/remote 冲突。
+- matcher value 必须能表示同一个匹配节点上的各类别最终决策。编译器必须在发布不可变快照之前解决排序和上游组绑定冲突。
 - 项目仅允许 `full`、`domain` 与 `regexp`；不得调用或暴露 `MatcherKeyword`。
 
 编译器应先执行项目自身的规范化和校验，再把 full/domain 决策编译到不可变 map 或上游 matcher。regexp 应使用按确定性规则排序的不可变 slice。这不要求实现自定义 Trie。
@@ -268,7 +268,7 @@ func (p *Plugin) Exec(ctx context.Context, qCtx *query_context.Context, next seq
 ## 规格修正项
 
 1. 将 Phase 1 中每处 `mosdns/plugin/enabled_plugin.go` 改为 `mosdns/plugin/enabled_plugins.go`。
-2. cache flush 的现有端点是 `GET /plugins/cache_local/flush` 和 `GET /plugins/cache_remote/flush`，不是 `POST`。上游端点未认证，不符合项目安全要求；Phase 5 必须在保留方法的同时增加共享 token 校验。`9091` 必须仅限 Docker 内部网络。
+2. 上游原生 cache flush 端点使用 `GET`，不是 `POST`。项目的动态上游 registry 必须通过共享 token 保护按组 flush；`9091` 必须仅限 Docker 内部网络。
 3. 不得依赖上游 `NormalizeDomain` 完成项目规则校验。编译器必须在构建不可变快照前自行实现 trim、IDNA ASCII 转换、DNS 标签校验与 regexp 例外处理。
 4. 使用 `query_context.RegKey` 和不可变 `StoreValue` 数据传递 rule ID 与 snapshot version。不需要，也不得使用 core metadata 扩展或全局 `sync.Map`。
 5. 实测上游 `go.mod` directive 为 Go `1.24.9`，而项目 controller 规格要求 Go `1.25`。Phase 1 的构建镜像必须同时满足两者，并记录实际工具链。

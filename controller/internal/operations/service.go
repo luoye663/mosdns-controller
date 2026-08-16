@@ -5,18 +5,28 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/managed-dns/controller/internal/coordination"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
 	"github.com/managed-dns/controller/internal/queryingest"
 )
 
 var ErrInvalidCursor = errors.New("invalid cursor")
+var ErrNotFound = errors.New("upstream group not found")
+var ErrProtectedGroup = errors.New("protected upstream group")
+var ErrGroupReferenced = errors.New("upstream group is referenced")
+var ErrValidation = errors.New("invalid upstream group request")
+
+var groupIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 type Device struct {
 	ID            int64  `json:"id"`
@@ -69,28 +79,42 @@ type SystemStatus struct {
 	Audit                    *mosdnsclient.AuditStatus `json:"audit,omitempty"`
 	AuditError               string                    `json:"audit_error,omitempty"`
 }
-type Upstreams struct {
-	Local     mosdnsclient.UpstreamSnapshot `json:"local"`
-	Remote    mosdnsclient.UpstreamSnapshot `json:"remote"`
-	LocalECS  mosdnsclient.ECSSnapshot      `json:"local_ecs"`
-	RemoteECS mosdnsclient.ECSSnapshot      `json:"remote_ecs"`
-}
 type Settings struct {
-	CacheEnabled       bool   `json:"cache_enabled"`
-	CacheTTL           int    `json:"cache_ttl"`
-	QueryRetentionDays int    `json:"query_retention_days"`
-	DatabaseMaxSizeGiB int    `json:"database_max_size_gib"`
-	AddressFamilyMode  string `json:"address_family_mode"`
+	CacheEnabled               bool   `json:"cache_enabled"`
+	CacheTTL                   int    `json:"cache_ttl"`
+	NegativeCacheEnabled       bool   `json:"negative_cache_enabled"`
+	NegativeCacheTTL           int    `json:"negative_cache_ttl"`
+	QueryRetentionDays         int    `json:"query_retention_days"`
+	DatabaseMaxSizeGiB         int    `json:"database_max_size_gib"`
+	AddressFamilyMode          string `json:"address_family_mode"`
+	DefaultUpstreamGroupID     string `json:"default_upstream_group_id"`
+	GlobalMaxInFlight          int    `json:"global_max_in_flight"`
+	DefaultGroupMaxInFlight    int    `json:"default_group_max_in_flight"`
+	DefaultGroupQueryTimeoutMS int    `json:"default_group_query_timeout_ms"`
+	OverloadAction             string `json:"overload_action"`
+	UpstreamRegistryVersion    uint64 `json:"upstream_registry_version"`
+}
+type UpstreamGroupWrite struct {
+	ExpectedCurrentVersion uint64                     `json:"expected_current_version"`
+	Group                  mosdnsclient.UpstreamGroup `json:"group"`
+}
+type VersionPrecondition struct {
+	ExpectedCurrentVersion uint64 `json:"expected_current_version"`
 }
 type Service struct {
-	db     *sql.DB
-	dbPath string
-	mosdns mosdnsclient.Client
-	ingest *queryingest.Service
+	db       *sql.DB
+	dbPath   string
+	mosdns   mosdnsclient.Client
+	ingest   *queryingest.Service
+	bindings *coordination.UpstreamBindings
 }
 
-func New(db *sql.DB, dbPath string, mosdns mosdnsclient.Client, ingest *queryingest.Service) *Service {
-	return &Service{db: db, dbPath: dbPath, mosdns: mosdns, ingest: ingest}
+func New(db *sql.DB, dbPath string, mosdns mosdnsclient.Client, ingest *queryingest.Service, locks ...*coordination.UpstreamBindings) *Service {
+	bindings := &coordination.UpstreamBindings{}
+	if len(locks) > 0 && locks[0] != nil {
+		bindings = locks[0]
+	}
+	return &Service{db: db, dbPath: dbPath, mosdns: mosdns, ingest: ingest, bindings: bindings}
 }
 
 func (s *Service) Devices(ctx context.Context) ([]Device, error) {
@@ -219,82 +243,146 @@ func decodeAuditCursor(value string) (int64, int64, error) {
 }
 
 func (s *Service) FlushCaches(ctx context.Context, adminID int64, requestID, clientIP string) error {
-	// 两个独立 cache 都必须请求 flush；即使前一个失败，仍尝试另一个避免保留旧路由结果。
-	localErr := s.mosdns.Flush(ctx, "cache_local")
-	remoteErr := s.mosdns.Flush(ctx, "cache_remote")
+	registry, flushErr := s.mosdns.RegistryStatus(ctx)
+	if flushErr == nil {
+		flushErr = s.mosdns.FlushRegistry(ctx, "", registry.Version)
+	}
 	result, code := "success", ""
-	if localErr != nil || remoteErr != nil {
+	if flushErr != nil {
 		result = "failed"
 		code = "CACHE_FLUSH_FAILED"
 	}
-	if err := s.Audit(ctx, adminID, "flush", "cache", "local,remote", requestID, clientIP, result, code); err != nil {
+	if err := s.Audit(ctx, adminID, "flush", "cache", "all", requestID, clientIP, result, code); err != nil {
 		return err
 	}
-	return errors.Join(localErr, remoteErr)
+	return flushErr
 }
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
-	settings := Settings{CacheEnabled: true, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "dual_stack"}
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','query_retention_days','database_max_size_gib','address_family_mode')`)
+	registry, err := s.mosdns.RegistryStatus(ctx)
 	if err != nil {
 		return Settings{}, err
 	}
+	settings, _, err := s.databaseSettings(ctx)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.CacheEnabled = registry.Cache.Enabled
+	settings.CacheTTL = registry.Cache.LazyTTL
+	settings.NegativeCacheEnabled = registry.Cache.Negative.Enabled
+	settings.NegativeCacheTTL = int(registry.Cache.Negative.TTL)
+	settings.DefaultUpstreamGroupID = registry.DefaultGroupID
+	settings.GlobalMaxInFlight = registry.Protection.GlobalMaxInFlight
+	settings.DefaultGroupMaxInFlight = registry.Protection.DefaultGroupMaxInFlight
+	settings.DefaultGroupQueryTimeoutMS = registry.Protection.DefaultGroupQueryTimeoutMS
+	settings.OverloadAction = registry.Protection.OverloadAction
+	settings.UpstreamRegistryVersion = registry.Version
+	return settings, nil
+}
+
+func (s *Service) databaseSettings(ctx context.Context) (Settings, bool, error) {
+	settings := Settings{CacheEnabled: true, NegativeCacheEnabled: true, NegativeCacheTTL: 30, QueryRetentionDays: 7, DatabaseMaxSizeGiB: 2, AddressFamilyMode: "dual_stack"}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value_json FROM system_state WHERE key IN ('cache_enabled','cache_ttl','negative_cache_enabled','negative_cache_ttl','query_retention_days','database_max_size_gib','address_family_mode','default_upstream_group_id')`)
+	if err != nil {
+		return Settings{}, false, err
+	}
 	defer rows.Close()
+	hasDefault := false
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
-			return Settings{}, err
+			return Settings{}, false, err
 		}
 		switch key {
 		case "cache_enabled":
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {
-				return Settings{}, err
+				return Settings{}, false, err
 			}
 			settings.CacheEnabled = parsed
 		case "query_retention_days":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
-				return Settings{}, err
+				return Settings{}, false, err
 			}
 			settings.QueryRetentionDays = parsed
 		case "cache_ttl":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
-				return Settings{}, err
+				return Settings{}, false, err
 			}
 			settings.CacheTTL = parsed
+		case "negative_cache_enabled":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return Settings{}, false, err
+			}
+			settings.NegativeCacheEnabled = parsed
+		case "negative_cache_ttl":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Settings{}, false, err
+			}
+			settings.NegativeCacheTTL = parsed
 		case "database_max_size_gib":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
-				return Settings{}, err
+				return Settings{}, false, err
 			}
 			settings.DatabaseMaxSizeGiB = parsed
 		case "address_family_mode":
 			settings.AddressFamilyMode = value
+		case "default_upstream_group_id":
+			settings.DefaultUpstreamGroupID, hasDefault = value, true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return Settings{}, err
+		return Settings{}, false, err
 	}
 	if settings.QueryRetentionDays < 1 || settings.QueryRetentionDays > 365 {
-		return Settings{}, errors.New("query retention days must be within 1..365")
+		return Settings{}, false, errors.New("query retention days must be within 1..365")
 	}
 	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
-		return Settings{}, errors.New("cache TTL must be within 0..604800")
+		return Settings{}, false, errors.New("cache TTL must be within 0..604800")
+	}
+	if settings.NegativeCacheTTL < 1 || settings.NegativeCacheTTL > 86400 {
+		return Settings{}, false, errors.New("negative cache TTL must be within 1..86400")
 	}
 	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
-		return Settings{}, errors.New("database max size must be within 1..128 GiB")
+		return Settings{}, false, errors.New("database max size must be within 1..128 GiB")
 	}
 	if !validAddressFamilyMode(settings.AddressFamilyMode) {
-		return Settings{}, errors.New("invalid address family mode")
+		return Settings{}, false, errors.New("invalid address family mode")
 	}
-	return settings, nil
+	return settings, hasDefault, nil
 }
 func (s *Service) SyncSettings(ctx context.Context) error {
-	settings, err := s.Settings(ctx)
+	settings, hasPersistedDefault, err := s.databaseSettings(ctx)
 	if err != nil {
 		return err
 	}
+	registry, err := s.mosdns.RegistryStatus(ctx)
+	if err != nil {
+		return err
+	}
+	desired := cloneRegistry(registry)
+	desired.Cache = registryCache(settings)
+	defaultGroupID := registry.DefaultGroupID
+	if hasPersistedDefault {
+		defaultGroupID = settings.DefaultUpstreamGroupID
+	}
+	if !enabledGroup(registry, defaultGroupID) {
+		return errors.New("default upstream group must exist and be enabled")
+	}
+	desired.DefaultGroupID = defaultGroupID
+	applied, err := s.applyRegistry(ctx, registry, desired)
+	if err != nil {
+		return err
+	}
+	settings.DefaultUpstreamGroupID = applied.DefaultGroupID
+	settings.CacheEnabled = applied.Cache.Enabled
+	settings.CacheTTL = applied.Cache.LazyTTL
+	settings.NegativeCacheEnabled = applied.Cache.Negative.Enabled
+	settings.NegativeCacheTTL = int(applied.Cache.Negative.TTL)
 	if s.ingest != nil {
 		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
 			return err
@@ -303,20 +391,16 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled); err != nil {
-		return err
-	}
-	if err := s.mosdns.SetCacheTTL(ctx, settings.CacheTTL); err != nil {
-		return err
-	}
 	changed, err := s.applyAddressFamilyMode(ctx, settings.AddressFamilyMode)
 	if err != nil {
 		return err
 	}
 	if changed {
-		return s.flushBothCaches(ctx)
+		if err := s.mosdns.FlushRegistry(ctx, "", applied.Version); err != nil {
+			return err
+		}
 	}
-	return nil
+	return s.persistSettings(ctx, settings, 0, "", "", "success", "", false)
 }
 func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID int64, requestID, clientIP string) error {
 	if settings.AddressFamilyMode == "" {
@@ -328,75 +412,104 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings, adminID
 	if settings.CacheTTL < 0 || settings.CacheTTL > 604800 {
 		return errors.New("cache TTL must be within 0..604800")
 	}
+	if settings.NegativeCacheTTL < 1 || settings.NegativeCacheTTL > 86400 {
+		return errors.New("negative cache TTL must be within 1..86400")
+	}
 	if settings.DatabaseMaxSizeGiB < 1 || settings.DatabaseMaxSizeGiB > 128 {
 		return errors.New("database max size must be within 1..128 GiB")
 	}
 	if !validAddressFamilyMode(settings.AddressFamilyMode) {
 		return errors.New("invalid address family mode")
 	}
-	current, err := s.Settings(ctx)
+	currentRegistry, err := s.mosdns.RegistryStatus(ctx)
 	if err != nil {
 		return err
 	}
-	if current.CacheEnabled != settings.CacheEnabled {
-		if err := s.mosdns.SetCacheEnabled(ctx, settings.CacheEnabled); err != nil {
-			return err
-		}
+	if settings.UpstreamRegistryVersion != currentRegistry.Version {
+		return mosdnsclient.ErrConflict
 	}
-	if current.CacheTTL != settings.CacheTTL {
-		if err := s.mosdns.SetCacheTTL(ctx, settings.CacheTTL); err != nil {
-			return err
-		}
+	currentSettings, _, err := s.databaseSettings(ctx)
+	if err != nil {
+		return err
 	}
+	if !enabledGroup(currentRegistry, settings.DefaultUpstreamGroupID) {
+		return errors.New("default upstream group must exist and be enabled")
+	}
+	desired := cloneRegistry(currentRegistry)
+	desired.DefaultGroupID = settings.DefaultUpstreamGroupID
+	desired.Cache = registryCache(settings)
+	desired.Protection = registryProtection(settings)
+	applied, err := s.applyRegistry(ctx, currentRegistry, desired)
+	if err != nil {
+		return err
+	}
+	settings.DefaultUpstreamGroupID = applied.DefaultGroupID
+	settings.CacheEnabled, settings.CacheTTL = applied.Cache.Enabled, applied.Cache.LazyTTL
+	settings.NegativeCacheEnabled, settings.NegativeCacheTTL = applied.Cache.Negative.Enabled, int(applied.Cache.Negative.TTL)
+	settings.GlobalMaxInFlight = applied.Protection.GlobalMaxInFlight
+	settings.DefaultGroupMaxInFlight = applied.Protection.DefaultGroupMaxInFlight
+	settings.DefaultGroupQueryTimeoutMS = applied.Protection.DefaultGroupQueryTimeoutMS
+	settings.OverloadAction = applied.Protection.OverloadAction
+	settings.UpstreamRegistryVersion = applied.Version
+	var partialErr error
 	if s.ingest != nil {
 		if err := s.ingest.SetRetentionDays(settings.QueryRetentionDays); err != nil {
-			return err
+			partialErr = errors.Join(partialErr, err)
 		}
 		if err := s.ingest.SetDatabaseMaxGiB(settings.DatabaseMaxSizeGiB); err != nil {
-			return err
+			partialErr = errors.Join(partialErr, err)
 		}
-		if current.QueryRetentionDays != settings.QueryRetentionDays || current.DatabaseMaxSizeGiB != settings.DatabaseMaxSizeGiB {
+		if currentSettings.QueryRetentionDays != settings.QueryRetentionDays || currentSettings.DatabaseMaxSizeGiB != settings.DatabaseMaxSizeGiB {
 			if err := s.ingest.RetainNow(); err != nil {
-				return err
+				partialErr = errors.Join(partialErr, err)
 			}
 		}
 	}
-	var addressFamilyErr error
-	if current.AddressFamilyMode != settings.AddressFamilyMode {
-		changed, err := s.applyAddressFamilyMode(ctx, settings.AddressFamilyMode)
-		if err != nil {
-			return err
+	if currentSettings.AddressFamilyMode != settings.AddressFamilyMode {
+		changed, addressErr := s.applyAddressFamilyMode(ctx, settings.AddressFamilyMode)
+		partialErr = errors.Join(partialErr, addressErr)
+		if addressErr != nil {
+			settings.AddressFamilyMode = currentSettings.AddressFamilyMode
+			if actual, statusErr := s.mosdns.AddressFamilyStatus(ctx); statusErr == nil && validAddressFamilyMode(actual.Mode) {
+				settings.AddressFamilyMode = actual.Mode
+			} else {
+				partialErr = errors.Join(partialErr, statusErr)
+			}
 		}
 		if changed {
-			if err := s.flushBothCaches(ctx); err != nil {
-				// The policy snapshot is already durable in mosdns. Persist the
-				// controller view before reporting the incomplete cache flush.
-				addressFamilyErr = err
+			if err := s.mosdns.FlushRegistry(ctx, "", applied.Version); err != nil {
+				partialErr = errors.Join(partialErr, err)
 			}
 		}
 	}
+	result, code := "success", ""
+	if partialErr != nil {
+		result, code = "failed", "SETTINGS_PARTIAL_FAILURE"
+	}
+	if err := s.persistSettings(ctx, settings, adminID, requestID, clientIP, result, code, true); err != nil {
+		return errors.Join(partialErr, err)
+	}
+	return partialErr
+}
+
+func (s *Service) persistSettings(ctx context.Context, settings Settings, adminID int64, requestID, clientIP, result, code string, audit bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}, {"address_family_mode", settings.AddressFamilyMode}} {
+	for _, item := range []struct{ key, value string }{{"cache_enabled", strconv.FormatBool(settings.CacheEnabled)}, {"cache_ttl", strconv.Itoa(settings.CacheTTL)}, {"negative_cache_enabled", strconv.FormatBool(settings.NegativeCacheEnabled)}, {"negative_cache_ttl", strconv.Itoa(settings.NegativeCacheTTL)}, {"query_retention_days", strconv.Itoa(settings.QueryRetentionDays)}, {"database_max_size_gib", strconv.Itoa(settings.DatabaseMaxSizeGiB)}, {"address_family_mode", settings.AddressFamilyMode}, {"default_upstream_group_id", settings.DefaultUpstreamGroupID}} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO system_state(key,value_json,updated_at_ms) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at_ms=excluded.updated_at_ms`, item.key, item.value, now); err != nil {
 			return err
 		}
 	}
-	result, code := "success", ""
-	if addressFamilyErr != nil {
-		result, code = "failed", "CACHE_FLUSH_FAILED"
+	if audit {
+		if err := s.auditTx(ctx, tx, adminID, "update", "settings", "default_upstream_group,cache,negative_cache,query_retention,database_max_size,address_family", requestID, clientIP, result, code); err != nil {
+			return err
+		}
 	}
-	if err := s.auditTx(ctx, tx, adminID, "update", "settings", "cache,query_retention,database_max_size,address_family", requestID, clientIP, result, code); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return addressFamilyErr
+	return tx.Commit()
 }
 
 func validAddressFamilyMode(mode string) bool {
@@ -427,8 +540,77 @@ func (s *Service) applyAddressFamilyMode(ctx context.Context, mode string) (bool
 	return err == nil, err
 }
 
-func (s *Service) flushBothCaches(ctx context.Context) error {
-	return errors.Join(s.mosdns.Flush(ctx, "cache_local"), s.mosdns.Flush(ctx, "cache_remote"))
+func registryCache(settings Settings) mosdnsclient.RegistryCacheConfig {
+	return mosdnsclient.RegistryCacheConfig{Enabled: settings.CacheEnabled, LazyTTL: settings.CacheTTL, Negative: mosdnsclient.NegativeCacheConfig{Enabled: settings.NegativeCacheEnabled, TTL: uint32(settings.NegativeCacheTTL)}}
+}
+
+func registryProtection(settings Settings) mosdnsclient.ProtectionConfig {
+	return mosdnsclient.ProtectionConfig{
+		GlobalMaxInFlight:          settings.GlobalMaxInFlight,
+		DefaultGroupMaxInFlight:    settings.DefaultGroupMaxInFlight,
+		DefaultGroupQueryTimeoutMS: settings.DefaultGroupQueryTimeoutMS,
+		OverloadAction:             settings.OverloadAction,
+	}
+}
+
+func cloneRegistry(snapshot mosdnsclient.RegistrySnapshot) mosdnsclient.RegistrySnapshot {
+	clone := snapshot
+	clone.Groups = append([]mosdnsclient.UpstreamGroup(nil), snapshot.Groups...)
+	for i := range clone.Groups {
+		clone.Groups[i].Upstreams = append([]mosdnsclient.Upstream(nil), snapshot.Groups[i].Upstreams...)
+	}
+	return clone
+}
+
+func registryEqual(a, b mosdnsclient.RegistrySnapshot) bool {
+	a.ExpectedCurrentVersion, b.ExpectedCurrentVersion = 0, 0
+	return reflect.DeepEqual(a, b)
+}
+
+func (s *Service) applyRegistry(ctx context.Context, current, desired mosdnsclient.RegistrySnapshot) (mosdnsclient.RegistrySnapshot, error) {
+	if registryEqual(current, desired) {
+		return current, nil
+	}
+	desired.Version = current.Version + 1
+	desired.ExpectedCurrentVersion = current.Version
+	applied, err := s.mosdns.ApplyRegistry(ctx, desired)
+	if errors.Is(err, mosdnsclient.ErrUnknown) {
+		actual, statusErr := s.mosdns.RegistryStatus(ctx)
+		if statusErr == nil && validAppliedRegistry(actual, desired.Version) {
+			return actual, nil
+		}
+		return mosdnsclient.RegistrySnapshot{}, fmt.Errorf("registry update outcome is unknown and could not be reconciled: %w", err)
+	}
+	return applied, err
+}
+
+func validAppliedRegistry(snapshot mosdnsclient.RegistrySnapshot, version uint64) bool {
+	if (snapshot.SchemaVersion != 1 && snapshot.SchemaVersion != 2) || snapshot.Version != version || snapshot.ExpectedCurrentVersion != 0 || snapshot.DefaultGroupID == "" || len(snapshot.Groups) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(snapshot.Groups))
+	for _, group := range snapshot.Groups {
+		if group.ID == "" {
+			return false
+		}
+		if _, exists := seen[group.ID]; exists {
+			return false
+		}
+		seen[group.ID] = struct{}{}
+		if group.ID == snapshot.DefaultGroupID {
+			return group.Enabled
+		}
+	}
+	return false
+}
+
+func enabledGroup(snapshot mosdnsclient.RegistrySnapshot, id string) bool {
+	for _, group := range snapshot.Groups {
+		if group.ID == id {
+			return group.Enabled
+		}
+	}
+	return false
 }
 func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestID, clientIP string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -436,7 +618,7 @@ func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestI
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"dns_queries", "dns_stats_hourly_global", "dns_stats_hourly_domain", "dns_stats_hourly_client", "dns_stats_hourly_client_domain", "dns_stats_hourly_latency_bucket"} {
+	for _, table := range []string{"dns_queries", "dns_stats_hourly_global", "dns_stats_hourly_domain", "dns_stats_hourly_client", "dns_stats_hourly_client_domain", "dns_stats_hourly_upstream_group", "dns_stats_hourly_latency_bucket"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -446,74 +628,180 @@ func (s *Service) ClearQueryHistory(ctx context.Context, adminID int64, requestI
 	}
 	return tx.Commit()
 }
-func (s *Service) Upstreams(ctx context.Context) (Upstreams, error) {
-	local, err := s.mosdns.UpstreamStatus(ctx, "local_dns")
-	if err != nil {
-		return Upstreams{}, err
-	}
-	remote, err := s.mosdns.UpstreamStatus(ctx, "remote_dns")
-	if err != nil {
-		return Upstreams{}, err
-	}
-	localECS, err := s.mosdns.ECSStatus(ctx, "local_dns")
-	if err != nil {
-		return Upstreams{}, err
-	}
-	remoteECS, err := s.mosdns.ECSStatus(ctx, "remote_dns")
-	if err != nil {
-		return Upstreams{}, err
-	}
-	return Upstreams{Local: local, Remote: remote, LocalECS: localECS, RemoteECS: remoteECS}, nil
+func (s *Service) UpstreamGroups(ctx context.Context) (mosdnsclient.RegistrySnapshot, error) {
+	return s.mosdns.RegistryStatus(ctx)
 }
-func (s *Service) UpdateECS(ctx context.Context, group string, snapshot mosdnsclient.ECSSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.ECSSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return mosdnsclient.ECSSnapshot{}, errors.New("invalid upstream group")
+
+func (s *Service) UpstreamRuntimeStatus(ctx context.Context) (mosdnsclient.RegistryRuntimeStatus, error) {
+	return s.mosdns.RegistryRuntimeStatus(ctx)
+}
+
+func (s *Service) CreateUpstreamGroup(ctx context.Context, input UpstreamGroupWrite, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
+	current, err := s.mosdns.RegistryStatus(ctx)
+	if err != nil {
+		return mosdnsclient.RegistrySnapshot{}, err
 	}
-	updated, err := s.mosdns.ApplyECS(ctx, group, snapshot)
-	if errors.Is(err, mosdnsclient.ErrUnknown) {
-		current, statusErr := s.mosdns.ECSStatus(ctx, group)
-		if statusErr == nil && current.Version == snapshot.Version {
-			updated, err = current, nil
+	if input.ExpectedCurrentVersion != current.Version {
+		return mosdnsclient.RegistrySnapshot{}, mosdnsclient.ErrConflict
+	}
+	group := input.Group
+	if len(current.Groups) >= 32 {
+		return mosdnsclient.RegistrySnapshot{}, fmt.Errorf("%w: upstream group limit exceeded", ErrValidation)
+	}
+	if !groupIDPattern.MatchString(group.ID) {
+		return mosdnsclient.RegistrySnapshot{}, fmt.Errorf("%w: invalid upstream group id", ErrValidation)
+	}
+	if _, exists := registryGroup(current, group.ID); exists {
+		return mosdnsclient.RegistrySnapshot{}, fmt.Errorf("%w: upstream group id already exists", ErrValidation)
+	}
+	desired := cloneRegistry(current)
+	desired.Groups = append(desired.Groups, group)
+	return s.applyGroupChange(ctx, current, desired, "create", group.ID, adminID, requestID, clientIP)
+}
+
+func (s *Service) UpdateUpstreamGroup(ctx context.Context, id string, input UpstreamGroupWrite, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
+	group := input.Group
+	if group.ID != id {
+		return mosdnsclient.RegistrySnapshot{}, fmt.Errorf("%w: upstream group id cannot be modified", ErrValidation)
+	}
+	current, err := s.mosdns.RegistryStatus(ctx)
+	if err != nil {
+		return mosdnsclient.RegistrySnapshot{}, err
+	}
+	if input.ExpectedCurrentVersion != current.Version {
+		return mosdnsclient.RegistrySnapshot{}, mosdnsclient.ErrConflict
+	}
+	desired := cloneRegistry(current)
+	index := groupIndex(desired, id)
+	if index < 0 {
+		return mosdnsclient.RegistrySnapshot{}, ErrNotFound
+	}
+	if id == current.DefaultGroupID && !group.Enabled {
+		return mosdnsclient.RegistrySnapshot{}, ErrProtectedGroup
+	}
+	if desired.Groups[index].Enabled && !group.Enabled {
+		referenced, err := s.upstreamGroupReferencedBySubscriptions(ctx, id)
+		if err != nil {
+			return mosdnsclient.RegistrySnapshot{}, err
+		}
+		if referenced {
+			return mosdnsclient.RegistrySnapshot{}, ErrGroupReferenced
+		}
+	}
+	desired.Groups[index] = group
+	return s.applyGroupChange(ctx, current, desired, "update", id, adminID, requestID, clientIP)
+}
+
+func (s *Service) DeleteUpstreamGroup(ctx context.Context, id string, expectedCurrentVersion uint64, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
+	current, err := s.mosdns.RegistryStatus(ctx)
+	if err != nil {
+		return mosdnsclient.RegistrySnapshot{}, err
+	}
+	if expectedCurrentVersion != current.Version {
+		return mosdnsclient.RegistrySnapshot{}, mosdnsclient.ErrConflict
+	}
+	if id == current.DefaultGroupID {
+		return mosdnsclient.RegistrySnapshot{}, ErrProtectedGroup
+	}
+	if _, exists := registryGroup(current, id); !exists {
+		return mosdnsclient.RegistrySnapshot{}, ErrNotFound
+	}
+	referenced, err := s.upstreamGroupReferencedBySubscriptions(ctx, id)
+	if err != nil {
+		return mosdnsclient.RegistrySnapshot{}, err
+	}
+	if referenced {
+		return mosdnsclient.RegistrySnapshot{}, ErrGroupReferenced
+	}
+	desired := cloneRegistry(current)
+	index := groupIndex(desired, id)
+	desired.Groups = append(desired.Groups[:index], desired.Groups[index+1:]...)
+	return s.applyGroupChange(ctx, current, desired, "delete", id, adminID, requestID, clientIP)
+}
+
+func (s *Service) upstreamGroupReferencedBySubscriptions(ctx context.Context, id string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM subscription_bindings WHERE upstream_group_id=?)+(SELECT COUNT(*) FROM domain_rules WHERE upstream_group_id=?)`, id, id).Scan(&count)
+	if err != nil || count > 0 {
+		return count > 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE status IN ('active','pending','unknown') AND schema_version IN (4,5)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var snapshot mosdnsclient.Snapshot
+		if err := json.Unmarshal(raw, &snapshot); err != nil {
+			return false, err
+		}
+		for _, rule := range snapshot.Rules {
+			if rule.UpstreamGroupID == id {
+				return true, nil
+			}
+		}
+		for _, set := range snapshot.SubscriptionSets {
+			if set.UpstreamGroupID == id {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
+}
+
+func (s *Service) FlushUpstreamGroup(ctx context.Context, id string, expectedCurrentVersion uint64, adminID int64, requestID, clientIP string) error {
+	current, err := s.mosdns.RegistryStatus(ctx)
+	if err == nil {
+		if expectedCurrentVersion != current.Version {
+			err = mosdnsclient.ErrConflict
+		} else if _, exists := registryGroup(current, id); !exists {
+			err = ErrNotFound
+		} else {
+			err = s.mosdns.FlushRegistry(ctx, id, expectedCurrentVersion)
 		}
 	}
 	result, code := "success", ""
 	if err != nil {
-		result, code = "failed", "ECS_APPLY_FAILED"
-	} else {
-		cache := "cache_remote"
-		if group == "local_dns" {
-			cache = "cache_local"
-		}
-		if flushErr := s.mosdns.Flush(ctx, cache); flushErr != nil {
-			err, result, code = flushErr, "failed", "CACHE_FLUSH_FAILED"
-		}
+		result, code = "failed", "CACHE_FLUSH_FAILED"
 	}
-	if auditErr := s.Audit(ctx, adminID, "update", "ecs", group, requestID, clientIP, result, code); auditErr != nil && err == nil {
+	return errors.Join(err, s.Audit(ctx, adminID, "flush", "upstream_group_cache", id, requestID, clientIP, result, code))
+}
+
+func (s *Service) applyGroupChange(ctx context.Context, current, desired mosdnsclient.RegistrySnapshot, action, id string, adminID int64, requestID, clientIP string) (mosdnsclient.RegistrySnapshot, error) {
+	updated, err := s.applyRegistry(ctx, current, desired)
+	result, code := "success", ""
+	if err != nil {
+		result, code = "failed", "UPSTREAM_GROUP_APPLY_FAILED"
+	}
+	if auditErr := s.Audit(ctx, adminID, action, "upstream_group", id, requestID, clientIP, result, code); auditErr != nil && err == nil {
 		err = auditErr
 	}
 	return updated, err
 }
-func (s *Service) UpdateUpstream(ctx context.Context, group string, snapshot mosdnsclient.UpstreamSnapshot, adminID int64, requestID, clientIP string) (mosdnsclient.UpstreamSnapshot, error) {
-	if group != "local_dns" && group != "remote_dns" {
-		return mosdnsclient.UpstreamSnapshot{}, errors.New("invalid upstream group")
+
+func registryGroup(snapshot mosdnsclient.RegistrySnapshot, id string) (mosdnsclient.UpstreamGroup, bool) {
+	index := groupIndex(snapshot, id)
+	if index < 0 {
+		return mosdnsclient.UpstreamGroup{}, false
 	}
-	updated, err := s.mosdns.ApplyUpstream(ctx, group, snapshot)
-	if errors.Is(err, mosdnsclient.ErrUnknown) {
-		current, statusErr := s.mosdns.UpstreamStatus(ctx, group)
-		if statusErr == nil && current.Version == snapshot.Version {
-			updated, err = current, nil
+	return snapshot.Groups[index], true
+}
+
+func groupIndex(snapshot mosdnsclient.RegistrySnapshot, id string) int {
+	for i := range snapshot.Groups {
+		if snapshot.Groups[i].ID == id {
+			return i
 		}
 	}
-	result, code := "success", ""
-	if err != nil {
-		result, code = "failed", "UPSTREAM_APPLY_FAILED"
-	} else if flushErr := s.mosdns.Flush(ctx, map[string]string{"local_dns": "cache_local", "remote_dns": "cache_remote"}[group]); flushErr != nil {
-		err, result, code = flushErr, "failed", "CACHE_FLUSH_FAILED"
-	}
-	if auditErr := s.Audit(ctx, adminID, "update", "upstream", group, requestID, clientIP, result, code); auditErr != nil && err == nil {
-		err = auditErr
-	}
-	return updated, err
+	return -1
 }
 
 func (s *Service) DatabaseStatus() DatabaseStatus {

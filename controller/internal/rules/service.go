@@ -9,15 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/managed-dns/controller/internal/mosdnsclient"
-	"github.com/managed-dns/controller/internal/storage"
-	"golang.org/x/net/idna"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/managed-dns/controller/internal/coordination"
+	"github.com/managed-dns/controller/internal/mosdnsclient"
+	"github.com/managed-dns/controller/internal/storage"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -28,18 +31,25 @@ const (
 	statusFailed     = "failed"
 )
 
+var ErrRuleConflict = errors.New("rule changed since it was loaded")
+
 type Rule struct {
-	ID          int64  `json:"id"`
-	Category    string `json:"category"`
-	Action      string `json:"action"`
-	MatchType   string `json:"match_type"`
-	Pattern     string `json:"pattern"`
-	Priority    int    `json:"priority"`
-	Source      string `json:"source"`
-	Comment     string `json:"comment"`
-	Enabled     bool   `json:"enabled"`
-	CreatedAtMS int64  `json:"created_at_ms"`
-	UpdatedAtMS int64  `json:"updated_at_ms"`
+	ID                              int64    `json:"id"`
+	Category                        string   `json:"category"`
+	Action                          string   `json:"action"`
+	UpstreamGroupID                 string   `json:"upstream_group_id,omitempty"`
+	MatchType                       string   `json:"match_type"`
+	Pattern                         string   `json:"pattern"`
+	Priority                        int      `json:"priority"`
+	Source                          string   `json:"source"`
+	Comment                         string   `json:"comment"`
+	Enabled                         bool     `json:"enabled"`
+	CreatedAtMS                     int64    `json:"created_at_ms"`
+	UpdatedAtMS                     int64    `json:"updated_at_ms"`
+	ExpectedUpstreamRegistryVersion *uint64  `json:"expected_upstream_registry_version,omitempty"`
+	IPv4Addresses                   []string `json:"ipv4_addresses,omitempty"`
+	IPv6Addresses                   []string `json:"ipv6_addresses,omitempty"`
+	TTL                             uint32   `json:"ttl,omitempty"`
 }
 type Version struct {
 	Version     uint64 `json:"version"`
@@ -50,13 +60,18 @@ type Version struct {
 	ErrorCode   string `json:"error_code,omitempty"`
 }
 type Service struct {
-	store  *storage.Store
-	mosdns mosdnsclient.Client
-	mu     sync.Mutex
+	store    *storage.Store
+	mosdns   mosdnsclient.Client
+	mu       sync.Mutex
+	bindings *coordination.UpstreamBindings
 }
 
-func New(store *storage.Store, client mosdnsclient.Client) *Service {
-	return &Service{store: store, mosdns: client}
+func New(store *storage.Store, client mosdnsclient.Client, locks ...*coordination.UpstreamBindings) *Service {
+	bindings := &coordination.UpstreamBindings{}
+	if len(locks) > 0 && locks[0] != nil {
+		bindings = locks[0]
+	}
+	return &Service{store: store, mosdns: client, bindings: bindings}
 }
 func (s *Service) List(ctx context.Context) ([]Rule, error) {
 	return s.list(ctx, ` WHERE source NOT LIKE 'subscription:%'`)
@@ -65,7 +80,7 @@ func (s *Service) allRules(ctx context.Context) ([]Rule, error) {
 	return s.list(ctx, ` WHERE source NOT LIKE 'subscription:%'`)
 }
 func (s *Service) list(ctx context.Context, filter string) ([]Rule, error) {
-	rows, err := s.store.DB().QueryContext(ctx, `SELECT id,category,action,match_type,pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms FROM domain_rules`+filter+` ORDER BY category,match_type,normalized_pattern,priority DESC,id`)
+	rows, err := s.store.DB().QueryContext(ctx, `SELECT id,category,action,COALESCE(upstream_group_id,''),match_type,pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms,ipv4_addresses_json,ipv6_addresses_json,ttl FROM domain_rules`+filter+` ORDER BY category,priority ASC,match_type,normalized_pattern,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +89,14 @@ func (s *Service) list(ctx context.Context, filter string) ([]Rule, error) {
 	out := make([]Rule, 0)
 	for rows.Next() {
 		var r Rule
-		if err := rows.Scan(&r.ID, &r.Category, &r.Action, &r.MatchType, &r.Pattern, &r.Priority, &r.Source, &r.Comment, &r.Enabled, &r.CreatedAtMS, &r.UpdatedAtMS); err != nil {
+		var ipv4JSON, ipv6JSON []byte
+		if err := rows.Scan(&r.ID, &r.Category, &r.Action, &r.UpstreamGroupID, &r.MatchType, &r.Pattern, &r.Priority, &r.Source, &r.Comment, &r.Enabled, &r.CreatedAtMS, &r.UpdatedAtMS, &ipv4JSON, &ipv6JSON, &r.TTL); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(ipv4JSON, &r.IPv4Addresses); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(ipv6JSON, &r.IPv6Addresses); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -82,10 +104,15 @@ func (s *Service) list(ctx context.Context, filter string) ([]Rule, error) {
 	return out, rows.Err()
 }
 func (s *Service) Create(ctx context.Context, r Rule, adminID int64, requestID, ip string) (Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if isSubscriptionRule(r) {
 		return Version{}, errors.New("subscription rules must be managed through their source")
+	}
+	if err := s.validateRouteWrite(ctx, []Rule{r}); err != nil {
+		return Version{}, err
 	}
 	rules, err := s.allRules(ctx)
 	if err != nil {
@@ -105,10 +132,15 @@ func (s *Service) Create(ctx context.Context, r Rule, adminID int64, requestID, 
 	return s.publish(ctx, rules, adminID, requestID, ip, 0)
 }
 func (s *Service) Update(ctx context.Context, id int64, patch Rule, adminID int64, requestID, ip string) (Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rules, err := s.allRules(ctx)
 	if err != nil {
+		return Version{}, err
+	}
+	if err := s.validateRouteWrite(ctx, []Rule{patch}); err != nil {
 		return Version{}, err
 	}
 	found := false
@@ -117,9 +149,15 @@ func (s *Service) Update(ctx context.Context, id int64, patch Rule, adminID int6
 			if isSubscriptionRule(rules[i]) {
 				return Version{}, errors.New("subscription rules must be managed through their source")
 			}
+			if patch.UpdatedAtMS == 0 || patch.UpdatedAtMS != rules[i].UpdatedAtMS {
+				return Version{}, ErrRuleConflict
+			}
 			patch.ID = id
 			patch.CreatedAtMS = rules[i].CreatedAtMS
 			patch.UpdatedAtMS = time.Now().UnixMilli()
+			if patch.UpdatedAtMS <= rules[i].UpdatedAtMS {
+				patch.UpdatedAtMS = rules[i].UpdatedAtMS + 1
+			}
 			if patch.Source == "" {
 				patch.Source = rules[i].Source
 			}
@@ -133,6 +171,8 @@ func (s *Service) Update(ctx context.Context, id int64, patch Rule, adminID int6
 	return s.publish(ctx, rules, adminID, requestID, ip, 0)
 }
 func (s *Service) Delete(ctx context.Context, id int64, adminID int64, requestID, ip string) (Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rules, err := s.allRules(ctx)
@@ -156,20 +196,24 @@ func (s *Service) Delete(ctx context.Context, id int64, adminID int64, requestID
 	}
 	return s.publish(ctx, out, adminID, requestID, ip, 0)
 }
-func (s *Service) Rollback(ctx context.Context, from uint64, adminID int64, requestID, ip string) (Version, error) {
+func (s *Service) Rollback(ctx context.Context, from uint64, expectedRegistryVersion *uint64, adminID int64, requestID, ip string) (Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var snapshot []byte
-	if err := s.store.DB().QueryRowContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE version=?`, from).Scan(&snapshot); err != nil {
+	var encodedRules []byte
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT rules_json FROM rule_versions WHERE version=?`, from).Scan(&encodedRules); err != nil {
 		return Version{}, err
 	}
-	var prior mosdnsclient.Snapshot
-	if err := json.Unmarshal(snapshot, &prior); err != nil {
+	var rules []Rule
+	if err := json.Unmarshal(encodedRules, &rules); err != nil {
 		return Version{}, err
 	}
-	rules := make([]Rule, len(prior.Rules))
-	for i, r := range prior.Rules {
-		rules[i] = fromWire(r, true)
+	if hasRouteRules(rules) && expectedRegistryVersion == nil {
+		return Version{}, errors.New("route rollback requires expected_upstream_registry_version")
+	}
+	if err := s.validateRouteTargets(ctx, rules, expectedRegistryVersion); err != nil {
+		return Version{}, err
 	}
 	return s.publish(ctx, rules, adminID, requestID, ip, from)
 }
@@ -201,7 +245,9 @@ func (s *Service) Version(ctx context.Context, version uint64) (mosdnsclient.Sna
 	var value mosdnsclient.Snapshot
 	return value, json.Unmarshal(raw, &value)
 }
-func (s *Service) Batch(ctx context.Context, operation string, ids []int64, adminID int64, requestID, ip string) (Version, error) {
+func (s *Service) Batch(ctx context.Context, operation string, ids []int64, expectedRegistryVersion *uint64, adminID int64, requestID, ip string) (Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(ids) == 0 {
@@ -216,6 +262,7 @@ func (s *Service) Batch(ctx context.Context, operation string, ids []int64, admi
 		selected[id] = true
 	}
 	found := 0
+	selectedRoutes := make([]Rule, 0)
 	out := rules[:0]
 	for _, r := range rules {
 		if !selected[r.ID] {
@@ -226,6 +273,9 @@ func (s *Service) Batch(ctx context.Context, operation string, ids []int64, admi
 			return Version{}, errors.New("subscription rules must be managed through their source")
 		}
 		found++
+		if r.Category == "route" {
+			selectedRoutes = append(selectedRoutes, r)
+		}
 		switch operation {
 		case "enable":
 			r.Enabled = true
@@ -241,12 +291,29 @@ func (s *Service) Batch(ctx context.Context, operation string, ids []int64, admi
 	if found != len(selected) {
 		return Version{}, sql.ErrNoRows
 	}
+	if len(selectedRoutes) != 0 {
+		if expectedRegistryVersion == nil {
+			return Version{}, errors.New("route batch operations require expected_upstream_registry_version")
+		}
+		if err := s.validateRouteTargets(ctx, selectedRoutes, expectedRegistryVersion); err != nil {
+			return Version{}, err
+		}
+	}
 	return s.publish(ctx, out, adminID, requestID, ip, 0)
 }
 func (s *Service) Import(ctx context.Context, incoming []Rule, adminID int64, requestID, ip string) (Version, error) {
+	s.bindings.Lock()
+	defer s.bindings.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, err := s.allRules(ctx)
+	if err != nil {
+		return Version{}, err
+	}
+	if err := s.validateRouteWrite(ctx, incoming); err != nil {
+		return Version{}, err
+	}
+	ids, err := s.reserveRuleIDs(ctx, len(incoming))
 	if err != nil {
 		return Version{}, err
 	}
@@ -254,13 +321,7 @@ func (s *Service) Import(ctx context.Context, incoming []Rule, adminID int64, re
 		if isSubscriptionRule(incoming[i]) {
 			return Version{}, errors.New("subscription rules must be managed through their source")
 		}
-		if incoming[i].ID == 0 {
-			id, err := s.nextRuleID(ctx)
-			if err != nil {
-				return Version{}, err
-			}
-			incoming[i].ID = id
-		}
+		incoming[i].ID = ids[i]
 		now := time.Now().UnixMilli()
 		incoming[i].CreatedAtMS = now
 		incoming[i].UpdatedAtMS = now
@@ -284,13 +345,40 @@ func (s *Service) Reconcile(ctx context.Context) (string, error) {
 	var checksum, status string
 	err = s.store.DB().QueryRowContext(ctx, `SELECT version,checksum,status FROM rule_versions WHERE status IN ('pending','unknown') AND version=?`, runtime.SnapshotVersion).Scan(&version, &checksum, &status)
 	if err == nil && checksum == runtime.Checksum {
-		return "matched_candidate", s.finalize(ctx, version)
+		sets, err := s.subscriptionSets(ctx)
+		if err != nil {
+			return "matched_candidate", err
+		}
+		if err := s.finalize(ctx, version); err != nil {
+			return "matched_candidate", err
+		}
+		candidate, err := s.Version(ctx, version)
+		if err != nil {
+			return "matched_candidate", err
+		}
+		if subscriptionSetsEqual(candidate.SubscriptionSets, sets) {
+			return "matched_candidate", nil
+		}
+		current, err := s.allRules(ctx)
+		if err != nil {
+			return "matched_candidate", err
+		}
+		_, err = s.publish(ctx, current, 0, "reconcile_candidate_sources", "", 0)
+		return "republished", err
 	}
 	var active uint64
 	var activeChecksum string
 	err = s.store.DB().QueryRowContext(ctx, `SELECT version,checksum FROM rule_versions WHERE status='active'`).Scan(&active, &activeChecksum)
 	if errors.Is(err, sql.ErrNoRows) && runtime.SnapshotVersion == 0 {
-		return "empty", nil
+		current, ruleErr := s.allRules(ctx)
+		if ruleErr != nil {
+			return "", ruleErr
+		}
+		_, publishErr := s.publish(ctx, current, 0, "reconcile_initial", "", 0)
+		return "republished", publishErr
+	}
+	if err != nil {
+		return "", err
 	}
 	if runtime.SnapshotVersion > active {
 		return "degraded", fmt.Errorf("runtime version %d is not a known candidate", runtime.SnapshotVersion)
@@ -307,12 +395,37 @@ func (s *Service) Reconcile(ctx context.Context) (string, error) {
 	if runtime.Checksum != activeChecksum {
 		return "degraded", errors.New("runtime checksum does not match active version")
 	}
+	var raw []byte
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE version=?`, active).Scan(&raw); err != nil {
+		return "", err
+	}
+	var activeSnapshot mosdnsclient.Snapshot
+	if err := json.Unmarshal(raw, &activeSnapshot); err != nil {
+		return "", err
+	}
+	sets, err := s.subscriptionSets(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !subscriptionSetsEqual(activeSnapshot.SubscriptionSets, sets) {
+		current, err := s.allRules(ctx)
+		if err != nil {
+			return "", err
+		}
+		_, err = s.publish(ctx, current, 0, "reconcile_sources", "", 0)
+		return "republished", err
+	}
 	return "unchanged", nil
 }
 func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requestID, ip string, rollbackFrom uint64) (Version, error) {
-	existing, _ := s.allRules(ctx)
-	routeChanged := routeFingerprint(existing) != routeFingerprint(rules)
+	sets, err := s.subscriptionSets(ctx)
+	if err != nil {
+		return Version{}, err
+	}
 	if err := validateRules(rules); err != nil {
+		return Version{}, err
+	}
+	if err := s.validateRouteTargets(ctx, rules, nil); err != nil {
 		return Version{}, err
 	}
 	current, err := s.activeVersion(ctx)
@@ -323,13 +436,21 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 	if err != nil {
 		return Version{}, err
 	}
-	snapshot := buildSnapshot(version, current, rules, nil)
+	snapshot := buildSnapshot(version, current, rules, sets)
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return Version{}, err
 	}
+	persistedRules := append([]Rule(nil), rules...)
+	for i := range persistedRules {
+		persistedRules[i].ExpectedUpstreamRegistryVersion = nil
+	}
+	encodedRules, err := json.Marshal(persistedRules)
+	if err != nil {
+		return Version{}, err
+	}
 	v := Version{Version: version, Checksum: snapshot.Checksum, Status: statusPending, RuleCount: snapshotRuleCount(snapshot), CreatedAtMS: time.Now().UnixMilli()}
-	if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rollback_from_version,rule_count,regexp_rule_count,snapshot_json,created_by,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, version, 2, snapshot.Checksum, statusPending, current, nullableVersion(rollbackFrom), v.RuleCount, regexpCount(snapshot.Rules), encoded, adminID, v.CreatedAtMS); err != nil {
+	if _, err = s.store.DB().ExecContext(ctx, `INSERT INTO rule_versions(version,schema_version,checksum,status,previous_version,rollback_from_version,rule_count,regexp_rule_count,snapshot_json,rules_json,created_by,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, version, 5, snapshot.Checksum, statusPending, current, nullableVersion(rollbackFrom), v.RuleCount, regexpCount(snapshot.Rules), encoded, encodedRules, nullableAdminID(adminID), v.CreatedAtMS); err != nil {
 		return Version{}, err
 	}
 	validation, err := s.mosdns.Validate(ctx, snapshot)
@@ -369,29 +490,17 @@ func (s *Service) publish(ctx context.Context, rules []Rule, adminID int64, requ
 	if err := s.finalizeWithRules(ctx, version, rules, adminID, requestID, ip); err != nil {
 		return v, err
 	}
-	if routeChanged {
-		if err := s.mosdns.Flush(ctx, "cache_local"); err != nil {
-			return v, err
-		}
-		if err := s.mosdns.Flush(ctx, "cache_remote"); err != nil {
-			return v, err
-		}
-	}
 	v.Status = statusActive
 	return v, nil
 }
 func (s *Service) finalize(ctx context.Context, version uint64) error {
 	var raw []byte
-	if err := s.store.DB().QueryRowContext(ctx, `SELECT snapshot_json FROM rule_versions WHERE version=?`, version).Scan(&raw); err != nil {
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT rules_json FROM rule_versions WHERE version=?`, version).Scan(&raw); err != nil {
 		return err
 	}
-	var snap mosdnsclient.Snapshot
-	if err := json.Unmarshal(raw, &snap); err != nil {
+	var rules []Rule
+	if err := json.Unmarshal(raw, &rules); err != nil {
 		return err
-	}
-	rules := make([]Rule, len(snap.Rules))
-	for i, r := range snap.Rules {
-		rules[i] = fromWire(r, true)
 	}
 	return s.finalizeWithRules(ctx, version, rules, 0, "reconcile", "")
 }
@@ -410,7 +519,7 @@ func (s *Service) finalizeWithRules(ctx context.Context, version uint64, rules [
 	if _, err = tx.ExecContext(ctx, `DELETE FROM domain_rules`); err != nil {
 		return err
 	}
-	insertRule, err := tx.PrepareContext(ctx, `INSERT INTO domain_rules(id,version,category,action,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	insertRule, err := tx.PrepareContext(ctx, `INSERT INTO domain_rules(id,version,category,action,upstream_group_id,match_type,pattern,normalized_pattern,priority,source,comment,enabled,created_at_ms,updated_at_ms,ipv4_addresses_json,ipv6_addresses_json,ttl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -420,7 +529,9 @@ func (s *Service) finalizeWithRules(ctx context.Context, version uint64, rules [
 		if err != nil {
 			return err
 		}
-		if _, err = insertRule.ExecContext(ctx, r.ID, version, r.Category, r.Action, r.MatchType, r.Pattern, normalized, r.Priority, r.Source, r.Comment, r.Enabled, r.CreatedAtMS, r.UpdatedAtMS); err != nil {
+		ipv4JSON, _ := json.Marshal(r.IPv4Addresses)
+		ipv6JSON, _ := json.Marshal(r.IPv6Addresses)
+		if _, err = insertRule.ExecContext(ctx, r.ID, version, r.Category, r.Action, nullableGroupID(r), r.MatchType, r.Pattern, normalized, r.Priority, r.Source, r.Comment, r.Enabled, r.CreatedAtMS, r.UpdatedAtMS, ipv4JSON, ipv6JSON, r.TTL); err != nil {
 			return err
 		}
 	}
@@ -500,18 +611,31 @@ func buildSnapshot(version, current uint64, rules []Rule, sets []mosdnsclient.Su
 		if a.Category != b.Category {
 			return a.Category < b.Category
 		}
+		if a.Priority != b.Priority {
+			return a.Priority < b.Priority
+		}
 		if a.MatchType != b.MatchType {
 			return a.MatchType < b.MatchType
 		}
 		if a.Pattern != b.Pattern {
 			return a.Pattern < b.Pattern
 		}
-		if a.Priority != b.Priority {
-			return a.Priority > b.Priority
-		}
 		return a.ID < b.ID
 	})
-	snap := mosdnsclient.Snapshot{SchemaVersion: 2, Version: version, ExpectedCurrentVersion: current, GeneratedAt: time.Now().UTC(), BlockRCode: 3, Rules: wire, SubscriptionSets: sets}
+	if sets == nil {
+		sets = make([]mosdnsclient.SubscriptionSet, 0)
+	}
+	snap := mosdnsclient.Snapshot{SchemaVersion: 5, Version: version, ExpectedCurrentVersion: current, GeneratedAt: time.Now().UTC(), BlockRCode: 3, Rules: wire, SubscriptionSets: sets}
+	data := snapshotCanonicalJSON(snap)
+	sum := sha256.Sum256(data)
+	snap.Checksum = "sha256:" + hex.EncodeToString(sum[:])
+	return snap
+}
+
+func snapshotCanonicalJSON(snapshot mosdnsclient.Snapshot) []byte {
+	if snapshot.SubscriptionSets == nil {
+		snapshot.SubscriptionSets = make([]mosdnsclient.SubscriptionSet, 0)
+	}
 	canonical := struct {
 		SchemaVersion    uint32                         `json:"schema_version"`
 		Version          uint64                         `json:"version"`
@@ -519,12 +643,10 @@ func buildSnapshot(version, current uint64, rules []Rule, sets []mosdnsclient.Su
 		GeneratedAt      time.Time                      `json:"generated_at"`
 		BlockRCode       int                            `json:"block_rcode"`
 		Rules            []mosdnsclient.Rule            `json:"rules"`
-		SubscriptionSets []mosdnsclient.SubscriptionSet `json:"subscription_sets,omitempty"`
-	}{snap.SchemaVersion, snap.Version, snap.ExpectedCurrentVersion, snap.GeneratedAt, snap.BlockRCode, snap.Rules, snap.SubscriptionSets}
+		SubscriptionSets []mosdnsclient.SubscriptionSet `json:"subscription_sets"`
+	}{snapshot.SchemaVersion, snapshot.Version, snapshot.ExpectedCurrentVersion, snapshot.GeneratedAt, snapshot.BlockRCode, snapshot.Rules, snapshot.SubscriptionSets}
 	data, _ := json.Marshal(canonical)
-	sum := sha256.Sum256(data)
-	snap.Checksum = "sha256:" + hex.EncodeToString(sum[:])
-	return snap
+	return data
 }
 func snapshotRuleCount(snapshot mosdnsclient.Snapshot) int {
 	count := len(snapshot.Rules)
@@ -534,10 +656,10 @@ func snapshotRuleCount(snapshot mosdnsclient.Snapshot) int {
 	return count
 }
 func toWire(r Rule) mosdnsclient.Rule {
-	return mosdnsclient.Rule{ID: r.ID, Category: r.Category, Action: r.Action, MatchType: r.MatchType, Pattern: r.Pattern, Priority: r.Priority, Source: r.Source, Comment: r.Comment}
+	return mosdnsclient.Rule{ID: r.ID, Category: r.Category, Action: r.Action, UpstreamGroupID: r.UpstreamGroupID, MatchType: r.MatchType, Pattern: r.Pattern, Priority: r.Priority, Source: r.Source, Comment: r.Comment, IPv4Addresses: r.IPv4Addresses, IPv6Addresses: r.IPv6Addresses, TTL: r.TTL}
 }
 func fromWire(r mosdnsclient.Rule, enabled bool) Rule {
-	return Rule{ID: r.ID, Category: r.Category, Action: r.Action, MatchType: r.MatchType, Pattern: r.Pattern, Priority: r.Priority, Source: r.Source, Comment: r.Comment, Enabled: enabled, CreatedAtMS: time.Now().UnixMilli(), UpdatedAtMS: time.Now().UnixMilli()}
+	return Rule{ID: r.ID, Category: r.Category, Action: r.Action, UpstreamGroupID: r.UpstreamGroupID, MatchType: r.MatchType, Pattern: r.Pattern, Priority: r.Priority, Source: r.Source, Comment: r.Comment, IPv4Addresses: r.IPv4Addresses, IPv6Addresses: r.IPv6Addresses, TTL: r.TTL, Enabled: enabled, CreatedAtMS: time.Now().UnixMilli(), UpdatedAtMS: time.Now().UnixMilli()}
 }
 func regexpCount(rs []mosdnsclient.Rule) int {
 	n := 0
@@ -554,15 +676,19 @@ func nullableVersion(v uint64) any {
 	}
 	return v
 }
-func routeFingerprint(rs []Rule) string {
-	var out []string
-	for _, r := range rs {
-		if r.Category == "route" {
-			out = append(out, fmt.Sprintf("%d:%s:%s:%s:%d:%t", r.ID, r.Action, r.MatchType, r.Pattern, r.Priority, r.Enabled))
-		}
+func nullableAdminID(id int64) any {
+	if id == 0 {
+		return nil
 	}
-	sort.Strings(out)
-	return strings.Join(out, "|")
+	return id
+}
+func subscriptionSetsEqual(a, b []mosdnsclient.SubscriptionSet) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	aJSON, _ := json.Marshal(a)
+	bJSON, _ := json.Marshal(b)
+	return string(aJSON) == string(bJSON)
 }
 func isSubscriptionRule(r Rule) bool { return strings.HasPrefix(r.Source, "subscription:") }
 func validateRules(rules []Rule) error {
@@ -573,9 +699,6 @@ func validateRules(rules []Rule) error {
 	regexps := 0
 	for i := range rules {
 		r := &rules[i]
-		if r.Priority == 0 {
-			r.Priority = 100
-		}
 		if r.Priority < 0 || r.Priority > 1000 {
 			return errors.New("priority must be between 0 and 1000")
 		}
@@ -584,6 +707,31 @@ func validateRules(rules []Rule) error {
 		}
 		if !validAction(r.Category, r.Action) {
 			return errors.New("invalid category/action")
+		}
+		if r.Category == "route" {
+			r.UpstreamGroupID = strings.TrimSpace(r.UpstreamGroupID)
+			if r.UpstreamGroupID == "" {
+				return errors.New("route rules require upstream_group_id")
+			}
+		} else if strings.TrimSpace(r.UpstreamGroupID) != "" {
+			return errors.New("only route rules may include upstream_group_id")
+		}
+		if r.Category == "answer" {
+			if r.TTL < 1 || r.TTL > 86400 {
+				return errors.New("ttl must be between 1 and 86400")
+			}
+			var err error
+			if r.IPv4Addresses, err = normalizeIPs(r.IPv4Addresses, true); err != nil {
+				return err
+			}
+			if r.IPv6Addresses, err = normalizeIPs(r.IPv6Addresses, false); err != nil {
+				return err
+			}
+			if len(r.IPv4Addresses)+len(r.IPv6Addresses) == 0 {
+				return errors.New("static answer requires at least one address")
+			}
+		} else if len(r.IPv4Addresses) != 0 || len(r.IPv6Addresses) != 0 || r.TTL != 0 {
+			return errors.New("address fields are only valid for answer rules")
 		}
 		n, err := normalize(r.Pattern, r.MatchType)
 		if err != nil {
@@ -611,7 +759,94 @@ func validateRules(rules []Rule) error {
 	return nil
 }
 func validAction(category, action string) bool {
-	return (category == "access" && (action == "allow" || action == "block")) || (category == "route" && (action == "local" || action == "remote")) || (category == "logging" && action == "no_log")
+	return (category == "access" && (action == "allow" || action == "block")) || (category == "route" && action == "upstream") || (category == "logging" && action == "no_log") || (category == "answer" && action == "static")
+}
+
+func normalizeIPs(values []string, want4 bool) ([]string, error) {
+	if len(values) > 16 {
+		return nil, errors.New("address family exceeds 16 entries")
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		addr, err := netip.ParseAddr(strings.TrimSpace(value))
+		if err != nil || addr.Is4() != want4 {
+			if want4 {
+				return nil, fmt.Errorf("invalid IPv4 address %q", value)
+			}
+			return nil, fmt.Errorf("invalid IPv6 address %q", value)
+		}
+		n := addr.String()
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func nullableGroupID(r Rule) any {
+	if r.Category != "route" {
+		return nil
+	}
+	return r.UpstreamGroupID
+}
+
+func (s *Service) validateRouteWrite(ctx context.Context, rules []Rule) error {
+	var expected *uint64
+	for _, rule := range rules {
+		if rule.Category != "route" {
+			continue
+		}
+		if rule.ExpectedUpstreamRegistryVersion == nil {
+			return errors.New("route rules require expected_upstream_registry_version")
+		}
+		if expected != nil && *expected != *rule.ExpectedUpstreamRegistryVersion {
+			return errors.New("route rules must use one expected_upstream_registry_version")
+		}
+		value := *rule.ExpectedUpstreamRegistryVersion
+		expected = &value
+	}
+	return s.validateRouteTargets(ctx, rules, expected)
+}
+
+func (s *Service) validateRouteTargets(ctx context.Context, rules []Rule, expected *uint64) error {
+	targets := map[string]struct{}{}
+	for _, rule := range rules {
+		if rule.Category == "route" {
+			targets[strings.TrimSpace(rule.UpstreamGroupID)] = struct{}{}
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	registry, err := s.mosdns.RegistryStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if expected != nil && registry.Version != *expected {
+		return mosdnsclient.ErrConflict
+	}
+	for _, group := range registry.Groups {
+		if group.Enabled {
+			delete(targets, group.ID)
+		}
+	}
+	if len(targets) != 0 {
+		return errors.New("upstream group must exist and be enabled")
+	}
+	return nil
+}
+
+func hasRouteRules(rules []Rule) bool {
+	for _, rule := range rules {
+		if rule.Category == "route" {
+			return true
+		}
+	}
+	return false
 }
 func normalize(pattern, matchType string) (string, error) {
 	p := strings.TrimSpace(pattern)

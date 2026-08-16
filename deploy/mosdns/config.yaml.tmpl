@@ -9,21 +9,7 @@ api:
   http: "${MOSDNS_API_LISTEN}"
 
 plugins:
-  # Four source-merged subscription sets use the compact domain_set matcher.
-  - tag: subscription_allow
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-allow.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-allow.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-  - tag: subscription_block
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-block.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-block.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-  - tag: subscription_local
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-local.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-local.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-  - tag: subscription_remote
-    type: dynamic_domain_set
-    args: { snapshot_file: "${MOSDNS_STATE_DIR}/subscription-remote.json", backup_file: "${MOSDNS_STATE_DIR}/subscription-remote.json.bak", auth_token_file: "${MOSDNS_TOKEN_FILE}", max_bytes: 20971520 }
-
-  # 管理页面发布的 allow/block/local/remote/no_log 动态规则。
+  # 管理页面发布的手工规则和整源订阅规则。
   - tag: dynamic_rules
     type: dynamic_rule_engine
     args:
@@ -38,9 +24,8 @@ plugins:
       marks:
         access_block: 1001
         access_allow: 1002
-        route_local: 1101
-        route_remote: 1102
         no_log: 1201
+        local_answer: 1301
 
   # 全局 A/AAAA 策略由管理页面热更新；默认保留双栈响应。
   - tag: address_family
@@ -69,171 +54,65 @@ plugins:
       max_error_text_bytes: 256
       marks:
         access_block: 1001
-        route_local: 1101
-        route_remote: 1102
         no_log: 1201
-        subscription_local: 1301
-        subscription_remote: 1302
-        subscription_block: 1303
-        subscription_allow: 1304
         cache_hit: 2101
 
-  # local 与 remote 使用独立缓存，避免不同上游组的结果串用。
-  - tag: cache_local
-    type: cache
+  # Registry 原子管理任意上游组及其 ECS、缓存和调度运行时。
+  - tag: dynamic_upstreams
+    type: dynamic_upstream_registry
     args:
-      # 最大条目数；lazy_cache_ttl 为 0 时严格遵循上游 TTL。
-      size: ${CACHE_SIZE}
-      lazy_cache_ttl: 0
-      # cache dump 持久化路径和周期；auth token 保护 cache runtime API。
-      dump_file: "${MOSDNS_STATE_DIR}/cache-local.dump"
-      dump_interval: ${CACHE_DUMP_INTERVAL}
+      snapshot_file: "${MOSDNS_STATE_DIR}/upstream-registry.json"
+      backup_file: "${MOSDNS_STATE_DIR}/upstream-registry.json.bak"
       auth_token_file: "${MOSDNS_TOKEN_FILE}"
-
-  # 本地上游 ECS。默认关闭；WebUI 可热更新客户端网段或固定 IPv4/IPv6 网段。
-  - tag: ecs_local
-    type: dynamic_ecs
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/ecs-local.json"
-      backup_file: "${MOSDNS_STATE_DIR}/ecs-local.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
-
-  # 远程上游专用缓存。
-  - tag: cache_remote
-    type: cache
-    args:
-      size: ${CACHE_SIZE}
-      lazy_cache_ttl: 0
-      dump_file: "${MOSDNS_STATE_DIR}/cache-remote.dump"
-      dump_interval: ${CACHE_DUMP_INTERVAL}
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-
-  # 远程上游 ECS，与本地上游独立配置和持久化。
-  - tag: ecs_remote
-    type: dynamic_ecs
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/ecs-remote.json"
-      backup_file: "${MOSDNS_STATE_DIR}/ecs-remote.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial: { version: 1, mode: "off", mask4: 24, mask6: 48 }
-
-  # local 上游组。snapshot 由 WebUI 热发布，initial 仅首次启动时使用。
-  - tag: local_dns
-    type: dynamic_forward
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/local-upstreams.json"
-      backup_file: "${MOSDNS_STATE_DIR}/local-upstreams.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial:
+      initial_snapshot:
+        schema_version: 2
         version: 1
-        concurrent: ${LOCAL_CONCURRENT}
-        # 并发上游数和可选 SOCKS5 代理；空字符串表示不使用代理。
-        socks5: "${LOCAL_SOCKS5}"
-        upstreams:
-          - tag: ${LOCAL_UPSTREAM_1_TAG}
-            addr: "${LOCAL_UPSTREAM_1_ADDR}"
-          - tag: ${LOCAL_UPSTREAM_2_TAG}
-            addr: "${LOCAL_UPSTREAM_2_ADDR}"
+        default_group_id: default_dns
+        cache:
+          enabled: true
+          lazy_ttl: 0
+          negative: { enabled: true, ttl: 30 }
+        protection:
+          global_max_in_flight: 1024
+          default_group_max_in_flight: 256
+          default_group_query_timeout_ms: 5000
+          overload_action: servfail
+        groups:
+          - id: default_dns
+            name: 默认上游
+            enabled: true
+            mode: race
+            concurrent: ${DEFAULT_UPSTREAM_CONCURRENT}
+            socks5: "${DEFAULT_UPSTREAM_SOCKS5}"
+            ecs: { mode: off, mask4: 24, mask6: 48 }
+            cache: { enabled: true, size: ${CACHE_SIZE} }
+            upstreams:
+              - { tag: ${DEFAULT_UPSTREAM_TAG}, addr: "${DEFAULT_UPSTREAM_ADDR}", priority: 100, weight: 1, timeout_ms: 1000 }
 
-  # remote 上游组，与 local 组独立快照、调度和缓存。
-  - tag: remote_dns
-    type: dynamic_forward
-    args:
-      snapshot_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json"
-      backup_file: "${MOSDNS_STATE_DIR}/remote-upstreams.json.bak"
-      auth_token_file: "${MOSDNS_TOKEN_FILE}"
-      initial:
-        version: 1
-        concurrent: ${REMOTE_CONCURRENT}
-        socks5: "${REMOTE_SOCKS5}"
-        upstreams:
-          - tag: ${REMOTE_UPSTREAM_TAG}
-            addr: "${REMOTE_UPSTREAM_ADDR}"
-
-  # 路由 sequence：先写入 ECS，再查询对应 cache，未命中后才访问上游。
-  - tag: route_local
+  - tag: forward_routes
     type: sequence
     args:
-      - exec: mark 1101
-      - exec: $ecs_local
-      - exec: $cache_local
-      - matches:
-          - has_resp
-        exec: mark 2101
-      - matches:
-          - has_resp
-        exec: accept
-      - exec: $local_dns
+      - exec: $dynamic_upstreams
       - exec: accept
-
-  - tag: route_remote
-    type: sequence
-    args:
-      - exec: mark 1102
-      - exec: $ecs_remote
-      - exec: $cache_remote
-      - matches:
-          - has_resp
-        exec: mark 2101
-      - matches:
-          - has_resp
-        exec: accept
-      - exec: $remote_dns
-      - exec: accept
-
-  - tag: subscription_routes
-    type: sequence
-    args:
-      - matches:
-          - qname $subscription_local
-        exec: mark 1301
-      - matches:
-          - mark 1301
-        exec: goto route_local
-      - matches:
-          - qname $subscription_remote
-        exec: mark 1302
-      - matches:
-          - mark 1302
-        exec: goto route_remote
-      - exec: goto route_remote
 
   # DNS 主入口：动态 block 必须先于任何 cache。
   - tag: main
     type: sequence
     args:
-      # 后置审计必须在最前，才能观察后续 goto、accept 与 reject 的结果。
+      # 后置审计必须在最前，才能观察后续转发、accept 与 reject 的结果。
       - exec: $query_audit
       - exec: $dynamic_rules
       # block 必须先于 cache，新增黑名单会立即生效。
       - matches:
           - mark 1001
         exec: reject 3
+      # 自定义 A/AAAA 在黑名单之后直接完成，不进入地址族策略、缓存或上游。
+      - matches:
+          - mark 1301
+        exec: accept
       # 地址族策略必须在缓存和上游之前执行，且不绕过访问封锁。
       - exec: $address_family
-      - matches:
-          - mark 1101
-        exec: goto route_local
-      - matches:
-          - mark 1102
-        exec: goto route_remote
-      - matches:
-          - mark 1002
-        exec: goto subscription_routes
-      - matches:
-          - qname $subscription_allow
-        exec: mark 1304
-      - matches:
-          - mark 1304
-        exec: goto subscription_routes
-      - matches:
-          - qname $subscription_block
-        exec: mark 1303
-      - matches:
-          - mark 1303
-        exec: reject 3
-      - exec: goto subscription_routes
+      - exec: goto forward_routes
 
   # DNS UDP/TCP 监听地址；生产通常为 :53，集成测试使用 :5353。
   - tag: udp_server

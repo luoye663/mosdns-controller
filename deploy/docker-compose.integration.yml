@@ -1,18 +1,10 @@
 services:
-  mock-local:
+  mock-default:
     image: coredns/coredns:1.12.0
     profiles: ["integration"]
     command: ["-conf", "/etc/coredns/Corefile"]
     volumes:
-      - ./integration/mock-local:/etc/coredns:ro
-    networks: [integration]
-
-  mock-remote:
-    image: coredns/coredns:1.12.0
-    profiles: ["integration"]
-    command: ["-conf", "/etc/coredns/Corefile"]
-    volumes:
-      - ./integration/mock-remote:/etc/coredns:ro
+      - ./integration/mock-default:/etc/coredns:ro
     networks: [integration]
 
   mosdns-integration:
@@ -29,8 +21,7 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
-      - mock-local
-      - mock-remote
+      - mock-default
     ports:
       - "5353:5353/udp"
       - "5353:5353/tcp"

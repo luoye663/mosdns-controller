@@ -3,10 +3,11 @@ import { onMounted, ref } from 'vue'
 import { NButton, NTabPane, NTabs } from 'naive-ui'
 import { api, type AuditLog } from '@/lib/api'
 import { notify } from '@/lib/notify'
+import { confirmAction } from '@/lib/dialog'
 const status=ref<Awaited<ReturnType<typeof api.systemStatus>>|null>(null);const logs=ref<AuditLog[]>([]);const cursor=ref('');const loading=ref(false)
 function bytes(value:number){return value<1024*1024?`${value} B`:`${(value/1024/1024).toFixed(1)} MiB`}function time(ms:number){return new Date(ms).toLocaleString()}
 async function load(nextCursor=''){loading.value=true;try{const [nextStatus,nextLogs]=await Promise.all([nextCursor?Promise.resolve(status.value):api.systemStatus(),api.auditLogs({limit:100,cursor:nextCursor})]);status.value=nextStatus;const items=nextLogs.items??[];logs.value=nextCursor?[...logs.value,...items.filter((item)=>!logs.value.some((log)=>log.id===item.id))]:items;cursor.value=nextLogs.next_cursor??''}catch(e){notify.error(e instanceof Error?e.message:'无法读取系统状态')}finally{loading.value=false}}
-async function flush(){if(!window.confirm('确认清空本地和远程 DNS 缓存？'))return;loading.value=true;try{await api.flushCaches();notify.success('本地和远程缓存已请求清空')}catch(e){notify.error(e instanceof Error?e.message:'清空缓存失败')}finally{loading.value=false}}
+async function flush(){if(!await confirmAction('将清空本地和远程 DNS 缓存，后续查询需要重新解析。',{title:'清空 DNS 缓存',positiveText:'确认清空',danger:true}))return;loading.value=true;try{await api.flushCaches();notify.success('本地和远程缓存已请求清空')}catch(e){notify.error(e instanceof Error?e.message:'清空缓存失败')}finally{loading.value=false}}
 onMounted(load)
 </script>
 <template>

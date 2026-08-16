@@ -20,7 +20,7 @@ systemctl status mosdns.service mosdns-controller.service
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-安装包包含两个二进制、生产配置、静态规则、systemd 服务文件和安装脚本，不包含 token、SQLite 数据、缓存或规则快照。默认远程 DoH 上游为 Cloudflare（`https://cloudflare-dns.com/dns-query`）。如需使用其他上游，可编辑 `/etc/mosdns-manager/mosdns/config.yaml` 后重启 `mosdns.service`。
+安装包包含两个二进制、生产配置、静态规则、systemd 服务文件和安装脚本，不包含 token、SQLite 数据、缓存或规则快照。初始 `default_dns` 上游组使用 Cloudflare DoH（`https://cloudflare-dns.com/dns-query`）。首次启动后可在 WebUI 管理默认组、创建其他上游组并切换默认组；也可在启动前编辑 `/etc/mosdns-manager/mosdns/config.yaml`。
 
 安装程序不会覆盖已有 token，但会覆盖二进制、配置、规则和 systemd 文件。升级前应备份 `/etc/mosdns-manager`、`/var/lib/mosdns` 和 `/var/lib/mosdns-controller`。需要自行构建部署包时，可执行 `make binary-package`；生成文件位于 `deploy/binary/mosdns-manager-<os>-<arch>.tar.gz`。
 

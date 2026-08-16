@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/managed-dns/controller/internal/auth"
 	"github.com/managed-dns/controller/internal/config"
 	"github.com/managed-dns/controller/internal/mosdnsclient"
@@ -18,6 +19,10 @@ import (
 )
 
 func testApp(t *testing.T) *App {
+	return testAppWithClient(t, mosdnsclient.New("http://127.0.0.1", "test", time.Second))
+}
+
+func testAppWithClient(t *testing.T, client mosdnsclient.Client) *App {
 	t.Helper()
 	cfg := config.Default()
 	if err := cfg.Validate(); err != nil {
@@ -31,9 +36,123 @@ func testApp(t *testing.T) *App {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	application := New(slog.Default(), cfg, store, mosdnsclient.New("http://127.0.0.1", "test", time.Second), "test")
+	application := New(slog.Default(), cfg, store, client, "test")
 	t.Cleanup(application.Close)
 	return application
+}
+
+func TestSettingsAPIUsesRegistrySnapshot(t *testing.T) {
+	var tags []string
+	registry := mosdnsclient.RegistrySnapshot{SchemaVersion: 2, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "default", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}, Protection: mosdnsclient.ProtectionConfig{GlobalMaxInFlight: 1000, DefaultGroupMaxInFlight: 100, DefaultGroupQueryTimeoutMS: 2000, OverloadAction: "servfail"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tags = append(tags, r.URL.Path)
+		if r.Method == http.MethodPut {
+			if err := json.NewDecoder(r.Body).Decode(&registry); err != nil {
+				t.Errorf("decode registry request: %v", err)
+			}
+			registry.ExpectedCurrentVersion = 0
+		}
+		_ = json.NewEncoder(w).Encode(registry)
+	}))
+	defer server.Close()
+	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
+	if _, err := application.store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'admin','x',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	getRec := httptest.NewRecorder()
+	application.settings(getRec, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil))
+	if getRec.Code != http.StatusOK || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_enabled":true`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"negative_cache_ttl":30`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"global_max_in_flight":1000`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"default_group_max_in_flight":100`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"default_group_query_timeout_ms":2000`)) || !bytes.Contains(getRec.Body.Bytes(), []byte(`"overload_action":"servfail"`)) {
+		t.Fatalf("get settings=%d: %s", getRec.Code, getRec.Body.String())
+	}
+
+	body := `{"cache_enabled":true,"cache_ttl":0,"negative_cache_enabled":false,"negative_cache_ttl":60,"query_retention_days":7,"database_max_size_gib":2,"address_family_mode":"dual_stack","default_upstream_group_id":"default_dns","global_max_in_flight":2000,"default_group_max_in_flight":200,"default_group_query_timeout_ms":1500,"overload_action":"drop","upstream_registry_version":1}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", bytes.NewBufferString(body))
+	req = req.WithContext(context.WithValue(req.Context(), adminKey, auth.Admin{ID: 1, Username: "admin"}))
+	rec := httptest.NewRecorder()
+	application.updateSettings(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_enabled":false`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"negative_cache_ttl":60`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"global_max_in_flight":2000`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"default_group_max_in_flight":200`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"default_group_query_timeout_ms":1500`)) || !bytes.Contains(rec.Body.Bytes(), []byte(`"overload_action":"drop"`)) {
+		t.Fatalf("update settings=%d: %s", rec.Code, rec.Body.String())
+	}
+	if registry.Protection != (mosdnsclient.ProtectionConfig{GlobalMaxInFlight: 2000, DefaultGroupMaxInFlight: 200, DefaultGroupQueryTimeoutMS: 1500, OverloadAction: "drop"}) || registry.Version != 2 {
+		t.Fatalf("saved registry=%+v", registry)
+	}
+	want := []string{"/plugins/dynamic_upstreams/status", "/plugins/dynamic_upstreams/status", "/plugins/dynamic_upstreams/snapshot", "/plugins/dynamic_upstreams/status"}
+	if len(tags) != len(want) || tags[0] != want[0] || tags[1] != want[1] {
+		t.Fatalf("negative cache paths=%v", tags)
+	}
+}
+
+func TestUpstreamRuntimeStatusIsReadOnlyAndDegrades(t *testing.T) {
+	available := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/plugins/dynamic_upstreams/runtime-status" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if !available {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(mosdnsclient.RegistryRuntimeStatus{
+			RegistryVersion: 4,
+			Global:          mosdnsclient.RuntimeConcurrency{InFlight: 9, Limit: 64},
+			Groups:          []mosdnsclient.GroupRuntimeStatus{{ID: "oversea", Name: "国外上游", Enabled: true, InFlight: 7, Limit: 32}},
+		})
+	}))
+	defer server.Close()
+	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
+
+	recorder := httptest.NewRecorder()
+	application.upstreamRuntimeStatus(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/stats/upstream-runtime", nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" || !bytes.Contains(recorder.Body.Bytes(), []byte(`"registry_version":4`)) || !bytes.Contains(recorder.Body.Bytes(), []byte(`"in_flight":7`)) {
+		t.Fatalf("runtime status=%d headers=%v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+
+	available = false
+	recorder = httptest.NewRecorder()
+	application.upstreamRuntimeStatus(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/stats/upstream-runtime", nil))
+	if recorder.Code != http.StatusBadGateway || !bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"MOSDNS_UNAVAILABLE"`)) {
+		t.Fatalf("unavailable runtime status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUpstreamGroupAPIMapsVersionConflictAndUnknownOutcome(t *testing.T) {
+	registry := mosdnsclient.RegistrySnapshot{SchemaVersion: 1, Version: 1, DefaultGroupID: "default_dns", Groups: []mosdnsclient.UpstreamGroup{{ID: "default_dns", Name: "Default", Enabled: true, Mode: "race", Concurrent: 1, Upstreams: []mosdnsclient.Upstream{{Tag: "default", Addr: "https://dns.example/dns-query"}}, ECS: mosdnsclient.ECSConfig{Mode: "off", Mask4: 24, Mask6: 48}, Cache: mosdnsclient.GroupCacheConfig{Enabled: true, Size: 1024}}}, Cache: mosdnsclient.RegistryCacheConfig{Enabled: true, Negative: mosdnsclient.NegativeCacheConfig{Enabled: true, TTL: 30}}}
+	puts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(registry)
+	}))
+	defer server.Close()
+	application := testAppWithClient(t, mosdnsclient.New(server.URL, "test", time.Second))
+	if _, err := application.store.DB().Exec(`INSERT INTO admins(id,username,password_hash,created_at_ms,updated_at_ms) VALUES(1,'admin','x',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	group := registry.Groups[0]
+	group.Name = "Changed"
+	request := func(version uint64) *http.Request {
+		body, _ := json.Marshal(map[string]any{"expected_current_version": version, "group": group})
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/upstream-groups/default_dns", bytes.NewReader(body))
+		route := chi.NewRouteContext()
+		route.URLParams.Add("id", "default_dns")
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, route)
+		return req.WithContext(context.WithValue(ctx, adminKey, auth.Admin{ID: 1, Username: "admin"}))
+	}
+	conflict := httptest.NewRecorder()
+	application.updateUpstreamGroup(conflict, request(99))
+	if conflict.Code != http.StatusConflict || puts != 0 {
+		t.Fatalf("conflict status=%d puts=%d body=%s", conflict.Code, puts, conflict.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	application.updateUpstreamGroup(unknown, request(1))
+	if unknown.Code != http.StatusBadGateway || puts != 1 {
+		t.Fatalf("unknown status=%d puts=%d body=%s", unknown.Code, puts, unknown.Body.String())
+	}
 }
 func TestHealthEndpoints(t *testing.T) {
 	application := testApp(t)
@@ -229,6 +348,8 @@ func TestErrorMessagesAreChinese(t *testing.T) {
 	}{
 		{"AUTH_REQUIRED", "authentication required", "需要登录"},
 		{"VALIDATION_ERROR", "regexp exceeds 512 bytes", "正则表达式不能超过 512 字节"},
+		{"VALIDATION_ERROR", "mosdns rejected request: group office_dns forward: upstream 1 address must be a valid [protocol://]host[:port][/path]", "上游地址格式无效，请输入 IP、主机名或带协议的完整地址"},
+		{"VALIDATION_ERROR", "mosdns rejected request: group office_dns forward: upstream 1 uses an unsupported scheme", "上游地址协议不受支持，请使用 udp、tcp、tls、https 或 quic"},
 		{"MOSDNS_UNAVAILABLE", "mosdns API GET /plugins/status: 503 Service Unavailable", "mosdns 服务不可用"},
 	}
 	for _, test := range tests {
@@ -268,7 +389,7 @@ func TestQueryStreamIsNotLimitedByHTTPTimeout(t *testing.T) {
 
 func TestInternalIngestRequiresSharedToken(t *testing.T) {
 	application := testApp(t)
-	body := `{"schema_version":1,"sender_id":"mosdns-test","sent_at_unix_ms":1,"events":[{"schema_version":1,"event_id":"ingest-1","timestamp_unix_ms":1,"process_started_at_unix_ms":1,"client_ip":"192.0.2.1","protocol":"udp","qname":"example.com","qtype":1,"qclass":1,"rcode":0,"route":"remote","route_source":"default","upstream_group":"","cache_hit":false,"snapshot_version":1,"access_rule_id":0,"route_rule_id":0,"answer_count":0,"latency_us":1,"error_code":"","error_text":""}]}`
+	body := `{"schema_version":2,"sender_id":"mosdns-test","sent_at_unix_ms":1,"events":[{"schema_version":2,"event_id":"ingest-1","timestamp_unix_ms":1,"process_started_at_unix_ms":1,"client_ip":"192.0.2.1","protocol":"udp","qname":"example.com","qtype":1,"qclass":1,"rcode":0,"route":"forward","route_source":"default","upstream_group":"default_dns","cache_hit":false,"snapshot_version":1,"access_rule_id":0,"route_rule_id":0,"answer_count":0,"latency_us":1,"error_code":"","error_text":""}]}`
 	unauthorized := httptest.NewRequest(http.MethodPost, "/internal/v1/query-events/batch", bytes.NewBufferString(body))
 	unauthorizedRec := httptest.NewRecorder()
 	application.InternalHandler().ServeHTTP(unauthorizedRec, unauthorized)
@@ -347,7 +468,7 @@ func TestAuditPaginationValidationAndQueryHistoryClear(t *testing.T) {
 	if invalidCursorRec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid cursor status=%d: %s", invalidCursorRec.Code, invalidCursorRec.Body.String())
 	}
-	if _, err := application.store.DB().Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,created_at_ms) VALUES('clear-endpoint',?,'192.0.2.10','example.com',1,1,'remote','default',0,1,0,1,?)`, now, now); err != nil {
+	if _, err := application.store.DB().Exec(`INSERT INTO dns_queries(event_id,timestamp_unix_ms,client_ip,qname,qtype,qclass,route,route_source,cache_hit,snapshot_version,answer_count,latency_us,result_class,created_at_ms) VALUES('clear-endpoint',?,'192.0.2.10','example.com',1,1,'forward','default',0,1,0,1,'negative_answer',?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
 	clear := httptest.NewRequest(http.MethodPost, "/api/v1/settings/query-history/clear", bytes.NewBufferString(`{}`))

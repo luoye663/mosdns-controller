@@ -1,21 +1,31 @@
 export interface ApiError extends Error { code?: string; status?: number }
 interface Envelope<T> { data: T }
 
-export interface Rule { id: number; category: string; action: string; match_type: string; pattern: string; priority: number; source: string; comment: string; enabled: boolean; updated_at_ms: number }
-export type RuleInput = Omit<Rule, 'id' | 'updated_at_ms'>
+export interface Rule { id: number; category: string; action: string; upstream_group_id?: string; match_type: string; pattern: string; priority: number; source: string; comment: string; enabled: boolean; updated_at_ms: number; ipv4_addresses?: string[]; ipv6_addresses?: string[]; ttl?: number }
+export type RuleInput = Omit<Rule, 'id' | 'updated_at_ms'> & { expected_upstream_registry_version?: number }
+export type RuleUpdateInput = RuleInput & { updated_at_ms: number }
 export interface Version { version: number; checksum: string; status: string; rule_count: number; created_at_ms: number; error_code?: string }
-export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; device_name: string; protocol: string; qname: string; qtype: number; qclass: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; snapshot_version: number; access_rule_id: number; route_rule_id: number; subscription_source_id: number; subscription_source_name: string; subscription_categories: string[]; answer_count: number; answer_min_ttl_seconds: number | null; latency_us: number; error_code: string; error_text: string }
+export type QueryResultClass = 'success' | 'negative_answer' | 'policy_block' | 'processing_error'
+export interface QueryEvent { id: number; event_id: string; timestamp_unix_ms: number; client_ip: string; device_name: string; protocol: string; qname: string; qtype: number; qclass: number; rcode: number; route: string; route_source: string; upstream_group: string; upstream_tag: string; cache_hit: boolean; snapshot_version: number; access_rule_id: number; route_rule_id: number; answer_rule_id: number; subscription_source_id: number; subscription_binding_id: number; subscription_source_name: string; subscription_categories: string[]; answer_count: number; answer_min_ttl_seconds: number | null; latency_us: number; error_code: string; error_text: string; result_class: QueryResultClass }
 export interface AnswerDiagnostics { answer_ips: string[]; answer_records: string[] }
 export type QueryParams = Record<string, string | number | boolean | undefined>
 export interface Device { id: number; ip: string; mac: string; hostname: string; display_name: string; note: string; source: string; first_seen_at_ms: number; last_seen_at_ms: number; query_count_24h: number }
 export interface AuditLog { id: number; admin_username: string; action: string; resource_type: string; resource_id: string; result: string; error_code: string; created_at_ms: number }
-export interface Upstream { tag: string; addr: string; priority: number; weight: number }
-export interface UpstreamSnapshot { version: number; expected_current_version: number; mode: 'race' | 'weighted' | 'failover'; concurrent: number; socks5?: string; upstreams: Upstream[]; checksum?: string }
-export interface ECSSnapshot { version: number; expected_current_version: number; mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }
-export interface Settings { cache_enabled: boolean; cache_ttl: number; query_retention_days: number; database_max_size_gib: number; address_family_mode: 'dual_stack' | 'prefer_ipv4' | 'prefer_ipv6' | 'ipv4_only' | 'ipv6_only' }
-export interface RuleSubscription { id: number; category: string; action: string; kind: 'url' | 'upload'; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean; rule_count: number; last_checked_at_ms: number; last_success_at_ms: number; last_error: string; created_at_ms: number; updated_at_ms: number }
-export interface RuleSubscriptionInput { category: string; action: string; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean }
-export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; cache_hit_count: number }
+export interface Upstream { tag: string; addr: string; priority: number; weight: number; timeout_ms: number }
+export interface UpstreamProtection { global_max_in_flight: number; default_group_max_in_flight: number; default_group_query_timeout_ms: number; overload_action: 'servfail' | 'refused' | 'drop' }
+export interface RuntimeConcurrency { in_flight: number; limit: number }
+export interface UpstreamGroupRuntime extends RuntimeConcurrency { id: string; name: string; enabled: boolean }
+export interface UpstreamRuntimeStatus { registry_version: number; global: RuntimeConcurrency; groups: UpstreamGroupRuntime[] }
+export interface UpstreamGroup { id: string; name: string; enabled: boolean; mode: 'race' | 'weighted' | 'failover'; concurrent: number; max_in_flight?: number | null; query_timeout_ms?: number | null; socks5?: string; bootstrap?: string; bootstrap_version: 46 | 4 | 6; upstreams: Upstream[]; ecs: { mode: 'off' | 'client_subnet' | 'fixed_subnet'; mask4: number; mask6: number; preset4?: string; preset6?: string }; cache: { enabled: boolean; size: number } }
+export interface UpstreamRegistry { schema_version: 2; version: number; expected_current_version: number; default_group_id: string; groups: UpstreamGroup[]; cache: { enabled: boolean; lazy_ttl: number; negative: { enabled: boolean; ttl: number } }; protection: UpstreamProtection }
+export interface Settings extends UpstreamProtection { cache_enabled: boolean; cache_ttl: number; negative_cache_enabled: boolean; negative_cache_ttl: number; query_retention_days: number; database_max_size_gib: number; address_family_mode: 'dual_stack' | 'prefer_ipv4' | 'prefer_ipv6' | 'ipv4_only' | 'ipv6_only'; default_upstream_group_id: string; upstream_registry_version: number }
+export interface UpstreamGroupWrite { expected_current_version: number; group: UpstreamGroup }
+export interface VersionPrecondition { expected_current_version: number }
+export interface SubscriptionBinding { id: number; upstream_group_id: string; priority: number }
+export interface RuleSubscription { id: number; category: string; action: string; kind: 'url' | 'upload'; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean; rule_count: number; last_checked_at_ms: number; last_success_at_ms: number; last_error: string; created_at_ms: number; updated_at_ms: number; binding?: SubscriptionBinding }
+export interface RuleSubscriptionInput { category: string; action: string; name: string; source_url: string; refresh_interval_seconds: number; enabled: boolean; upstream_group_id?: string; priority?: number; expected_upstream_registry_version?: number }
+export interface SubscriptionBindingInput { upstream_group_id: string; priority: number; expected_upstream_registry_version: number }
+export interface DashboardSummary { query_count: number; last_hour_query_count: number; average_latency_us: number; p95_latency_us: number; p95_sample_count: number; max_latency_us: number; error_count: number; processing_error_count: number; success_count: number; negative_answer_count: number; policy_block_count: number; cache_hit_count: number }
 export interface LatencyPoint { hour_start_ms: number; query_count: number; average_latency_us: number; max_latency_us: number }
 export interface SystemStatus { controller: Record<string, string>; controller_memory_rss_bytes: number; database: { bytes: number; wal_bytes: number }; mosdns?: { state: string; snapshot_version: number; checksum: string; memory_rss_bytes: number }; mosdns_error?: string; audit?: { queue_depth: number; queue_capacity: number; dropped_events: number }; audit_error?: string; ingest_queue_depth: number; last_successful_ingest_at?: string; last_retention_at?: string }
 
@@ -61,33 +71,37 @@ export const api = {
   logout: () => request<{ logged_out: boolean }>('/auth/logout', { method: 'POST' }),
   changePassword: (currentPassword: string, newPassword: string) => request<{ changed: boolean }>('/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
   summary: () => request<DashboardSummary>('/stats/summary'),
-  statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : `/stats/${kind}`),
+  statistic: (kind: 'domains' | 'clients' | 'routes' | 'rcode' | 'upstream_groups') => request<{ items: Array<{ value: string | number; query_count: number }> }>(kind === 'domains' ? '/stats/top-domains' : kind === 'clients' ? '/stats/top-clients' : kind === 'upstream_groups' ? '/stats/upstream-groups' : `/stats/${kind}`),
   latency: () => request<{ items: LatencyPoint[] }>('/stats/latency'),
+  upstreamRuntimeStatus: () => request<UpstreamRuntimeStatus>('/stats/upstream-runtime'),
   queries: (params: QueryParams) => request<{ items: QueryEvent[]; next_cursor?: string }>(`/queries?${new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '') as Array<[string, string]>).toString()}`),
   answerDiagnostics: (eventID: string) => request<AnswerDiagnostics>(`/queries/${encodeURIComponent(eventID)}/answer-ips`),
   rules: () => request<{ items: Rule[] }>('/rules'),
   createRule: (rule: RuleInput) => request<Version>('/rules', { method: 'POST', body: JSON.stringify(rule) }),
-  updateRule: (id: number, rule: Rule) => request<Version>(`/rules/${id}`, { method: 'PATCH', body: JSON.stringify(rule) }),
+  updateRule: (id: number, rule: RuleUpdateInput) => request<Version>(`/rules/${id}`, { method: 'PATCH', body: JSON.stringify(rule) }),
   deleteRule: (id: number) => request<Version>(`/rules/${id}`, { method: 'DELETE' }),
   previewRuleImport: (rules: RuleInput[]) => request<{ rules: RuleInput[]; count: number }>('/rules/import/preview', { method: 'POST', body: JSON.stringify({ rules }) }),
   importRules: (rules: RuleInput[]) => request<Version>('/rules/import/apply', { method: 'POST', body: JSON.stringify({ rules }) }),
   ruleTest: (qname: string) => request<unknown>('/rules/test', { method: 'POST', body: JSON.stringify({ qname }) }),
   ruleSubscriptions: (category?: string, action?: string) => request<{ items: RuleSubscription[] }>(`/rule-subscriptions?${new URLSearchParams(Object.entries({ category, action }).filter(([, value]) => value) as Array<[string, string]>).toString()}`),
   createRuleSubscription: (input: RuleSubscriptionInput) => request<{ subscription: RuleSubscription; version: Version }>('/rule-subscriptions', { method: 'POST', body: JSON.stringify(input) }),
-  uploadRuleSubscription: (input: Omit<RuleSubscriptionInput, 'source_url'>, file: File) => { const body = new FormData(); body.append('category', input.category); body.append('action', input.action); body.append('name', input.name); body.append('refresh_interval_seconds', String(input.refresh_interval_seconds)); body.append('enabled', String(input.enabled)); body.append('file', file); return request<{ subscription: RuleSubscription; version: Version }>('/rule-subscriptions/upload', { method: 'POST', body }) },
+  uploadRuleSubscription: (input: Omit<RuleSubscriptionInput, 'source_url'>, file: File) => { const body = new FormData(); body.append('category', input.category); body.append('action', input.action); body.append('name', input.name); body.append('refresh_interval_seconds', String(input.refresh_interval_seconds)); body.append('enabled', String(input.enabled)); if (input.upstream_group_id) body.append('upstream_group_id', input.upstream_group_id); if (input.priority !== undefined) body.append('priority', String(input.priority)); if (input.expected_upstream_registry_version !== undefined) body.append('expected_upstream_registry_version', String(input.expected_upstream_registry_version)); body.append('file', file); return request<{ subscription: RuleSubscription; version: Version }>('/rule-subscriptions/upload', { method: 'POST', body }) },
   updateRuleSubscription: (id: number, enabled: boolean) => request<{ subscription: RuleSubscription; version: Version }>(`/rule-subscriptions/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  updateRuleSubscriptionBinding: (id: number, input: SubscriptionBindingInput) => request<{ subscription: RuleSubscription; version: Version }>(`/rule-subscriptions/${id}/binding`, { method: 'PUT', body: JSON.stringify(input) }),
   refreshRuleSubscription: (id: number) => request<{ subscription: RuleSubscription; version?: Version }>(`/rule-subscriptions/${id}/refresh`, { method: 'POST', body: '{}' }),
   deleteRuleSubscription: (id: number) => request<Version>(`/rule-subscriptions/${id}`, { method: 'DELETE' }),
   versions: () => request<{ items: Version[] }>('/rule-versions'),
-  rollback: (version: number) => request<Version>(`/rule-versions/${version}/rollback`, { method: 'POST', body: '{}' }),
+  rollback: (version: number, expectedUpstreamRegistryVersion: number) => request<Version>(`/rule-versions/${version}/rollback`, { method: 'POST', body: JSON.stringify({ expected_upstream_registry_version: expectedUpstreamRegistryVersion }) }),
   reconcile: () => request<{ state: string }>('/rule-versions/reconcile', { method: 'POST', body: '{}' }),
   devices: () => request<{ items: Device[] }>('/devices'),
   updateDevice: (id: number, patch: { display_name?: string; note?: string }) => request<Device>(`/devices/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   systemStatus: () => request<SystemStatus>('/system/status'),
   flushCaches: () => request<{ flushed: boolean }>('/system/cache/flush', { method: 'POST', body: '{}' }),
-  upstreams: () => request<{ local: UpstreamSnapshot; remote: UpstreamSnapshot; local_ecs: ECSSnapshot; remote_ecs: ECSSnapshot }>('/upstreams'),
-  updateUpstream: (group: 'local_dns' | 'remote_dns', snapshot: UpstreamSnapshot) => request<UpstreamSnapshot>(`/upstreams/${group}`, { method: 'PUT', body: JSON.stringify(snapshot) }),
-  updateECS: (group: 'local_dns' | 'remote_dns', snapshot: ECSSnapshot) => request<ECSSnapshot>(`/upstreams/${group}/ecs`, { method: 'PUT', body: JSON.stringify(snapshot) }),
+  upstreamGroups: () => request<UpstreamRegistry>('/upstream-groups'),
+  createUpstreamGroup: (input: UpstreamGroupWrite) => request<UpstreamRegistry>('/upstream-groups', { method: 'POST', body: JSON.stringify(input) }),
+  updateUpstreamGroup: (input: UpstreamGroupWrite) => request<UpstreamRegistry>(`/upstream-groups/${encodeURIComponent(input.group.id)}`, { method: 'PUT', body: JSON.stringify(input) }),
+  deleteUpstreamGroup: (id: string, input: VersionPrecondition) => request<UpstreamRegistry>(`/upstream-groups/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(input) }),
+  flushUpstreamGroup: (id: string, input: VersionPrecondition) => request<{ flushed: boolean }>(`/upstream-groups/${encodeURIComponent(id)}/cache/flush`, { method: 'POST', body: JSON.stringify(input) }),
   settings: () => request<Settings>('/settings'),
   updateSettings: (settings: Settings) => request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   clearQueryHistory: () => request<{ cleared: boolean }>('/settings/query-history/clear', { method: 'POST', body: '{}' }),

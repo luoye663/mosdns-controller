@@ -1,38 +1,143 @@
 name: Release
+run-name: Release ${{ inputs.version }}
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (vX.Y.Z)
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
   validate:
-    name: Validate release tag
+    name: Validate release
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
-      prerelease: ${{ steps.semver.outputs.prerelease }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      target_sha: ${{ steps.release.outputs.target_sha }}
+      build_time: ${{ steps.release.outputs.build_time }}
     steps:
-      - name: Validate SemVer tag
-        id: semver
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Validate release input
+        id: release
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         shell: bash
         run: |
-          semver_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
-          if [[ ! "$GITHUB_REF_NAME" =~ $semver_regex ]]; then
-            printf 'Invalid SemVer release tag: %s\n' "$GITHUB_REF_NAME" >&2
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            printf 'Releases must be started from main, got %s\n' "$GITHUB_REF" >&2
             exit 1
           fi
-          version_without_build=${GITHUB_REF_NAME%%+*}
+          semver_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if [[ ! "$VERSION_INPUT" =~ $semver_regex ]]; then
+            printf 'Invalid SemVer release version: %s\n' "$VERSION_INPUT" >&2
+            exit 1
+          fi
+          version_without_build=${VERSION_INPUT%%+*}
+          printf 'version=%s\n' "$VERSION_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'target_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'build_time=%s\n' "$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
           if [[ "$version_without_build" == *-* ]]; then
             printf 'prerelease=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'prerelease=false\n' >> "$GITHUB_OUTPUT"
           fi
+      - name: Verify CI and release state
+        uses: actions/github-script@v9
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const version = process.env.VERSION;
+            const targetSha = process.env.TARGET_SHA;
+
+            const { data: runsData } = await github.request(
+              "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+              {
+                owner,
+                repo,
+                workflow_id: "ci.yml",
+                head_sha: targetSha,
+                event: "push",
+                per_page: 100,
+              },
+            );
+            const runs = runsData.workflow_runs
+              .filter((run) => run.head_branch === "main")
+              .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+            const ciRun = runs[0];
+            if (!ciRun) {
+              throw new Error(`No main push CI run found for ${targetSha}`);
+            }
+            if (ciRun.status !== "completed" || ciRun.conclusion !== "success") {
+              throw new Error(
+                `CI is ${ciRun.status}/${ciRun.conclusion ?? "pending"}: ${ciRun.html_url}`,
+              );
+            }
+
+            let tagObject;
+            try {
+              const { data: tagRef } = await github.request(
+                "GET /repos/{owner}/{repo}/git/ref/{ref}",
+                { owner, repo, ref: `tags/${version}` },
+              );
+              tagObject = tagRef.object;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            while (tagObject?.type === "tag") {
+              const { data: tag } = await github.request(
+                "GET /repos/{owner}/{repo}/git/tags/{tag_sha}",
+                { owner, repo, tag_sha: tagObject.sha },
+              );
+              tagObject = tag.object;
+            }
+            if (tagObject && (tagObject.type !== "commit" || tagObject.sha !== targetSha)) {
+              throw new Error(
+                `Tag ${version} resolves to ${tagObject.type} ${tagObject.sha}, expected commit ${targetSha}`,
+              );
+            }
+
+            const releases = [];
+            for (let page = 1; ; page += 1) {
+              const { data } = await github.request(
+                "GET /repos/{owner}/{repo}/releases",
+                { owner, repo, per_page: 100, page },
+              );
+              releases.push(...data);
+              if (data.length < 100) break;
+            }
+            const matching = releases.filter((release) => release.tag_name === version);
+            if (matching.some((release) => !release.draft)) {
+              throw new Error(`Release ${version} is already published and immutable`);
+            }
+            if (matching.length > 1) {
+              throw new Error(`Found ${matching.length} drafts for ${version}; expected at most one`);
+            }
+            for (const draft of matching) {
+              if (draft.target_commitish !== targetSha) {
+                throw new Error(
+                  `Draft ${version} targets ${draft.target_commitish}, expected ${targetSha}`,
+                );
+              }
+            }
 
   binaries:
     name: Binary linux/${{ matrix.goarch }}
@@ -48,6 +153,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.validate.outputs.target_sha }}
           submodules: recursive
           fetch-depth: 0
       - uses: actions/setup-node@v5
@@ -63,14 +169,17 @@ jobs:
       - name: Install web dependencies
         run: npm ci --prefix web
       - name: Build binary archive
+        env:
+          BUILD_TIME: ${{ needs.validate.outputs.build_time }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TARGET_SHA: ${{ needs.validate.outputs.target_sha }}
         shell: bash
         run: |
-          commit=$(git rev-parse 'HEAD^{commit}')
-          build_time=$(git show -s --format=%cI 'HEAD^{commit}')
+          set -euo pipefail
           make binary-package \
-            PROJECT_VERSION="$GITHUB_REF_NAME" \
-            GIT_COMMIT="$commit" \
-            BUILD_TIME="$build_time" \
+            PROJECT_VERSION="$RELEASE_VERSION" \
+            GIT_COMMIT="$TARGET_SHA" \
+            BUILD_TIME="$BUILD_TIME" \
             BINARY_GOOS=linux \
             BINARY_GOARCH="${{ matrix.goarch }}"
       - uses: actions/upload-artifact@v4
@@ -87,13 +196,18 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.target_sha }}
       - name: Install render dependencies
         run: sudo apt-get update && sudo apt-get install --yes gettext-base
       - name: Build deployment archive
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         shell: bash
         run: |
+          set -euo pipefail
           package_dir=dist/mosdns-manager
-          image_version=${GITHUB_REF_NAME#v}
+          image_version=${RELEASE_VERSION#v}
           image_version=${image_version//+/-}
           install -d "$package_dir/mosdns" "$package_dir/controller"
           install -d -m 0700 "$package_dir/secrets"
@@ -118,15 +232,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.validate.outputs.target_sha }}
           submodules: recursive
           fetch-depth: 0
       - name: Resolve build metadata
         id: build-meta
         shell: bash
         run: |
-          printf 'commit=%s\n' "$(git rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
           printf 'mosdns_commit=%s\n' "$(git -C mosdns rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
-          printf 'build_time=%s\n' "$(git show -s --format=%cI 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with:
           registry: docker.io
@@ -148,7 +261,7 @@ jobs:
             ghcr.io/luoye663/mosdns-manager
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.version }}
             type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
       - name: Controller image metadata
         id: controller-meta
@@ -159,7 +272,7 @@ jobs:
             ghcr.io/luoye663/mosdns-controller
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.version }}
             type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
       - name: Build and push mosdns-manager
         uses: docker/build-push-action@v6
@@ -170,9 +283,9 @@ jobs:
           tags: ${{ steps.mosdns-meta.outputs.tags }}
           labels: ${{ steps.mosdns-meta.outputs.labels }}
           build-args: |
-            PROJECT_VERSION=${{ github.ref_name }}
+            PROJECT_VERSION=${{ needs.validate.outputs.version }}
             GIT_COMMIT=${{ steps.build-meta.outputs.mosdns_commit }}
-            BUILD_TIME=${{ steps.build-meta.outputs.build_time }}
+            BUILD_TIME=${{ needs.validate.outputs.build_time }}
             MOSDNS_BASE=v5.3.4
       - name: Build and push mosdns-controller
         uses: docker/build-push-action@v6
@@ -184,9 +297,9 @@ jobs:
           tags: ${{ steps.controller-meta.outputs.tags }}
           labels: ${{ steps.controller-meta.outputs.labels }}
           build-args: |
-            PROJECT_VERSION=${{ github.ref_name }}
-            GIT_COMMIT=${{ steps.build-meta.outputs.commit }}
-            BUILD_TIME=${{ steps.build-meta.outputs.build_time }}
+            PROJECT_VERSION=${{ needs.validate.outputs.version }}
+            GIT_COMMIT=${{ needs.validate.outputs.target_sha }}
+            BUILD_TIME=${{ needs.validate.outputs.build_time }}
             MOSDNS_BASE=v5.3.4
 
   release:
@@ -208,18 +321,107 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum mosdns-manager-*.tar.gz > SHA256SUMS
-      - name: Create release
+      - name: Revalidate publication state
+        uses: actions/github-script@v9
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          args=(--verify-tag --generate-notes)
-          if [[ "${{ needs.validate.outputs.prerelease }}" == true ]]; then
-            args+=(--prerelease)
-          fi
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* "${args[@]}"
-          fi
+          TARGET_SHA: ${{ needs.validate.outputs.target_sha }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const version = process.env.VERSION;
+            const targetSha = process.env.TARGET_SHA;
+
+            let tagObject;
+            try {
+              const { data: tagRef } = await github.request(
+                "GET /repos/{owner}/{repo}/git/ref/{ref}",
+                { owner, repo, ref: `tags/${version}` },
+              );
+              tagObject = tagRef.object;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            while (tagObject?.type === "tag") {
+              const { data: tag } = await github.request(
+                "GET /repos/{owner}/{repo}/git/tags/{tag_sha}",
+                { owner, repo, tag_sha: tagObject.sha },
+              );
+              tagObject = tag.object;
+            }
+            if (tagObject && (tagObject.type !== "commit" || tagObject.sha !== targetSha)) {
+              throw new Error(
+                `Tag ${version} resolves to ${tagObject.type} ${tagObject.sha}, expected commit ${targetSha}`,
+              );
+            }
+
+            const releases = [];
+            for (let page = 1; ; page += 1) {
+              const { data } = await github.request(
+                "GET /repos/{owner}/{repo}/releases",
+                { owner, repo, per_page: 100, page },
+              );
+              releases.push(...data);
+              if (data.length < 100) break;
+            }
+            const matching = releases.filter((release) => release.tag_name === version);
+            if (matching.some((release) => !release.draft)) {
+              throw new Error(`Release ${version} is already published and immutable`);
+            }
+            if (matching.length > 1) {
+              throw new Error(`Found ${matching.length} drafts for ${version}; expected at most one`);
+            }
+            if (matching[0] && matching[0].target_commitish !== targetSha) {
+              throw new Error(
+                `Draft ${version} targets ${matching[0].target_commitish}, expected ${targetSha}`,
+              );
+            }
+      - name: Create or update draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.validate.outputs.version }}
+          target_commitish: ${{ needs.validate.outputs.target_sha }}
+          draft: true
+          prerelease: ${{ needs.validate.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/mosdns-manager-linux-amd64.tar.gz
+            dist/mosdns-manager-linux-arm64.tar.gz
+            dist/mosdns-manager-docker.tar.gz
+            dist/SHA256SUMS
+      - name: Publish release
+        uses: actions/github-script@v9
+        env:
+          TARGET_SHA: ${{ needs.validate.outputs.target_sha }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const version = process.env.VERSION;
+            const targetSha = process.env.TARGET_SHA;
+            const releases = [];
+            for (let page = 1; ; page += 1) {
+              const { data } = await github.request(
+                "GET /repos/{owner}/{repo}/releases",
+                { owner, repo, per_page: 100, page },
+              );
+              releases.push(...data);
+              if (data.length < 100) break;
+            }
+            const drafts = releases.filter(
+              (release) => release.tag_name === version && release.draft,
+            );
+            if (drafts.length !== 1) {
+              throw new Error(`Expected one draft for ${version}, found ${drafts.length}`);
+            }
+            const draft = drafts[0];
+            if (draft.target_commitish !== targetSha) {
+              throw new Error(
+                `Draft ${version} targets ${draft.target_commitish}, expected ${targetSha}`,
+              );
+            }
+            await github.request(
+              "PATCH /repos/{owner}/{repo}/releases/{release_id}",
+              { owner, repo, release_id: draft.id, draft: false },
+            );
