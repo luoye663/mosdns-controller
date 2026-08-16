@@ -1,6 +1,6 @@
 # 发版说明
 
-本文说明 `.github/workflows/release.yml` 使用的凭据、构建变量、镜像标签和首次发布配置。发布工作流在推送符合 SemVer 的 `v*` Git 标签时自动运行。
+本文说明 `.github/workflows/release.yml` 使用的凭据、构建变量、镜像标签和首次发布配置。发布工作流由维护者在 GitHub Actions 中手动启动；工作流先验证目标提交的 CI，再构建并上传全部产物，最后发布 GitHub Release 并创建版本标签。
 
 ## GitHub Actions 凭据
 
@@ -17,6 +17,7 @@
 
 `GITHUB_TOKEN` 不需要手工创建。GitHub 会为每次 workflow 运行自动生成该令牌，工作流按 job 分配以下最小权限：
 
+- 发布校验：`actions: read`、`contents: read`
 - 二进制构建：`contents: read`
 - Docker 构建：`contents: read`、`packages: write`
 - GitHub Release：`contents: write`
@@ -48,9 +49,9 @@ ghcr.io/luoye663/mosdns-controller
 
 | 变量 | 本地默认值 | 发布工作流中的值 | 说明 |
 |---|---|---|---|
-| `PROJECT_VERSION` | `git describe --tags --always --dirty`，失败时为 `dev` | 完整 Git 标签，例如 `v1.2.3` | 显示在两个程序的版本信息中 |
-| `GIT_COMMIT` | 当前短 commit，失败时为 `unknown` | 标签指向的完整 commit | 用于定位构建源码 |
-| `BUILD_TIME` | 当前 UTC 时间，失败时为 `unknown` | 标签 commit 的 ISO 8601 时间 | 使用 commit 时间可使重复构建元数据一致 |
+| `PROJECT_VERSION` | `git describe --tags --always --dirty`，失败时为 `dev` | 手动输入的完整版本，例如 `v1.2.3` | 显示在两个程序的版本信息中 |
+| `GIT_COMMIT` | 当前短 commit，失败时为 `unknown` | 已通过 CI 的目标完整 commit | 用于定位构建源码 |
+| `BUILD_TIME` | 当前 UTC 时间，失败时为 `unknown` | 目标 commit 的 ISO 8601 时间 | 使用 commit 时间可使重复构建元数据一致 |
 | `MOSDNS_BASE` | `v5.3.4` | `v5.3.4` | 声明兼容的 mosdns 基础版本 |
 | `BINARY_GOOS` | 当前 Go 环境的 GOOS，失败时为 `linux` | `linux` | 二进制目标操作系统 |
 | `BINARY_GOARCH` | 当前 Go 环境的 GOARCH，失败时为 `amd64` | matrix 中的 `amd64` 或 `arm64` | 二进制目标架构和归档名的一部分 |
@@ -69,9 +70,9 @@ make binary-package \
 
 生成文件为 `deploy/binary/mosdns-manager-linux-amd64.tar.gz`。构建使用 `CGO_ENABLED=0`、`-trimpath` 和 `-s -w`，两个二进制均注入相同的版本元数据。
 
-上述值是 Make 变量和 Docker build args，不是运行时环境变量，也不应配置为 GitHub secrets。发布工作流会自动从标签和 commit 计算它们。
+上述值是 Make 变量和 Docker build args，不是运行时环境变量，也不应配置为 GitHub secrets。发布工作流会从已校验的版本输入和目标 commit 计算它们。
 
-Docker 镜像使用各自源码的 commit：controller 镜像注入标签指向的主仓库 commit，mosdns 镜像注入根仓库锁定的 `mosdns/` 子模块 commit。这样 `version` 命令可准确定位两个镜像各自的源码。
+Docker 镜像使用各自源码的 commit：controller 镜像注入已通过 CI 的主仓库 commit，mosdns 镜像注入根仓库锁定的 `mosdns/` 子模块 commit。这样 `version` 命令可准确定位两个镜像各自的源码。
 
 发布工作流还会渲染生产 Compose 配置，并生成 `mosdns-manager-docker.tar.gz`。归档包含 `docker-compose.yml`、`.env`、`mosdns/config.yaml`、`controller/config.yaml` 和空的 `secrets/` 目录；`.env` 中的 `MOSDNS_VERSION` 固定为当前 Release 对应的镜像标签。
 
@@ -81,7 +82,9 @@ Docker 镜像使用各自源码的 commit：controller 镜像注入标签指向�
 
 | 配置 | 当前值 | 修改位置 |
 |---|---|---|
-| 触发标签 | `v*`，并严格校验 SemVer | `on.push.tags` 和 `validate` job |
+| 发布入口 | `workflow_dispatch`，输入严格校验的完整 SemVer | `on.workflow_dispatch` 和 `validate` job |
+| 默认分支 | `main` | CI 分支过滤和 Release 校验 |
+| 权威 CI | `.github/workflows/ci.yml` 的 `main` push run | `validate` job |
 | 二进制架构 | `amd64`、`arm64` | `binaries.strategy.matrix.goarch` |
 | 镜像架构 | `linux/amd64,linux/arm64` | 两个 `docker/build-push-action` 的 `platforms` |
 | Go 版本 | `1.26.x` | `actions/setup-go` |
@@ -128,23 +131,32 @@ latest
 
 ## 执行发布
 
-发布前确认主分支代码和子模块引用均已推送，然后创建 annotated tag：
+`.github/workflows/ci.yml` 会在 Pull Request 和 `main` push 时运行。Release 只接受 `main` 当前提交，并要求同一 commit SHA 已存在成功完成的 `main` push CI；分支上其他提交的成功记录不能代替该检查。
 
-```bash
-git status --short
-git submodule status
-git tag -a v1.2.3 -m "Release v1.2.3"
-git push origin v1.2.3
-```
+发布步骤：
+
+1. 确认目标改动和子模块引用已经合并并推送到 `main`，等待该提交的 `CI` workflow 成功。
+2. 打开 GitHub 仓库的 `Actions` -> `Release` -> `Run workflow`。
+3. Branch 选择 `main`，输入完整版本，例如 `v1.2.3` 或 `v1.2.3-rc.1`，然后启动 workflow。
 
 工作流按以下顺序执行：
 
-1. 校验 SemVer 标签。
+1. 校验版本格式、`main` 分支、目标 SHA 的 CI 结果以及已有标签和 Release 状态。
 2. 并行构建 Linux amd64/arm64 二进制包、Docker 部署包和两个多架构镜像。
 3. 同时将镜像推送到 Docker Hub 和 GHCR。
-4. 镜像及所有归档全部成功后，生成 `SHA256SUMS` 并创建 GitHub Release。
+4. 镜像及所有归档全部成功后生成 `SHA256SUMS`，创建或复用相同版本和 SHA 的 draft Release 并上传资产。
+5. 上传成功后发布 draft；版本标签在此最终发布阶段创建，不再由开发者提前推送。
 
-任何 Docker registry 推送失败都会阻止 GitHub Release 创建。修复凭据或仓库权限后，可以在 GitHub Actions 页面重新运行失败的 workflow；相同标签下的镜像标签会重新推送。
+GitHub Release 与外部 registry 无法原子发布。两个 registry 的镜像可能在 GitHub Release 发布前短暂可见，但任何构建或镜像推送失败都会阻止 draft 和版本标签创建。
+
+## 失败恢复
+
+- 无效版本、错误分支或 CI 缺失/未完成/失败：修正输入或等待 CI 后重新启动 Release。
+- runner、网络、registry、构建或资产上传的暂时错误：在原 workflow run 中选择 `Re-run failed jobs`，无需删除标签。
+- 资产上传中断：Release job 会复用版本和目标 SHA 均相同的未发布 draft。
+- workflow 缺陷且尚无 draft 或标签：修复并合并到 `main`，等待新 SHA 的 CI 成功后以相同版本重新启动。
+- 已存在指向其他 SHA 的标签或 draft、或版本已发布：workflow 会拒绝继续。已发布版本不可覆盖、移动或删除；代码修复应发布新的 patch 版本。
+- 仅在确认 draft 尚未发布且远程标签不存在时，才可删除错误 draft 后从修复后的 `main` 重新发布。
 
 ## 发布后检查
 
